@@ -19,7 +19,11 @@ Talos is a Kalshi arbitrage trading system designed for progressive automation.
 2. **Market Data** (Layer 2) — **COMPLETE**
    - `orderbook.py` — pure state machine: `LocalOrderBook` model, `OrderBookManager` (apply snapshot/delta, seq tracking, staleness)
    - `market_feed.py` — async orchestrator: subscribes to markets via WS, routes snapshots/deltas to book manager
-3. **Strategy Engine** — identifies arbitrage opportunities
+3. **Strategy Engine** (Layer 3) — **COMPLETE**
+   - `models/strategy.py` — `ArbPair` and `Opportunity` models
+   - `scanner.py` — pure state machine: `ArbitrageScanner` (pair management, edge detection, opportunity tracking)
+   - `game_manager.py` — async orchestrator: URL parsing, REST event fetch, feed subscription wiring
+   - `market_feed.py` — added `on_book_update` callback (wires scanner.scan to book updates)
 4. **Execution** — places and manages orders
 5. **UI (Textual TUI)** — dashboard for monitoring and manual control
 6. **Automation** — progressively takes over decision-making from the human

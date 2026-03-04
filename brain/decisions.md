@@ -25,3 +25,15 @@ Record significant technical decisions here.
 **Context:** Could have built auth-only, then markets, then orders incrementally across sessions.
 **Decision:** Built the entire REST + WebSocket client (Layer 1) in a single session using subagent-driven development.
 **Rationale:** All endpoints are structurally similar, and the plan was clear. Batching reduces context-switching overhead. 12 tasks, 67 tests, ~30 minutes wall clock.
+
+## 2026-03-03 — Pure state + async orchestrator split for Layer 2
+
+**Context:** OrderBookManager needs to apply snapshots/deltas (pure logic), while MarketFeed needs to subscribe via WS and route messages (async I/O).
+**Decision:** Split into two classes — `OrderBookManager` (pure state machine, no async) and `MarketFeed` (async orchestrator, no state logic).
+**Rationale:** Pure state machine is trivially testable without mocks. Async surface area stays minimal. The hot path (delta application) has zero framework overhead. Tests for each side are simpler and more focused.
+
+## 2026-03-03 — Combine adjacent subagent tasks on same files
+
+**Context:** Tasks 2-4 in the Layer 2 plan all modified `orderbook.py` and `test_orderbook.py`.
+**Decision:** Dispatched a single implementer subagent for all three tasks instead of three separate agents.
+**Rationale:** Multiple agents writing to the same files would cause conflicts. Combining avoids file contention while keeping the spec review meaningful (review covers all three tasks' requirements).
