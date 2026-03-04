@@ -3,6 +3,7 @@
 from talos.models.market import Event, Market, OrderBook, OrderBookLevel, Series, Trade
 from talos.models.order import BatchOrderResult, Fill, Order
 from talos.models.portfolio import Balance, ExchangeStatus, Position, Settlement
+from talos.models.strategy import ArbPair, Opportunity
 from talos.models.ws import (
     OrderBookDelta,
     OrderBookSnapshot,
@@ -13,12 +14,14 @@ from talos.models.ws import (
 )
 
 __all__ = [
+    "ArbPair",
     "Balance",
     "BatchOrderResult",
     "Event",
     "ExchangeStatus",
     "Fill",
     "Market",
+    "Opportunity",
     "Order",
     "OrderBook",
     "OrderBookDelta",
