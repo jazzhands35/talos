@@ -9,7 +9,7 @@ from talos.models.ws import OrderBookSnapshot
 from talos.orderbook import OrderBookManager
 from talos.scanner import ArbitrageScanner
 from talos.ui.app import TalosApp
-from talos.ui.widgets import OpportunitiesTable
+from talos.ui.widgets import AccountPanel, OpportunitiesTable, OrderLog
 
 
 class TestAppMount:
@@ -104,3 +104,52 @@ class TestOpportunitiesTable:
             app.refresh_opportunities()
             await pilot.pause()
             assert table.row_count == 0
+
+
+class TestAccountPanel:
+    async def test_renders_balance(self) -> None:
+        app = TalosApp()
+        async with app.run_test() as pilot:
+            panel = app.query_one(AccountPanel)
+            panel.update_balance(balance_cents=125000, portfolio_cents=210050)
+            await pilot.pause()
+            content = panel.content
+            assert "$1,250.00" in content
+            assert "$2,100.50" in content
+
+    async def test_renders_positions(self) -> None:
+        app = TalosApp()
+        async with app.run_test() as pilot:
+            panel = app.query_one(AccountPanel)
+            panel.update_positions([
+                {"ticker": "GAME-STAN", "qty": 100, "price": 38},
+                {"ticker": "GAME-MIA", "qty": 100, "price": 55},
+            ])
+            await pilot.pause()
+            content = panel.content
+            assert "GAME-STAN" in content
+            assert "100" in content
+
+
+class TestOrderLog:
+    async def test_renders_orders(self) -> None:
+        app = TalosApp()
+        async with app.run_test() as pilot:
+            log = app.query_one(OrderLog)
+            log.update_orders([
+                {"ticker": "GAME-STAN", "side": "no", "price": 38, "count": 100, "status": "resting", "time": "12:33"},
+                {"ticker": "GAME-MIA", "side": "no", "price": 55, "count": 100, "status": "executed", "time": "12:33"},
+            ])
+            await pilot.pause()
+            content = log.content
+            assert "GAME-STAN" in content
+            assert "GAME-MIA" in content
+
+    async def test_empty_orders(self) -> None:
+        app = TalosApp()
+        async with app.run_test() as pilot:
+            log = app.query_one(OrderLog)
+            log.update_orders([])
+            await pilot.pause()
+            content = log.content
+            assert "No orders" in content

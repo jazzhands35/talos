@@ -72,12 +72,70 @@ class OpportunitiesTable(DataTable):
 class AccountPanel(Static):
     """Displays balance and open positions."""
 
+    def __init__(self, **kwargs: object) -> None:
+        super().__init__(**kwargs)
+        self._balance_text = "Cash: —\nPortfolio: —"
+        self._positions_text = ""
+
     def on_mount(self) -> None:
-        self.update("ACCOUNT\n\nCash: —\nPortfolio: —")
+        self._render_content()
+
+    def update_balance(self, balance_cents: int, portfolio_cents: int) -> None:
+        """Update the balance display."""
+        self._balance_text = (
+            f"Cash:      ${balance_cents / 100:,.2f}\n"
+            f"Portfolio: ${portfolio_cents / 100:,.2f}"
+        )
+        self._render_content()
+
+    def update_positions(self, positions: list[dict[str, object]]) -> None:
+        """Update the positions display.
+
+        Each dict has: ticker, qty, price (cents).
+        """
+        if not positions:
+            self._positions_text = ""
+            self._render_content()
+            return
+        lines = []
+        for pos in positions:
+            ticker = pos["ticker"]
+            qty = pos["qty"]
+            price = pos["price"]
+            lines.append(f"  {ticker}  {qty} @ {price}¢")
+        self._positions_text = "\nPOSITIONS\n" + "\n".join(lines)
+        self._render_content()
+
+    def _render_content(self) -> None:
+        self.update(f"ACCOUNT\n\n{self._balance_text}{self._positions_text}")
 
 
 class OrderLog(Static):
     """Scrollable log of recent orders."""
 
+    STATUS_ICONS = {
+        "executed": "✓",
+        "resting": "◷",
+        "cancelled": "✗",
+    }
+
     def on_mount(self) -> None:
         self.update("ORDERS\n\nNo orders yet")
+
+    def update_orders(self, orders: list[dict[str, object]]) -> None:
+        """Update the order log display.
+
+        Each dict has: ticker, side, price, count, status, time.
+        """
+        if not orders:
+            self.update("ORDERS\n\nNo orders yet")
+            return
+        lines = []
+        for order in orders:
+            icon = self.STATUS_ICONS.get(str(order["status"]), "?")
+            side = str(order["side"]).upper()
+            lines.append(
+                f"  {order['time']}  BUY {side} {order['ticker']}  "
+                f"{order['price']}¢ x{order['count']}  {icon}"
+            )
+        self.update("ORDERS\n\n" + "\n".join(lines))
