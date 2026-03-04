@@ -54,6 +54,10 @@ class GameManager:
     async def add_game(self, url_or_ticker: str) -> ArbPair:
         """Set up monitoring for a game from a URL or event ticker."""
         ticker = parse_kalshi_url(url_or_ticker)
+
+        if ticker in self._games:
+            return self._games[ticker]
+
         event = await self._rest.get_event(ticker, with_nested_markets=True)
 
         if len(event.markets) != 2:

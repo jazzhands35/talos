@@ -70,6 +70,12 @@ class ArbitrageScanner:
         book_b = self._books.get_book(pair.ticker_b)
         if (book_a and book_a.stale) or (book_b and book_b.stale):
             self._opportunities.pop(pair.event_ticker, None)
+            logger.warning(
+                "scanner_stale_book_skip",
+                event_ticker=pair.event_ticker,
+                stale_a=bool(book_a and book_a.stale),
+                stale_b=bool(book_b and book_b.stale),
+            )
             return
 
         raw_edge = bid_a.price + bid_b.price - 100

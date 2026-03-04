@@ -169,6 +169,18 @@ class TestGameManager:
         mock_scanner.remove_pair.assert_called_once_with("EVT-1")  # type: ignore[union-attr]
         assert mock_feed.unsubscribe.call_count == 2  # type: ignore[union-attr]
 
+    async def test_duplicate_add_game_is_noop(
+        self,
+        manager: GameManager,
+        mock_rest: KalshiRESTClient,
+    ) -> None:
+        event = self._make_event("EVT-1", ["TICK-A", "TICK-B"])
+        mock_rest.get_event.return_value = event  # type: ignore[union-attr]
+        pair1 = await manager.add_game("EVT-1")
+        pair2 = await manager.add_game("EVT-1")
+        assert pair1 == pair2
+        mock_rest.get_event.assert_called_once()  # type: ignore[union-attr]
+
     async def test_active_games(
         self,
         manager: GameManager,
