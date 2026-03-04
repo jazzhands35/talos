@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import pytest
-
 from talos.models.strategy import Opportunity
 from talos.models.ws import OrderBookSnapshot
 from talos.orderbook import OrderBookManager
@@ -15,12 +13,12 @@ from talos.ui.widgets import AccountPanel, OpportunitiesTable, OrderLog
 class TestAppMount:
     async def test_app_mounts_without_error(self) -> None:
         app = TalosApp()
-        async with app.run_test() as pilot:
+        async with app.run_test():
             assert app.query_one("#opportunities-table") is not None
 
     async def test_app_has_header_and_footer(self) -> None:
         app = TalosApp()
-        async with app.run_test() as pilot:
+        async with app.run_test():
             from textual.widgets import Footer, Header
 
             assert len(app.query(Header)) == 1
@@ -28,7 +26,7 @@ class TestAppMount:
 
     async def test_app_has_bottom_panels(self) -> None:
         app = TalosApp()
-        async with app.run_test() as pilot:
+        async with app.run_test():
             assert app.query_one("#account-panel") is not None
             assert app.query_one("#order-log") is not None
 
@@ -113,7 +111,7 @@ class TestAccountPanel:
             panel = app.query_one(AccountPanel)
             panel.update_balance(balance_cents=125000, portfolio_cents=210050)
             await pilot.pause()
-            content = panel.content
+            content = str(panel.content)
             assert "$1,250.00" in content
             assert "$2,100.50" in content
 
@@ -121,12 +119,14 @@ class TestAccountPanel:
         app = TalosApp()
         async with app.run_test() as pilot:
             panel = app.query_one(AccountPanel)
-            panel.update_positions([
-                {"ticker": "GAME-STAN", "qty": 100, "price": 38},
-                {"ticker": "GAME-MIA", "qty": 100, "price": 55},
-            ])
+            panel.update_positions(
+                [
+                    {"ticker": "GAME-STAN", "qty": 100, "price": 38},
+                    {"ticker": "GAME-MIA", "qty": 100, "price": 55},
+                ]
+            )
             await pilot.pause()
-            content = panel.content
+            content = str(panel.content)
             assert "GAME-STAN" in content
             assert "100" in content
 
@@ -136,12 +136,28 @@ class TestOrderLog:
         app = TalosApp()
         async with app.run_test() as pilot:
             log = app.query_one(OrderLog)
-            log.update_orders([
-                {"ticker": "GAME-STAN", "side": "no", "price": 38, "count": 100, "status": "resting", "time": "12:33"},
-                {"ticker": "GAME-MIA", "side": "no", "price": 55, "count": 100, "status": "executed", "time": "12:33"},
-            ])
+            log.update_orders(
+                [
+                    {
+                        "ticker": "GAME-STAN",
+                        "side": "no",
+                        "price": 38,
+                        "count": 100,
+                        "status": "resting",
+                        "time": "12:33",
+                    },
+                    {
+                        "ticker": "GAME-MIA",
+                        "side": "no",
+                        "price": 55,
+                        "count": 100,
+                        "status": "executed",
+                        "time": "12:33",
+                    },
+                ]
+            )
             await pilot.pause()
-            content = log.content
+            content = str(log.content)
             assert "GAME-STAN" in content
             assert "GAME-MIA" in content
 
@@ -151,7 +167,7 @@ class TestOrderLog:
             log = app.query_one(OrderLog)
             log.update_orders([])
             await pilot.pause()
-            content = log.content
+            content = str(log.content)
             assert "No orders" in content
 
 

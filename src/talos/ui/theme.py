@@ -21,29 +21,44 @@ MAUVE = "#cba6f7"
 PEACH = "#fab387"
 LAVENDER = "#b4befe"
 
-APP_CSS = """
+APP_CSS = (
+    """
 Screen {
-    background: """ + BASE + """;
-    color: """ + TEXT + """;
+    background: """
+    + BASE
+    + """;
+    color: """
+    + TEXT
+    + """;
 }
 
 Header {
-    background: """ + MANTLE + """;
-    color: """ + BLUE + """;
+    background: """
+    + MANTLE
+    + """;
+    color: """
+    + BLUE
+    + """;
     dock: top;
     height: 1;
 }
 
 Footer {
-    background: """ + MANTLE + """;
+    background: """
+    + MANTLE
+    + """;
     dock: bottom;
 }
 
 #opportunities-table {
     height: 1fr;
     min-height: 8;
-    border: solid """ + SURFACE1 + """;
-    background: """ + BASE + """;
+    border: solid """
+    + SURFACE1
+    + """;
+    background: """
+    + BASE
+    + """;
 }
 
 #bottom-panels {
@@ -54,8 +69,12 @@ Footer {
 
 #account-panel {
     width: 2fr;
-    border: solid """ + SURFACE1 + """;
-    background: """ + SURFACE0 + """;
+    border: solid """
+    + SURFACE1
+    + """;
+    background: """
+    + SURFACE0
+    + """;
     padding: 0 1;
     height: auto;
     max-height: 12;
@@ -63,44 +82,64 @@ Footer {
 
 #order-log {
     width: 3fr;
-    border: solid """ + SURFACE1 + """;
-    background: """ + SURFACE0 + """;
+    border: solid """
+    + SURFACE1
+    + """;
+    background: """
+    + SURFACE0
+    + """;
     padding: 0 1;
     height: auto;
     max-height: 12;
 }
 
 .panel-title {
-    color: """ + BLUE + """;
+    color: """
+    + BLUE
+    + """;
     text-style: bold;
 }
 
 .dim-row {
-    color: """ + OVERLAY0 + """;
+    color: """
+    + OVERLAY0
+    + """;
 }
 
 .edge-positive {
-    color: """ + GREEN + """;
+    color: """
+    + GREEN
+    + """;
 }
 
 .status-connected {
-    color: """ + GREEN + """;
+    color: """
+    + GREEN
+    + """;
 }
 
 .status-disconnected {
-    color: """ + RED + """;
+    color: """
+    + RED
+    + """;
 }
 
 .order-filled {
-    color: """ + GREEN + """;
+    color: """
+    + GREEN
+    + """;
 }
 
 .order-open {
-    color: """ + YELLOW + """;
+    color: """
+    + YELLOW
+    + """;
 }
 
 .order-cancelled {
-    color: """ + RED + """;
+    color: """
+    + RED
+    + """;
 }
 
 /* Modal styling */
@@ -112,8 +151,12 @@ ModalScreen {
     width: 60;
     height: auto;
     max-height: 80%;
-    border: thick """ + SURFACE1 + """;
-    background: """ + SURFACE0 + """;
+    border: thick """
+    + SURFACE1
+    + """;
+    background: """
+    + SURFACE0
+    + """;
     padding: 1 2;
 }
 
@@ -142,13 +185,18 @@ ModalScreen {
 }
 
 .modal-title {
-    color: """ + BLUE + """;
+    color: """
+    + BLUE
+    + """;
     text-style: bold;
     margin: 0 0 1 0;
 }
 
 .modal-error {
-    color: """ + RED + """;
+    color: """
+    + RED
+    + """;
     margin: 0 0 1 0;
 }
 """
+)

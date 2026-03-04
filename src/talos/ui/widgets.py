@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 from textual.widgets import DataTable, Static
 
 from talos.scanner import ArbitrageScanner
@@ -29,9 +31,7 @@ class OpportunitiesTable(DataTable):
     def on_mount(self) -> None:
         self.cursor_type = "row"
         self.zebra_stripes = True
-        self.add_columns(
-            "Event", "NO-A", "NO-B", "Cost", "Edge", "Qty", "Profit", ""
-        )
+        self.add_columns("Event", "NO-A", "NO-B", "Cost", "Edge", "Qty", "Profit", "")
 
     def refresh_from_scanner(self, scanner: ArbitrageScanner | None) -> None:
         """Rebuild table rows from current scanner opportunities."""
@@ -44,7 +44,8 @@ class OpportunitiesTable(DataTable):
 
         # Remove vanished rows
         for key in current_keys - new_keys:
-            self.remove_row(key)
+            if key is not None:
+                self.remove_row(key)
 
         # Add or update rows
         for opp in opps:
@@ -72,7 +73,7 @@ class OpportunitiesTable(DataTable):
 class AccountPanel(Static):
     """Displays balance and open positions."""
 
-    def __init__(self, **kwargs: object) -> None:
+    def __init__(self, **kwargs: Any) -> None:
         super().__init__(**kwargs)
         self._balance_text = "Cash: —\nPortfolio: —"
         self._positions_text = ""
@@ -83,8 +84,7 @@ class AccountPanel(Static):
     def update_balance(self, balance_cents: int, portfolio_cents: int) -> None:
         """Update the balance display."""
         self._balance_text = (
-            f"Cash:      ${balance_cents / 100:,.2f}\n"
-            f"Portfolio: ${portfolio_cents / 100:,.2f}"
+            f"Cash:      ${balance_cents / 100:,.2f}\nPortfolio: ${portfolio_cents / 100:,.2f}"
         )
         self._render_content()
 

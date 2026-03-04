@@ -94,10 +94,12 @@ class BidScreen(ModalScreen[dict[str, object] | None]):
                     f"Quantity must be 1-{self._opp.tradeable_qty}"
                 )
                 return
-            self.dismiss({
-                "ticker_a": self._opp.ticker_a,
-                "ticker_b": self._opp.ticker_b,
-                "no_a": self._opp.no_a,
-                "no_b": self._opp.no_b,
-                "qty": qty,
-            })
+            self.dismiss(
+                {
+                    "ticker_a": self._opp.ticker_a,
+                    "ticker_b": self._opp.ticker_b,
+                    "no_a": self._opp.no_a,
+                    "no_b": self._opp.no_b,
+                    "qty": qty,
+                }
+            )
