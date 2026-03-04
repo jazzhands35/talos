@@ -1,0 +1,27 @@
+# Decisions
+
+Record significant technical decisions here.
+
+## 2026-03-03 — Fresh start, no Autopilot code
+
+**Context:** Previous Kalshi bot (Autopilot) exists but has architectural issues.
+**Decision:** Build Talos from scratch. No code sharing with Autopilot.
+**Consequences:** Slower initial setup, but cleaner architecture without legacy debt.
+
+## 2026-03-03 — Python + Textual TUI
+
+**Context:** Needed to choose language and UI approach.
+**Decision:** Python 3.12+ with Textual for terminal UI.
+**Rationale:** Python has the best trading ecosystem. Textual provides a rich dashboard without browser complexity. Function over form.
+
+## 2026-03-03 — Drop TCH ruff rules
+
+**Context:** Ruff's TCH (type-checking) rules (TC001, TC003) flag imports used in `__init__` parameter types and function bodies, suggesting they move to `TYPE_CHECKING` blocks. But these imports are used at runtime, not just for annotations.
+**Decision:** Removed `"TCH"` from ruff lint select in `pyproject.toml`.
+**Rationale:** False positives outweigh the benefit. With `from __future__ import annotations` already used, the TCH rules aggressively flag runtime imports that would break if moved.
+
+## 2026-03-03 — Full API client in one pass
+
+**Context:** Could have built auth-only, then markets, then orders incrementally across sessions.
+**Decision:** Built the entire REST + WebSocket client (Layer 1) in a single session using subagent-driven development.
+**Rationale:** All endpoints are structurally similar, and the plan was clear. Batching reduces context-switching overhead. 12 tasks, 67 tests, ~30 minutes wall clock.
