@@ -132,3 +132,46 @@ class TestCallbackRegistration:
         mock_ws.on_message.assert_called_once()  # type: ignore[union-attr]
         call_args = mock_ws.on_message.call_args  # type: ignore[union-attr]
         assert call_args[0][0] == _ORDERBOOK_CHANNEL
+
+
+class TestOnBookUpdate:
+    async def test_callback_fires_after_snapshot(
+        self, feed: MarketFeed, mock_ws: KalshiWSClient, mock_books: OrderBookManager
+    ) -> None:
+        callback = MagicMock()
+        feed.on_book_update = callback
+        snapshot = OrderBookSnapshot(
+            market_ticker="MKT-1",
+            market_id="uuid-1",
+            yes=[[65, 100]],
+            no=[[35, 50]],
+        )
+        await feed._on_message(snapshot, sid=1, seq=1)
+        callback.assert_called_once_with("MKT-1")
+
+    async def test_callback_fires_after_delta(
+        self, feed: MarketFeed, mock_ws: KalshiWSClient, mock_books: OrderBookManager
+    ) -> None:
+        callback = MagicMock()
+        feed.on_book_update = callback
+        delta = OrderBookDelta(
+            market_ticker="MKT-1",
+            market_id="uuid-1",
+            price=65,
+            delta=150,
+            side="yes",
+            ts="2026-03-03T12:00:00Z",
+        )
+        await feed._on_message(delta, sid=1, seq=2)
+        callback.assert_called_once_with("MKT-1")
+
+    async def test_no_callback_no_error(
+        self, feed: MarketFeed, mock_books: OrderBookManager
+    ) -> None:
+        snapshot = OrderBookSnapshot(
+            market_ticker="MKT-1",
+            market_id="uuid-1",
+            yes=[[65, 100]],
+            no=[[35, 50]],
+        )
+        await feed._on_message(snapshot, sid=1, seq=1)

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
+
 import structlog
 
 from talos.models.ws import OrderBookDelta, OrderBookSnapshot
@@ -30,6 +32,7 @@ class MarketFeed:
         self._subscribed_tickers: set[str] = set()
         self._ticker_to_sid: dict[str, int] = {}
         self._ws.on_message(_ORDERBOOK_CHANNEL, self._on_message)
+        self.on_book_update: Callable[[str], None] | None = None
 
     async def _on_message(
         self,
@@ -50,6 +53,9 @@ class MarketFeed:
             logger.info("market_feed_snapshot", ticker=ticker)
         elif isinstance(msg, OrderBookDelta):
             self._books.apply_delta(ticker, msg, seq=seq)
+
+        if self.on_book_update:
+            self.on_book_update(ticker)
 
     async def subscribe(self, ticker: str) -> None:
         """Subscribe to orderbook updates for a ticker."""
