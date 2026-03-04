@@ -176,3 +176,50 @@ class TestAddGamesModal:
             await pilot.press("escape")
             await pilot.pause()
             assert not isinstance(app.screen, AddGamesScreen)
+
+
+class TestBidModal:
+    async def test_bid_modal_shows_opportunity_data(self) -> None:
+        from talos.ui.screens import BidScreen
+
+        opp = Opportunity(
+            event_ticker="EVT-STANMIA",
+            ticker_a="GAME-STAN",
+            ticker_b="GAME-MIA",
+            no_a=38,
+            no_b=55,
+            qty_a=100,
+            qty_b=200,
+            raw_edge=7,
+            tradeable_qty=100,
+            timestamp="2026-03-04T12:00:00Z",
+        )
+        app = TalosApp()
+        async with app.run_test() as pilot:
+            app.push_screen(BidScreen(opp))
+            await pilot.pause()
+            assert isinstance(app.screen, BidScreen)
+
+    async def test_bid_modal_cancel(self) -> None:
+        from talos.ui.screens import BidScreen
+
+        opp = Opportunity(
+            event_ticker="EVT-STANMIA",
+            ticker_a="GAME-STAN",
+            ticker_b="GAME-MIA",
+            no_a=38,
+            no_b=55,
+            qty_a=100,
+            qty_b=200,
+            raw_edge=7,
+            tradeable_qty=100,
+            timestamp="2026-03-04T12:00:00Z",
+        )
+        app = TalosApp()
+        async with app.run_test() as pilot:
+            app.push_screen(BidScreen(opp))
+            await pilot.pause()
+            assert isinstance(app.screen, BidScreen)
+            await pilot.press("escape")
+            await pilot.pause()
+            assert not isinstance(app.screen, BidScreen)
