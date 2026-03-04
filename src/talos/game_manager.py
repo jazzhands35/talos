@@ -57,9 +57,7 @@ class GameManager:
         event = await self._rest.get_event(ticker, with_nested_markets=True)
 
         if len(event.markets) != 2:
-            raise ValueError(
-                f"Event {ticker} has {len(event.markets)} markets, expected exactly 2"
-            )
+            raise ValueError(f"Event {ticker} has {len(event.markets)} markets, expected exactly 2")
 
         ticker_a = event.markets[0].ticker
         ticker_b = event.markets[1].ticker

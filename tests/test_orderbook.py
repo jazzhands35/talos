@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Literal
+
 import pytest
 
 from talos.models.ws import OrderBookDelta, OrderBookSnapshot
@@ -115,7 +117,7 @@ class TestApplyDelta:
         return mgr
 
     def _make_delta(
-        self, *, price: int, delta: int, side: str, ticker: str = "MKT-1"
+        self, *, price: int, delta: int, side: Literal["yes", "no"], ticker: str = "MKT-1"
     ) -> OrderBookDelta:
         return OrderBookDelta(
             market_ticker=ticker,
