@@ -28,6 +28,8 @@ class ArbitrageScanner:
 
     def add_pair(self, event_ticker: str, ticker_a: str, ticker_b: str) -> None:
         """Register a pair of markets to monitor."""
+        if any(p.event_ticker == event_ticker for p in self._pairs):
+            return
         pair = ArbPair(event_ticker=event_ticker, ticker_a=ticker_a, ticker_b=ticker_b)
         self._pairs.append(pair)
         self._pairs_by_ticker.setdefault(ticker_a, []).append(pair)

@@ -46,6 +46,20 @@ class TestPairManagement:
         scanner.remove_pair("EVT-NOPE")
         assert len(scanner.pairs) == 0
 
+    def test_duplicate_add_pair_is_noop(self, scanner: ArbitrageScanner) -> None:
+        scanner.add_pair("EVT-1", "TICK-A", "TICK-B")
+        scanner.add_pair("EVT-1", "TICK-A", "TICK-B")
+        assert len(scanner.pairs) == 1
+
+    def test_remove_pair_cleans_up_scan(self) -> None:
+        manager = OrderBookManager()
+        scanner = ArbitrageScanner(manager)
+        scanner.add_pair("EVT-1", "GAME-STAN", "GAME-MIA")
+        _setup_books(manager, bid_a=62, qty_a=100, bid_b=45, qty_b=200)
+        scanner.remove_pair("EVT-1")
+        scanner.scan("GAME-STAN")
+        assert len(scanner.opportunities) == 0
+
 
 class TestScanFindsOpportunity:
     @pytest.fixture()
