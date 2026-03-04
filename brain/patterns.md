@@ -129,7 +129,27 @@ async def add_game(self, url_or_ticker: str) -> ArbPair:
 
 Prevents redundant I/O (REST calls, WS subscribes) and duplicate state. Applied in both `ArbitrageScanner.add_pair` and `GameManager.add_game`.
 
+## TUI dependency injection
+
+The Textual app accepts optional dependencies for testability:
+
+```python
+class TalosApp(App):
+    def __init__(self, *, scanner=None, game_manager=None, rest_client=None):
+        super().__init__()
+        self._scanner = scanner
+        # ...
+
+    def on_mount(self):
+        self.set_interval(0.5, self.refresh_opportunities)
+        if self._rest is not None:  # conditional — only in production
+            self.set_interval(10.0, self.refresh_account)
+```
+
+Tests inject only what they need (usually just `scanner`). Production (`__main__.py`) wires the full chain. Conditional timers keep tests fast — no REST polling in headless mode.
+
 ## Windows development
 
 - Run pytest via `.venv/Scripts/python -m pytest` (not bare `pytest`, not on PATH in Git Bash)
 - Compare `Path` objects directly, not `str(path)` (Windows uses backslashes)
+- When using git worktrees with a shared `.venv`, run `pip install -e .` from the worktree directory so the editable install points to the worktree's `src/`

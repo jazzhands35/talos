@@ -41,3 +41,5 @@
 - **Textual 8 `Static.content`:** Use `str(widget.content)` to get the text — `widget.renderable` was removed in Textual 8.
 - **Textual 8 modal queries:** Use `isinstance(app.screen, ScreenClass)` to check active screen, not `app.query(ScreenClass)` which only searches the widget tree.
 - **Textual `@work` import:** In Textual 8, use `from textual import work`, not `from textual.work import work`.
+- **Textual ModalScreen escape:** `ModalScreen` has no default escape binding. Add `BINDINGS = [("escape", "cancel", "Cancel")]` and `action_cancel` to every modal, or users can't dismiss with Escape.
+- **Textual headless `pilot.click()`:** In headless test mode, `pilot.click("#id")` is unreliable for elements inside modal overlays (coordinate resolution issues). Use keyboard interaction (`pilot.press("escape")`, `pilot.press("tab")`) instead.
