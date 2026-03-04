@@ -25,7 +25,12 @@ Talos is a Kalshi arbitrage trading system designed for progressive automation.
    - `game_manager.py` — async orchestrator: URL parsing, REST event fetch, feed subscription wiring
    - `market_feed.py` — added `on_book_update` callback (wires scanner.scan to book updates)
 4. **Execution** — places and manages orders
-5. **UI (Textual TUI)** — dashboard for monitoring and manual control
+5. **UI (Textual TUI)** (Layer 5) — **COMPLETE**
+   - `ui/theme.py` — Catppuccin Mocha color palette and TCSS
+   - `ui/widgets.py` — OpportunitiesTable (DataTable), AccountPanel, OrderLog
+   - `ui/screens.py` — AddGamesScreen, BidScreen (ModalScreens)
+   - `ui/app.py` — TalosApp orchestrator (startup, timers, event handling)
+   - `__main__.py` — entry point: `python -m talos`
 6. **Automation** — progressively takes over decision-making from the human
 
 ## Key Technical Decisions
