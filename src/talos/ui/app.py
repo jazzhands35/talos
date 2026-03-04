@@ -7,6 +7,7 @@ from textual.containers import Horizontal
 from textual.widgets import Footer, Header
 
 from talos.scanner import ArbitrageScanner
+from talos.ui.screens import AddGamesScreen
 from talos.ui.theme import APP_CSS
 from talos.ui.widgets import AccountPanel, OpportunitiesTable, OrderLog
 
@@ -44,7 +45,8 @@ class TalosApp(App):
         table.refresh_from_scanner(self._scanner)
 
     def action_add_games(self) -> None:
-        """Placeholder — will open Add Games modal."""
+        """Open the Add Games modal."""
+        self.push_screen(AddGamesScreen())
 
     def action_remove_game(self) -> None:
         """Placeholder — will remove selected game."""

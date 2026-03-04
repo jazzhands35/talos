@@ -153,3 +153,26 @@ class TestOrderLog:
             await pilot.pause()
             content = log.content
             assert "No orders" in content
+
+
+class TestAddGamesModal:
+    async def test_modal_opens_on_a_key(self) -> None:
+        from talos.ui.screens import AddGamesScreen
+
+        app = TalosApp()
+        async with app.run_test() as pilot:
+            await pilot.press("a")
+            await pilot.pause()
+            assert isinstance(app.screen, AddGamesScreen)
+
+    async def test_modal_closes_on_escape(self) -> None:
+        from talos.ui.screens import AddGamesScreen
+
+        app = TalosApp()
+        async with app.run_test() as pilot:
+            await pilot.press("a")
+            await pilot.pause()
+            assert isinstance(app.screen, AddGamesScreen)
+            await pilot.press("escape")
+            await pilot.pause()
+            assert not isinstance(app.screen, AddGamesScreen)
