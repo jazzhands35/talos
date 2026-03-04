@@ -37,5 +37,8 @@ htmlcov/
 .pyright/
 .mypy_cache/
 
+# Worktrees
+.worktrees/
+
 # uv
 uv.lock
