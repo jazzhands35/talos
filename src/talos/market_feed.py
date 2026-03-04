@@ -10,6 +10,8 @@ from talos.ws_client import KalshiWSClient
 
 logger = structlog.get_logger()
 
+_ORDERBOOK_CHANNEL = "orderbook_delta"
+
 
 class MarketFeed:
     """Subscribes to markets via WebSocket, feeds OrderBookManager.
@@ -27,7 +29,7 @@ class MarketFeed:
         self._books = book_manager
         self._subscribed_tickers: set[str] = set()
         self._ticker_to_sid: dict[str, int] = {}
-        self._ws.on_message("orderbook_delta", self._on_message)
+        self._ws.on_message(_ORDERBOOK_CHANNEL, self._on_message)
 
     async def _on_message(
         self,
@@ -51,7 +53,7 @@ class MarketFeed:
 
     async def subscribe(self, ticker: str) -> None:
         """Subscribe to orderbook updates for a ticker."""
-        await self._ws.subscribe("orderbook_delta", ticker)
+        await self._ws.subscribe(_ORDERBOOK_CHANNEL, ticker)
         self._subscribed_tickers.add(ticker)
         logger.info("market_feed_subscribe", ticker=ticker)
 

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Literal
+
 from pydantic import BaseModel
 
 
@@ -21,7 +23,7 @@ class OrderBookDelta(BaseModel):
     market_id: str
     price: int
     delta: int
-    side: str
+    side: Literal["yes", "no"]
     ts: str
     price_dollars: float | None = None
     delta_fp: str | None = None
@@ -47,7 +49,7 @@ class TradeMessage(BaseModel):
     market_ticker: str
     price: int
     count: int
-    side: str
+    side: Literal["yes", "no"]
     ts: str
     trade_id: str
 

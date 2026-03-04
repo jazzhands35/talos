@@ -6,7 +6,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from talos.market_feed import MarketFeed
+from talos.market_feed import _ORDERBOOK_CHANNEL, MarketFeed
 from talos.models.ws import OrderBookDelta, OrderBookSnapshot
 from talos.orderbook import OrderBookManager
 from talos.ws_client import KalshiWSClient
@@ -131,4 +131,4 @@ class TestCallbackRegistration:
         MarketFeed(ws_client=mock_ws, book_manager=mgr)
         mock_ws.on_message.assert_called_once()  # type: ignore[union-attr]
         call_args = mock_ws.on_message.call_args  # type: ignore[union-attr]
-        assert call_args[0][0] == "orderbook_delta"
+        assert call_args[0][0] == _ORDERBOOK_CHANNEL

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import bisect
+
 import structlog
 from pydantic import BaseModel
 
@@ -9,6 +11,15 @@ from talos.models.market import OrderBookLevel
 from talos.models.ws import OrderBookDelta, OrderBookSnapshot
 
 logger = structlog.get_logger()
+
+
+def _parse_levels_sorted(raw: list[list[int]]) -> list[OrderBookLevel]:
+    """Parse raw [[price, qty], ...] into OrderBookLevel list, sorted descending by price."""
+    return sorted(
+        (OrderBookLevel(price=p, quantity=q) for p, q in raw),
+        key=lambda lvl: lvl.price,
+        reverse=True,
+    )
 
 
 class LocalOrderBook(BaseModel):
@@ -33,16 +44,8 @@ class OrderBookManager:
 
     def apply_snapshot(self, ticker: str, snapshot: OrderBookSnapshot) -> None:
         """Replace entire book for a ticker. Resets seq and stale flag."""
-        yes_levels = sorted(
-            [OrderBookLevel(price=p, quantity=q) for p, q in snapshot.yes],
-            key=lambda lvl: lvl.price,
-            reverse=True,
-        )
-        no_levels = sorted(
-            [OrderBookLevel(price=p, quantity=q) for p, q in snapshot.no],
-            key=lambda lvl: lvl.price,
-            reverse=True,
-        )
+        yes_levels = _parse_levels_sorted(snapshot.yes)
+        no_levels = _parse_levels_sorted(snapshot.no)
         self._books[ticker] = LocalOrderBook(
             ticker=ticker,
             yes=yes_levels,
@@ -90,12 +93,12 @@ class OrderBookManager:
             if idx is not None:
                 side_levels.pop(idx)
         elif idx is not None:
-            # Update existing level
-            side_levels[idx] = OrderBookLevel(price=delta.price, quantity=delta.delta)
+            # Update existing level in place
+            side_levels[idx].quantity = delta.delta
         else:
-            # Insert new level, maintain descending sort
-            side_levels.append(OrderBookLevel(price=delta.price, quantity=delta.delta))
-            side_levels.sort(key=lambda lvl: lvl.price, reverse=True)
+            # Insert new level, maintain descending sort via bisect
+            new_level = OrderBookLevel(price=delta.price, quantity=delta.delta)
+            bisect.insort(side_levels, new_level, key=lambda lvl: -lvl.price)
 
         logger.debug(
             "orderbook_delta_applied",
