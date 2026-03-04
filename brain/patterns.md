@@ -92,6 +92,43 @@ ws.listen = AsyncMock()
 - Override async methods with `AsyncMock()` individually
 - Assert on `.assert_called_once_with(...)` for exact argument verification
 
+## Callback-based layer decoupling
+
+Wire layers together without direct module dependencies using optional callbacks:
+
+```python
+# MarketFeed has a generic hook:
+self.on_book_update: Callable[[str], None] | None = None
+
+# After applying snapshot/delta:
+if self.on_book_update:
+    self.on_book_update(ticker)
+
+# Wiring at startup:
+feed.on_book_update = scanner.scan
+```
+
+The callback attribute is `None` by default (safe to ignore in tests). The consumer provides a plain method reference. No event bus, no pub/sub library — just a function pointer.
+
+## Duplicate guard with early return
+
+For idempotent registration methods, check if the entity already exists and return early:
+
+```python
+def add_pair(self, event_ticker: str, ...) -> None:
+    if any(p.event_ticker == event_ticker for p in self._pairs):
+        return
+    # ... register
+
+async def add_game(self, url_or_ticker: str) -> ArbPair:
+    ticker = parse_kalshi_url(url_or_ticker)
+    if ticker in self._games:
+        return self._games[ticker]
+    # ... fetch and register
+```
+
+Prevents redundant I/O (REST calls, WS subscribes) and duplicate state. Applied in both `ArbitrageScanner.add_pair` and `GameManager.add_game`.
+
 ## Windows development
 
 - Run pytest via `.venv/Scripts/python -m pytest` (not bare `pytest`, not on PATH in Git Bash)

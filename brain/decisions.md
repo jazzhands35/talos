@@ -32,6 +32,18 @@ Record significant technical decisions here.
 **Decision:** Split into two classes — `OrderBookManager` (pure state machine, no async) and `MarketFeed` (async orchestrator, no state logic).
 **Rationale:** Pure state machine is trivially testable without mocks. Async surface area stays minimal. The hot path (delta application) has zero framework overhead. Tests for each side are simpler and more focused.
 
+## 2026-03-04 — Fee-agnostic scanner for Layer 3
+
+**Context:** The scanner detects NO+NO arbitrage opportunities. Kalshi charges fees that reduce the real edge.
+**Decision:** Scanner reports raw edges only. Fee calculation and filtering is a separate downstream concern.
+**Rationale:** Keeps the scanner simple and reusable. Fee structures may change or vary by market. The operator or a downstream policy module can filter opportunities by net-of-fee profitability.
+
+## 2026-03-04 — Reused pure state + async orchestrator for Layer 3
+
+**Context:** Layer 3 has the same split: pure logic (edge detection) vs async I/O (REST fetch, WS subscribe).
+**Decision:** `ArbitrageScanner` = pure state machine, `GameManager` = async orchestrator. Identical to the Layer 2 `OrderBookManager`/`MarketFeed` split.
+**Rationale:** The pattern proved effective in Layer 2. Consistent architecture across layers reduces cognitive load. Scanner's 17 tests need zero mocks.
+
 ## 2026-03-03 — Combine adjacent subagent tasks on same files
 
 **Context:** Tasks 2-4 in the Layer 2 plan all modified `orderbook.py` and `test_orderbook.py`.
