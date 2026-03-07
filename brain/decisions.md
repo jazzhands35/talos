@@ -6,7 +6,7 @@ Record significant technical decisions here.
 
 **Context:** OrderBookManager needs to apply snapshots/deltas (pure logic), while MarketFeed needs to subscribe via WS and route messages (async I/O).
 **Decision:** Split into two classes — pure state machine (no async) and async orchestrator (no state logic). Applied in Layer 2 (OrderBookManager/MarketFeed) and reused in Layer 3 (ArbitrageScanner/GameManager).
-**Rationale:** Pure state machine is trivially testable without mocks. Async surface area stays minimal. See [[patterns#Pure state + async orchestrator split]] and [[principles#14. Test Purity Drives Architecture]].
+**Rationale:** Pure state machine is trivially testable without mocks. Async surface area stays minimal. See [[patterns#Pure state + async orchestrator split]] and [[principles#13. Test Purity Drives Architecture]].
 
 ## 2026-03-06 — Fee model and scanner integration
 
@@ -25,3 +25,15 @@ Record significant technical decisions here.
 **Context:** Games added via the TUI are lost on restart. Need persistence without coupling GameManager to filesystem.
 **Decision:** Persist only event tickers to `games.json`. On startup, re-add via the normal `add_game` flow (REST fetch + WS subscribe). `GameManager.on_change` callback fires on add/remove/clear; `__main__.py` wires it to `save_games`.
 **Rationale:** Persisting tickers (not full pair data) ensures state is always fresh from the API. The callback pattern (see [[patterns#Callback-based layer decoupling]]) keeps GameManager testable without filesystem mocks.
+
+## 2026-03-07 — scenario_pnl uses total costs, not per-contract averages
+
+**Context:** GTD profit display showed $16 when actual Kalshi payout was $10.21 (~$6 discrepancy). Root cause: `scenario_pnl` received per-contract averages computed via integer division (`total_fill_cost // filled`), which truncated remainders. At 1400 contracts with avg 49.58¢ truncated to 49¢, cost underestimated by 0.58¢ × 1400 = $8.12.
+**Decision:** Changed `scenario_pnl` signature to accept `total_cost_a`/`total_cost_b` (exact sums) instead of per-contract averages. Added `total_fill_cost` field to `LegSummary` so exact costs flow through the entire pipeline. GTD display changed from `:.0f` to `:.2f` for cent-accurate amounts.
+**Rationale:** Financial calculations must carry exact values as deep as possible. Integer division truncation compounds linearly with contract count. See [[patterns#Financial calculation precision]].
+
+## 2026-03-07 — Bid modal falls back to all_snapshots
+
+**Context:** After placing orders, users couldn't reopen the bid modal on the same game. `on_data_table_row_selected` called `scanner.get_opportunity()` which only returns pairs with positive raw edge. After fills move the market, edge drops to 0 or negative — the row stays visible (from `all_snapshots`) but clicking it silently did nothing.
+**Decision:** Fall back to `scanner.all_snapshots` when `get_opportunity()` returns None. See [[codebase/index#Gotchas]] "Don't gate UI actions on volatile data."
+**Rationale:** The table is built from `all_snapshots` (all monitored pairs), so the click handler must use the same data source. Users should be able to place bids on any monitored pair regardless of current edge.

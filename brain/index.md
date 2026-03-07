@@ -8,6 +8,7 @@
 - [[architecture]]
 - [[decisions]]
 - [[patterns]]
+- [[changelog]]
 
 ## Reference Docs
 - `docs/KALSHI_POSITION_AND_PNL.md` — position tracking, P&L, fee model spec

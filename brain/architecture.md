@@ -14,8 +14,8 @@ Talos is a Kalshi arbitrage trading system designed for progressive automation.
    Pure `OrderBookManager` + async `MarketFeed` orchestrator.
 3. **Strategy Engine** (Layer 3) — **COMPLETE**
    Pure `ArbitrageScanner` + async `GameManager` orchestrator. Scanner computes both raw and fee-adjusted edges via `fees.py`.
-4. **Execution** — places and manages orders (in progress)
-   `TopOfMarketTracker`: detects penny jumps on resting NO bids in real-time via WS deltas. TUI shows toast alerts and `!!` prefix in Q columns. Foundation for future order amendment.
+4. **Execution** (Layer 4) — **IN PROGRESS**
+   `TopOfMarketTracker`: detects penny jumps on resting NO bids in real-time via WS deltas. TUI shows toast alerts and `!!` prefix in Q columns. Foundation for future order amendment. Bid modal uses `all_snapshots` fallback so any monitored pair is always selectable.
 5. **UI (Textual TUI)** (Layer 5) — **COMPLETE**
    `OpportunitiesTable` (prices + positions + queue), `AccountPanel` (balance display), `OrderLog` (filled/total + queue position). `AddGamesScreen` + `BidScreen` modals. `TalosApp` orchestrates polling: `refresh_account` (10s, orders + balance) and `refresh_queue_positions` (3s, fast queue enrichment with conservative merge).
 6. **Automation** — progressively takes over decision-making from the human

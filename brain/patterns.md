@@ -54,14 +54,25 @@ The Textual app accepts optional dependencies for testability. See [[principles#
 ```python
 class TalosApp(App):
     def __init__(self, *, scanner=None, game_manager=None, rest_client=None,
-                 market_feed=None, initial_games=None):
+                 market_feed=None, tracker=None, initial_games=None):
 ```
 
 Tests inject only what they need (usually just `scanner`). Production wires the full chain. Conditional timers keep tests fast.
 
 ## Isolate non-critical API calls
 
-When a method chains multiple API calls, wrap non-critical enrichment calls in their own try/except so failures don't abort the critical path. See [[principles#9. Idempotency and Resilience]] and [[decisions#Queue position: separate fast polling with conservative merge]].
+When a method chains multiple API calls, wrap non-critical enrichment calls in their own try/except so failures don't abort the critical path. See [[principles#9. Idempotency and Resilience]] and [[decisions#2026-03-06 — Queue position: separate fast polling with conservative merge]].
+
+## Financial calculation precision
+
+Carry exact values through the entire computation pipeline. Only format/round at the display boundary. Integer division truncation compounds linearly with contract count — a 0.58¢ rounding error × 1400 contracts = $8.12 discrepancy.
+
+- Store fill costs as **total cents** (`price × count` accumulated), not per-contract averages
+- Pass totals through models (`LegSummary.total_fill_cost`) rather than dividing early
+- Per-contract averages are acceptable for display labels (e.g., "avg 49.6¢") but never for P&L math
+- Format dollar amounts with `:.2f` for cent-accurate display, not `:.0f`
+
+Applied in: `scenario_pnl()` takes `total_cost_a`/`total_cost_b`, `LegSummary.total_fill_cost` carries exact costs, `_fmt_net_odds()` passes totals to P&L functions.
 
 ## Enrichment caching with split polling cadence
 
