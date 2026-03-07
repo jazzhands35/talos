@@ -50,10 +50,9 @@ class TopOfMarketTracker:
             prev = new_resting.get(order.ticker, 0)
             new_resting[order.ticker] = max(prev, order.no_price)
 
-        # Clear state for tickers that no longer have resting orders
-        for ticker in list(self._resting.keys()):
+        # Clear _at_top for tickers that no longer have resting orders
+        for ticker in self._resting:
             if ticker not in new_resting:
-                self._resting.pop(ticker)
                 self._at_top.pop(ticker, None)
 
         self._resting = new_resting
@@ -100,3 +99,8 @@ class TopOfMarketTracker:
     def resting_price(self, ticker: str) -> int | None:
         """Query the highest resting NO price for a ticker."""
         return self._resting.get(ticker)
+
+    def book_top_price(self, ticker: str) -> int | None:
+        """Query the current best NO price on the book for a ticker."""
+        best = self._books.best_ask(ticker)
+        return best.price if best else None

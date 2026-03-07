@@ -142,8 +142,7 @@ class TalosApp(App):
                 timeout=10,
             )
         else:
-            best = self._tracker._books.best_ask(ticker)
-            top_price = best.price if best else "?"
+            top_price = self._tracker.book_top_price(ticker) or "?"
             self.notify(
                 f"Jumped: {ticker} (you: {resting}c, top: {top_price}c)",
                 severity="warning",
