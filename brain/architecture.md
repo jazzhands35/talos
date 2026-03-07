@@ -9,42 +9,22 @@ Talos is a Kalshi arbitrage trading system designed for progressive automation.
 ## Layers
 
 1. **API Client** (Layer 1) — **COMPLETE**
-   - `config.py` — environment config (demo/production), loaded from env vars
-   - `auth.py` — RSA-PSS request signing (SHA-256, MGF1)
-   - `errors.py` — typed exception hierarchy (auth, API, rate limit, connection)
-   - `models/` — Pydantic v2 models for all API objects (market, order, portfolio, WS messages)
-   - `rest_client.py` — async httpx client, all REST endpoints (markets, orders, portfolio, exchange)
-   - `ws_client.py` — WebSocket client (subscribe, dispatch, seq tracking, keepalive)
-
+   Auth, REST, WebSocket, Pydantic models, error hierarchy.
 2. **Market Data** (Layer 2) — **COMPLETE**
-   - `orderbook.py` — pure state machine: `LocalOrderBook` model, `OrderBookManager` (apply snapshot/delta, seq tracking, staleness)
-   - `market_feed.py` — async orchestrator: subscribes to markets via WS, routes snapshots/deltas to book manager
+   Pure `OrderBookManager` + async `MarketFeed` orchestrator.
 3. **Strategy Engine** (Layer 3) — **COMPLETE**
-   - `models/strategy.py` — `ArbPair` and `Opportunity` models
-   - `scanner.py` — pure state machine: `ArbitrageScanner` (pair management, edge detection, opportunity tracking)
-   - `game_manager.py` — async orchestrator: URL parsing, REST event fetch, feed subscription wiring
-   - `market_feed.py` — added `on_book_update` callback (wires scanner.scan to book updates)
-4. **Execution** — places and manages orders
+   Pure `ArbitrageScanner` + async `GameManager` orchestrator. Scanner computes both raw and fee-adjusted edges via `fees.py`.
+4. **Execution** — places and manages orders (in progress)
+   `TopOfMarketTracker`: detects penny jumps on resting NO bids in real-time via WS deltas. TUI shows toast alerts and `!!` prefix in Q columns. Foundation for future order amendment.
 5. **UI (Textual TUI)** (Layer 5) — **COMPLETE**
-   - `ui/theme.py` — Catppuccin Mocha color palette and TCSS
-   - `ui/widgets.py` — OpportunitiesTable (DataTable), AccountPanel, OrderLog
-   - `ui/screens.py` — AddGamesScreen, BidScreen (ModalScreens)
-   - `ui/app.py` — TalosApp orchestrator (startup, timers, event handling)
-   - `__main__.py` — entry point: `python -m talos`
+   `OpportunitiesTable` (prices + positions + queue), `AccountPanel` (balance display), `OrderLog` (filled/total + queue position). `AddGamesScreen` + `BidScreen` modals. `TalosApp` orchestrates polling: `refresh_account` (10s, orders + balance) and `refresh_queue_positions` (3s, fast queue enrichment with conservative merge).
 6. **Automation** — progressively takes over decision-making from the human
 
-## Key Technical Decisions
-
-- **Demo by default** — production requires `KALSHI_ENV=production`
-- **All money as int (cents)** — no floats for currency
-- **Async-first** — httpx.AsyncClient, websockets, all I/O awaited
-- **Pydantic v2** — all API responses are typed models, never raw dicts
-- **Structured logging** — structlog with key-value pairs on all API calls
-- **Trust but log** — API responses are trusted but fully logged at DEBUG level
+See [[codebase/index]] for the full module map and gotchas.
 
 ## API Reference
 
 - REST: `https://api.elections.kalshi.com/trade-api/v2` (prod) / `https://demo-api.kalshi.co/trade-api/v2` (demo)
-- WS: `wss://api.elections.kalshi.com/` (prod) / `wss://demo-api.kalshi.co/` (demo)
+- WS: `wss://api.elections.kalshi.com/trade-api/ws/v2` (prod) / `wss://demo-api.kalshi.co/trade-api/ws/v2` (demo)
 - Auth: RSA-PSS SHA-256 signing of `timestamp_ms + method + path`
 - Headers: `KALSHI-ACCESS-KEY`, `KALSHI-ACCESS-TIMESTAMP`, `KALSHI-ACCESS-SIGNATURE`
