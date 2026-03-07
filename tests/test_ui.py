@@ -69,10 +69,10 @@ class TestOpportunitiesTable:
             table = app.query_one(OpportunitiesTable)
             # Row 0 should have formatted price data
             row_data = table.get_row_at(0)
-            # NO-A=38¢, NO-B=55¢, Cost=93¢, Edge=7¢, Depth=100, $/pair=$0.07
+            # NO-A=38¢, NO-B=55¢, Edge=5.9¢ (fee-adjusted)
             assert "38¢" in str(row_data[1])
             assert "55¢" in str(row_data[2])
-            assert "7¢" in str(row_data[4])
+            assert "5.9" in str(row_data[3])  # fee_edge ≈ 5.9¢
 
     async def test_table_shows_negative_edge_pairs(self) -> None:
         mgr = OrderBookManager()
@@ -106,7 +106,7 @@ class TestOpportunitiesTable:
             await pilot.pause()
             assert table.row_count == 1  # still visible
             row = table.get_row_at(0)
-            assert "-" in str(row[4])  # edge column shows negative
+            assert "-" in str(row[3])  # fee_edge column shows negative
 
 
 class TestAccountPanel:
@@ -120,44 +120,80 @@ class TestAccountPanel:
             assert "$1,250.00" in content
             assert "$2,100.50" in content
 
-    async def test_renders_event_positions(self) -> None:
-        app = TalosApp()
+
+class TestTablePositions:
+    async def test_table_shows_position_data(self) -> None:
+        scanner = _make_scanner_with_opportunity()
+        app = TalosApp(scanner=scanner)
         async with app.run_test() as pilot:
-            panel = app.query_one(AccountPanel)
-            panel.update_event_positions(
+            table = app.query_one(OpportunitiesTable)
+            table.update_positions(
                 [
                     EventPositionSummary(
                         event_ticker="EVT-STANMIA",
                         leg_a=LegSummary(
-                            ticker="GAME-STAN", no_price=31, filled_count=3, resting_count=2
+                            ticker="GAME-STAN",
+                            no_price=31,
+                            filled_count=3,
+                            resting_count=2,
+                            total_fill_cost=3 * 31,
+                            queue_position=8,
+                            cpm=12.5,
+                            cpm_partial=False,
+                            eta_minutes=0.64,
                         ),
                         leg_b=LegSummary(
-                            ticker="GAME-MIA", no_price=67, filled_count=3, resting_count=2
+                            ticker="GAME-MIA",
+                            no_price=67,
+                            filled_count=3,
+                            resting_count=2,
+                            total_fill_cost=3 * 67,
+                            queue_position=15,
+                            cpm=6.0,
+                            cpm_partial=True,
+                            eta_minutes=2.5,
                         ),
                         matched_pairs=3,
-                        locked_profit_cents=6,
+                        locked_profit_cents=2.38,
                         unmatched_a=0,
                         unmatched_b=0,
                         exposure_cents=0,
                     )
                 ]
             )
+            app.refresh_opportunities()
             await pilot.pause()
-            content = str(panel.content)
-            assert "EVT-STANMIA" in content
-            assert "GAME-STAN" in content
-            assert "3/5 filled" in content
-            assert "Matched: 3 pairs" in content
-            assert "$0.06" in content
+            row = table.get_row_at(0)
+            row_str = str(row)
+            # Pos-A: 3/5 at fee_adjusted_cost(31) = 31 + 69*0.0175 = 32.2¢
+            # Pos-B: 3/5 at fee_adjusted_cost(67) = 67 + 33*0.0175 = 67.6¢
+            assert "3/5 32.2" in row_str  # Pos-A with fee-adjusted avg
+            assert "3/5 67.6" in row_str  # Pos-B with fee-adjusted avg
+            assert "'8'" in row_str  # Q-A column
+            assert "'15'" in row_str  # Q-B column
+            assert "12.5" in row_str  # CPM-A
+            assert "6.00*" in row_str  # CPM-B (partial)
+            assert "1m" in row_str  # ETA-A (0.64 min rounds to 1m)
+            assert "2m*" in row_str  # ETA-B (2.5 rounds to 2m via banker's rounding, partial)
+            assert "0.02" in row_str  # P&L (fee-adjusted profit, no exposure)
+            # Net/Odds: both scenarios positive → guaranteed profit
+            # 3 fills each at 31¢/67¢ (total costs 93/201):
+            # net_a = (300-201)*0.9825 - 93 = 4.27¢, net_b = (300-93)*0.9825 - 201 = 2.38¢
+            # GTD shows worst-case (smaller) profit: $0.02
+            assert "GTD $0.02" in row_str
 
-    async def test_empty_event_positions(self) -> None:
-        app = TalosApp()
+    async def test_table_shows_odds_without_positions(self) -> None:
+        scanner = _make_scanner_with_opportunity()
+        app = TalosApp(scanner=scanner)
         async with app.run_test() as pilot:
-            panel = app.query_one(AccountPanel)
-            panel.update_event_positions([])
+            app.refresh_opportunities()
             await pilot.pause()
-            content = str(panel.content)
-            assert "ACCOUNT" in content
+            table = app.query_one(OpportunitiesTable)
+            row = table.get_row_at(0)
+            row_str = str(row)
+            assert "—" in row_str  # Position columns show dashes
+            # Net/Odds shows per-leg odds only when no positions
+            assert "+160/-124" in row_str
 
 
 class TestOrderLog:
@@ -245,6 +281,7 @@ class TestBidModal:
             qty_a=100,
             qty_b=200,
             raw_edge=7,
+            fee_edge=5.9,
             tradeable_qty=100,
             timestamp="2026-03-04T12:00:00Z",
         )
@@ -266,6 +303,7 @@ class TestBidModal:
             qty_a=100,
             qty_b=200,
             raw_edge=7,
+            fee_edge=5.9,
             tradeable_qty=100,
             timestamp="2026-03-04T12:00:00Z",
         )

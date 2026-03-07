@@ -42,8 +42,8 @@ def _fmt_net_odds(
     no_b: int,
     filled_a: int = 0,
     filled_b: int = 0,
-    avg_a: int = 0,
-    avg_b: int = 0,
+    total_cost_a: int = 0,
+    total_cost_b: int = 0,
 ) -> str:
     """Format net position as wager amount, side, and American odds.
 
@@ -56,15 +56,15 @@ def _fmt_net_odds(
     odds_str = f"{odds_a}/{odds_b}"
     if filled_a + filled_b == 0:
         return odds_str
-    net_a, net_b = scenario_pnl(filled_a, avg_a, filled_b, avg_b)
+    net_a, net_b = scenario_pnl(filled_a, total_cost_a, filled_b, total_cost_b)
     worse = min(net_a, net_b)
     better = max(net_a, net_b)
     # Both scenarios profitable → guaranteed profit, no risk
     if worse > 0:
-        return f"GTD ${worse / 100:.0f}"
+        return f"GTD ${worse / 100:.2f}"
     # Both scenarios negative → underwater, no meaningful odds
     if better <= 0:
-        return f"-${abs(better) / 100:.0f}"
+        return f"-${abs(better) / 100:.2f}"
     # Mixed: one wins, one loses → directional bet
     eff = american_from_win_risk(better, abs(worse))
     if eff is None:
@@ -153,7 +153,7 @@ class OpportunitiesTable(DataTable):
                 net_odds = _fmt_net_odds(
                     opp.no_a, opp.no_b,
                     pos.leg_a.filled_count, pos.leg_b.filled_count,
-                    pos.leg_a.no_price, pos.leg_b.no_price,
+                    pos.leg_a.total_fill_cost, pos.leg_b.total_fill_cost,
                 )
             else:
                 pos_a = "—"

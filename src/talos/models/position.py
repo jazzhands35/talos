@@ -12,6 +12,11 @@ class LegSummary(BaseModel):
     no_price: int
     filled_count: int
     resting_count: int
+    total_fill_cost: int = 0
+    queue_position: int | None = None
+    cpm: float | None = None
+    cpm_partial: bool = False
+    eta_minutes: float | None = None
 
 
 class EventPositionSummary(BaseModel):
@@ -21,7 +26,7 @@ class EventPositionSummary(BaseModel):
     leg_a: LegSummary
     leg_b: LegSummary
     matched_pairs: int
-    locked_profit_cents: int
+    locked_profit_cents: float
     unmatched_a: int
     unmatched_b: int
     exposure_cents: int

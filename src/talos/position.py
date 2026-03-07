@@ -2,9 +2,33 @@
 
 from __future__ import annotations
 
-from talos.models.order import Order
+from typing import NamedTuple
+
+from talos.fees import fee_adjusted_profit_matched
+from talos.models.order import ACTIVE_STATUSES, Order
 from talos.models.position import EventPositionSummary, LegSummary
 from talos.models.strategy import ArbPair
+
+
+class _LegAccum(NamedTuple):
+    filled: int = 0
+    resting: int = 0
+    total_fill_cost: int = 0
+    max_no_price: int = 0
+
+
+def _add_order(acc: _LegAccum, order: Order) -> _LegAccum:
+    return _LegAccum(
+        filled=acc.filled + order.fill_count,
+        resting=acc.resting + order.remaining_count,
+        total_fill_cost=acc.total_fill_cost + order.no_price * order.fill_count,
+        max_no_price=max(acc.max_no_price, order.no_price),
+    )
+
+
+def _proportional_cost(total_cost: int, count: int, total_filled: int) -> int:
+    """Allocate cost proportionally via integer division."""
+    return total_cost * count // total_filled if total_filled > 0 else 0
 
 
 def compute_event_positions(
@@ -22,26 +46,29 @@ def compute_event_positions(
         ticker_to_pair[pair.ticker_a] = pair
         ticker_to_pair[pair.ticker_b] = pair
 
-    # Accumulate per-pair, per-leg stats
-    # key = event_ticker, value = {ticker: (filled, resting, max_no_price)}
-    accum: dict[str, dict[str, list[int]]] = {}
+    accum: dict[str, dict[str, _LegAccum]] = {}
+    best_queue: dict[str, dict[str, int | None]] = {}
 
     for order in orders:
         if order.side != "no" or order.action != "buy":
+            continue
+        if order.status not in ACTIVE_STATUSES:
             continue
         pair = ticker_to_pair.get(order.ticker)
         if pair is None:
             continue
         evt = pair.event_ticker
-        accum.setdefault(evt, {})
-        entry = accum[evt].setdefault(order.ticker, [0, 0, 0])
-        entry[0] += order.fill_count
-        entry[1] += order.remaining_count
-        # Track worst-case (highest) NO price for exposure calc
-        if order.no_price > entry[2]:
-            entry[2] = order.no_price
+        legs = accum.setdefault(evt, {})
+        legs[order.ticker] = _add_order(legs.get(order.ticker, _LegAccum()), order)
+        # Track best queue position among resting orders
+        if order.remaining_count > 0 and order.queue_position and order.queue_position > 0:
+            bq = best_queue.setdefault(evt, {})
+            prev = bq.get(order.ticker)
+            if prev is None or order.queue_position < prev:
+                bq[order.ticker] = order.queue_position
 
     # Build summaries
+    _empty = _LegAccum()
     summaries: list[EventPositionSummary] = []
     for pair in pairs:
         evt = pair.event_ticker
@@ -49,36 +76,51 @@ def compute_event_positions(
         if leg_data is None:
             continue
 
-        data_a = leg_data.get(pair.ticker_a, [0, 0, 0])
-        data_b = leg_data.get(pair.ticker_b, [0, 0, 0])
+        a = leg_data.get(pair.ticker_a, _empty)
+        b = leg_data.get(pair.ticker_b, _empty)
 
-        filled_a, resting_a, price_a = data_a
-        filled_b, resting_b, price_b = data_b
-
-        # Skip pairs with zero activity
-        if filled_a + resting_a + filled_b + resting_b == 0:
+        if a.filled + a.resting + b.filled + b.resting == 0:
             continue
 
-        matched = min(filled_a, filled_b)
-        locked_profit = matched * (100 - price_a - price_b)
-        unmatched_a = filled_a - matched
-        unmatched_b = filled_b - matched
-        exposure = unmatched_a * price_a + unmatched_b * price_b
+        matched = min(a.filled, b.filled)
+        unmatched_a = a.filled - matched
+        unmatched_b = b.filled - matched
 
+        if matched > 0:
+            cost_a_matched = _proportional_cost(a.total_fill_cost, matched, a.filled)
+            cost_b_matched = _proportional_cost(b.total_fill_cost, matched, b.filled)
+            locked_profit = fee_adjusted_profit_matched(
+                matched, cost_a_matched, cost_b_matched
+            )
+        else:
+            locked_profit = 0.0
+
+        exposure = _proportional_cost(
+            a.total_fill_cost, unmatched_a, a.filled
+        ) + _proportional_cost(b.total_fill_cost, unmatched_b, b.filled)
+
+        avg_a = a.total_fill_cost // a.filled if a.filled > 0 else a.max_no_price
+        avg_b = b.total_fill_cost // b.filled if b.filled > 0 else b.max_no_price
+
+        evt_queue = best_queue.get(evt, {})
         summaries.append(
             EventPositionSummary(
                 event_ticker=evt,
                 leg_a=LegSummary(
                     ticker=pair.ticker_a,
-                    no_price=price_a,
-                    filled_count=filled_a,
-                    resting_count=resting_a,
+                    no_price=avg_a,
+                    filled_count=a.filled,
+                    resting_count=a.resting,
+                    total_fill_cost=a.total_fill_cost,
+                    queue_position=evt_queue.get(pair.ticker_a),
                 ),
                 leg_b=LegSummary(
                     ticker=pair.ticker_b,
-                    no_price=price_b,
-                    filled_count=filled_b,
-                    resting_count=resting_b,
+                    no_price=avg_b,
+                    filled_count=b.filled,
+                    resting_count=b.resting,
+                    total_fill_cost=b.total_fill_cost,
+                    queue_position=evt_queue.get(pair.ticker_b),
                 ),
                 matched_pairs=matched,
                 locked_profit_cents=locked_profit,
