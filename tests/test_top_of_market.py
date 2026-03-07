@@ -94,3 +94,75 @@ class TestIsAtTop:
         tracker.update_orders([_order("MKT-A", 47)], [PAIR])
         assert tracker.resting_price("MKT-A") == 47
         assert tracker.resting_price("MKT-B") is None
+
+
+class TestCallbackTransitions:
+    def test_callback_fires_on_loss(self) -> None:
+        books, tracker = _make_tracker()
+        books.apply_snapshot("MKT-A", _snapshot(yes=[], no=[[47, 10]]))
+        tracker.update_orders([_order("MKT-A", 47)], [PAIR])
+        tracker.check("MKT-A")  # initial state: at top
+
+        changes: list[tuple[str, bool]] = []
+        tracker.on_change = lambda t, at: changes.append((t, at))
+
+        # Someone penny jumps at 48
+        books.apply_snapshot("MKT-A", _snapshot(yes=[], no=[[48, 5], [47, 10]]))
+        tracker.check("MKT-A")
+
+        assert changes == [("MKT-A", False)]
+
+    def test_callback_fires_on_regain(self) -> None:
+        books, tracker = _make_tracker()
+        books.apply_snapshot("MKT-A", _snapshot(yes=[], no=[[48, 5], [47, 10]]))
+        tracker.update_orders([_order("MKT-A", 47)], [PAIR])
+        tracker.check("MKT-A")  # initial: not at top
+
+        changes: list[tuple[str, bool]] = []
+        tracker.on_change = lambda t, at: changes.append((t, at))
+
+        # 48 level gets consumed
+        books.apply_snapshot("MKT-A", _snapshot(yes=[], no=[[47, 10]]))
+        tracker.check("MKT-A")
+
+        assert changes == [("MKT-A", True)]
+
+    def test_no_duplicate_callbacks(self) -> None:
+        books, tracker = _make_tracker()
+        books.apply_snapshot("MKT-A", _snapshot(yes=[], no=[[47, 10]]))
+        tracker.update_orders([_order("MKT-A", 47)], [PAIR])
+        tracker.check("MKT-A")  # initial: at top
+
+        changes: list[tuple[str, bool]] = []
+        tracker.on_change = lambda t, at: changes.append((t, at))
+
+        # Book updates but top doesn't change
+        books.apply_snapshot("MKT-A", _snapshot(yes=[], no=[[47, 15]]))
+        tracker.check("MKT-A")
+        tracker.check("MKT-A")
+
+        assert changes == []
+
+    def test_no_callback_on_first_check(self) -> None:
+        books, tracker = _make_tracker()
+        books.apply_snapshot("MKT-A", _snapshot(yes=[], no=[[48, 5], [47, 10]]))
+        tracker.update_orders([_order("MKT-A", 47)], [PAIR])
+
+        changes: list[tuple[str, bool]] = []
+        tracker.on_change = lambda t, at: changes.append((t, at))
+
+        tracker.check("MKT-A")  # first check — sets state, no transition
+
+        assert changes == []
+        assert tracker.is_at_top("MKT-A") is False
+
+    def test_order_removed_clears_state(self) -> None:
+        books, tracker = _make_tracker()
+        books.apply_snapshot("MKT-A", _snapshot(yes=[], no=[[47, 10]]))
+        tracker.update_orders([_order("MKT-A", 47)], [PAIR])
+        tracker.check("MKT-A")
+
+        # Orders cleared
+        tracker.update_orders([], [PAIR])
+        assert tracker.is_at_top("MKT-A") is None
+        assert tracker.resting_price("MKT-A") is None
