@@ -308,6 +308,8 @@ class TalosApp(App):
             return
         event_ticker = str(event.row_key.value)
         opp = self._scanner.get_opportunity(event_ticker)
+        if opp is None:
+            opp = self._scanner.all_snapshots.get(event_ticker)
         if opp is not None:
             self.push_screen(BidScreen(opp), callback=self._on_bid_confirmed)
 

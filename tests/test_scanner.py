@@ -228,3 +228,72 @@ class TestOpportunitySorting:
         assert len(opps) == 2
         assert opps[0].raw_edge == 10
         assert opps[1].raw_edge == 5
+
+
+class TestGetOpportunity:
+    def test_returns_opportunity_with_positive_edge(self) -> None:
+        manager = OrderBookManager()
+        scanner = ArbitrageScanner(manager)
+        scanner.add_pair("EVT-1", "MKT-A", "MKT-B")
+        manager.apply_snapshot(
+            "MKT-A",
+            OrderBookSnapshot(market_ticker="MKT-A", market_id="u1", yes=[], no=[[45, 100]]),
+        )
+        manager.apply_snapshot(
+            "MKT-B",
+            OrderBookSnapshot(market_ticker="MKT-B", market_id="u2", yes=[], no=[[50, 100]]),
+        )
+        scanner.scan("MKT-A")
+        opp = scanner.get_opportunity("EVT-1")
+        assert opp is not None
+        assert opp.raw_edge == 5
+
+    def test_returns_none_when_no_edge(self) -> None:
+        manager = OrderBookManager()
+        scanner = ArbitrageScanner(manager)
+        scanner.add_pair("EVT-1", "MKT-A", "MKT-B")
+        manager.apply_snapshot(
+            "MKT-A",
+            OrderBookSnapshot(market_ticker="MKT-A", market_id="u1", yes=[], no=[[55, 100]]),
+        )
+        manager.apply_snapshot(
+            "MKT-B",
+            OrderBookSnapshot(market_ticker="MKT-B", market_id="u2", yes=[], no=[[50, 100]]),
+        )
+        scanner.scan("MKT-A")
+        assert scanner.get_opportunity("EVT-1") is None
+
+    def test_returns_none_for_unknown_event(self) -> None:
+        scanner = ArbitrageScanner(OrderBookManager())
+        assert scanner.get_opportunity("NONEXISTENT") is None
+
+
+class TestAllSnapshots:
+    def test_includes_negative_edge_pairs(self) -> None:
+        manager = OrderBookManager()
+        scanner = ArbitrageScanner(manager)
+        scanner.add_pair("EVT-1", "MKT-A", "MKT-B")
+        manager.apply_snapshot(
+            "MKT-A",
+            OrderBookSnapshot(market_ticker="MKT-A", market_id="u1", yes=[], no=[[55, 100]]),
+        )
+        manager.apply_snapshot(
+            "MKT-B",
+            OrderBookSnapshot(market_ticker="MKT-B", market_id="u2", yes=[], no=[[50, 100]]),
+        )
+        scanner.scan("MKT-A")
+        # No positive-edge opportunity
+        assert len(scanner.opportunities) == 0
+        # But all_snapshots still has the pair
+        snaps = scanner.all_snapshots
+        assert "EVT-1" in snaps
+        assert snaps["EVT-1"].raw_edge == -5
+
+    def test_placeholder_before_book_data(self) -> None:
+        """Pair appears in all_snapshots immediately after add_pair, before any scan."""
+        scanner = ArbitrageScanner(OrderBookManager())
+        scanner.add_pair("EVT-1", "MKT-A", "MKT-B")
+        snaps = scanner.all_snapshots
+        assert "EVT-1" in snaps
+        assert snaps["EVT-1"].no_a == 0
+        assert snaps["EVT-1"].no_b == 0

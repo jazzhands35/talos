@@ -293,6 +293,124 @@ class TestOrderEndpoints:
         assert len(orders) == 1
 
 
+    async def test_amend_order(self, client: KalshiRESTClient) -> None:
+        mock_data = {
+            "order": {
+                "order_id": "ord-123",
+                "ticker": "KXBTC-26MAR-T50000",
+                "action": "buy",
+                "side": "yes",
+                "type": "limit",
+                "yes_price": 70,
+                "no_price": 30,
+                "initial_count": 10,
+                "remaining_count": 10,
+                "fill_count": 0,
+                "status": "resting",
+                "created_time": "2026-03-03T12:00:00Z",
+            }
+        }
+        client._http = AsyncMock(spec=httpx.AsyncClient)
+        client._http.request = AsyncMock(return_value=_mock_response(200, mock_data))
+
+        order = await client.amend_order("ord-123", new_price=70, new_count=10)
+        assert order.order_id == "ord-123"
+        assert order.yes_price == 70
+        call_kwargs = client._http.request.call_args
+        assert call_kwargs.kwargs["json"]["new_price"] == 70
+        assert call_kwargs.kwargs["json"]["new_count"] == 10
+
+    async def test_amend_order_partial_fields(self, client: KalshiRESTClient) -> None:
+        """Only specified fields are sent in the amend body."""
+        mock_data = {
+            "order": {
+                "order_id": "ord-123",
+                "ticker": "KXBTC-26MAR-T50000",
+                "action": "buy",
+                "side": "no",
+                "type": "limit",
+                "yes_price": 35,
+                "no_price": 65,
+                "initial_count": 10,
+                "remaining_count": 10,
+                "fill_count": 0,
+                "status": "resting",
+                "created_time": "2026-03-03T12:00:00Z",
+            }
+        }
+        client._http = AsyncMock(spec=httpx.AsyncClient)
+        client._http.request = AsyncMock(return_value=_mock_response(200, mock_data))
+
+        await client.amend_order("ord-123", new_price=65)
+        call_kwargs = client._http.request.call_args
+        body = call_kwargs.kwargs["json"]
+        assert body == {"new_price": 65}
+        assert "new_count" not in body
+
+    async def test_get_order(self, client: KalshiRESTClient) -> None:
+        mock_data = {
+            "order": {
+                "order_id": "ord-456",
+                "ticker": "KXBTC-26MAR-T50000",
+                "action": "buy",
+                "side": "yes",
+                "type": "limit",
+                "yes_price": 65,
+                "no_price": 35,
+                "initial_count": 5,
+                "remaining_count": 3,
+                "fill_count": 2,
+                "status": "resting",
+                "created_time": "2026-03-03T12:00:00Z",
+            }
+        }
+        client._http = AsyncMock(spec=httpx.AsyncClient)
+        client._http.request = AsyncMock(return_value=_mock_response(200, mock_data))
+
+        order = await client.get_order("ord-456")
+        assert order.order_id == "ord-456"
+        assert order.fill_count == 2
+
+    async def test_batch_create_orders(self, client: KalshiRESTClient) -> None:
+        mock_data = {
+            "orders": [
+                {"order_id": "ord-1", "success": True},
+                {"order_id": "ord-2", "success": True},
+            ]
+        }
+        client._http = AsyncMock(spec=httpx.AsyncClient)
+        client._http.request = AsyncMock(return_value=_mock_response(200, mock_data))
+
+        orders_input = [
+            {"ticker": "MKT-A", "action": "buy", "side": "no", "no_price": 45, "count": 10},
+            {"ticker": "MKT-B", "action": "buy", "side": "no", "no_price": 50, "count": 10},
+        ]
+        results = await client.batch_create_orders(orders_input)
+        assert len(results) == 2
+        assert results[0].success is True
+        assert results[1].order_id == "ord-2"
+        call_kwargs = client._http.request.call_args
+        assert call_kwargs.kwargs["json"]["orders"] == orders_input
+
+    async def test_batch_cancel_orders(self, client: KalshiRESTClient) -> None:
+        mock_data = {
+            "orders": [
+                {"order_id": "ord-1", "success": True},
+                {"order_id": "ord-2", "success": False, "error": "not found"},
+            ]
+        }
+        client._http = AsyncMock(spec=httpx.AsyncClient)
+        client._http.request = AsyncMock(return_value=_mock_response(200, mock_data))
+
+        results = await client.batch_cancel_orders(["ord-1", "ord-2"])
+        assert len(results) == 2
+        assert results[0].success is True
+        assert results[1].success is False
+        assert results[1].error == "not found"
+        call_kwargs = client._http.request.call_args
+        assert call_kwargs.kwargs["json"]["order_ids"] == ["ord-1", "ord-2"]
+
+
 class TestQueuePositions:
     async def test_get_queue_positions_prefers_fp(self, client: KalshiRESTClient) -> None:
         mock_data = {
