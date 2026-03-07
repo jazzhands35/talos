@@ -128,8 +128,9 @@ class TestApplyDelta:
             ts="2026-03-03T12:00:00Z",
         )
 
-    def test_upsert_existing_level(self, manager: OrderBookManager) -> None:
-        d = self._make_delta(price=65, delta=150, side="yes")
+    def test_accumulates_into_existing_level(self, manager: OrderBookManager) -> None:
+        # YES@65 starts at qty=100, delta +50 → 150
+        d = self._make_delta(price=65, delta=50, side="yes")
         manager.apply_delta("MKT-1", d, seq=1)
         book = manager.get_book("MKT-1")
         assert book is not None
@@ -144,20 +145,30 @@ class TestApplyDelta:
         assert len(book.yes) == 3
         assert [lvl.price for lvl in book.yes] == [65, 62, 60]
 
-    def test_remove_level_on_zero_delta(self, manager: OrderBookManager) -> None:
-        d = self._make_delta(price=60, delta=0, side="yes")
+    def test_removes_level_when_qty_hits_zero(self, manager: OrderBookManager) -> None:
+        # YES@60 starts at qty=200, delta -200 → removed
+        d = self._make_delta(price=60, delta=-200, side="yes")
         manager.apply_delta("MKT-1", d, seq=1)
         book = manager.get_book("MKT-1")
         assert book is not None
         assert len(book.yes) == 1
         assert book.yes[0].price == 65
 
-    def test_applies_to_no_side(self, manager: OrderBookManager) -> None:
-        d = self._make_delta(price=35, delta=300, side="no")
+    def test_removes_level_when_qty_goes_negative(self, manager: OrderBookManager) -> None:
+        # YES@60 starts at qty=200, delta -300 → removed (not stored as -100)
+        d = self._make_delta(price=60, delta=-300, side="yes")
         manager.apply_delta("MKT-1", d, seq=1)
         book = manager.get_book("MKT-1")
         assert book is not None
-        assert book.no[0].quantity == 300
+        assert len(book.yes) == 1
+
+    def test_applies_to_no_side(self, manager: OrderBookManager) -> None:
+        # NO@35 starts at qty=150, delta +100 → 250
+        d = self._make_delta(price=35, delta=100, side="no")
+        manager.apply_delta("MKT-1", d, seq=1)
+        book = manager.get_book("MKT-1")
+        assert book is not None
+        assert book.no[0].quantity == 250
 
     def test_seq_gap_sets_stale(self, manager: OrderBookManager) -> None:
         d1 = self._make_delta(price=65, delta=110, side="yes")
@@ -182,8 +193,8 @@ class TestApplyDelta:
         manager.apply_delta("UNKNOWN", d, seq=1)
         assert manager.get_book("UNKNOWN") is None
 
-    def test_remove_nonexistent_level_is_noop(self, manager: OrderBookManager) -> None:
-        d = self._make_delta(price=99, delta=0, side="yes")
+    def test_negative_delta_nonexistent_level_is_noop(self, manager: OrderBookManager) -> None:
+        d = self._make_delta(price=99, delta=-50, side="yes")
         manager.apply_delta("MKT-1", d, seq=1)
         book = manager.get_book("MKT-1")
         assert book is not None

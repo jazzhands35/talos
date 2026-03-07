@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from pydantic import BaseModel, Field
 
+ACTIVE_STATUSES = frozenset({"resting", "executed"})
+
 
 class Order(BaseModel, extra="ignore"):
     """A Kalshi order — matches Kalshi REST API response schema."""

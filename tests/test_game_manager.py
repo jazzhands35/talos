@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, Mock
 
 import pytest
 
@@ -16,14 +16,17 @@ from talos.scanner import ArbitrageScanner
 class TestParseKalshiUrl:
     def test_parses_full_url(self) -> None:
         url = "https://kalshi.com/markets/kxncaawbgame/college-basketball-womens-game/kxncaawbgame-26mar04stanmia"
-        assert parse_kalshi_url(url) == "kxncaawbgame-26mar04stanmia"
+        assert parse_kalshi_url(url) == "KXNCAAWBGAME-26MAR04STANMIA"
 
     def test_parses_url_with_trailing_slash(self) -> None:
         url = "https://kalshi.com/markets/kxncaawbgame/college-basketball-womens-game/kxncaawbgame-26mar04stanmia/"
-        assert parse_kalshi_url(url) == "kxncaawbgame-26mar04stanmia"
+        assert parse_kalshi_url(url) == "KXNCAAWBGAME-26MAR04STANMIA"
 
     def test_parses_bare_ticker(self) -> None:
-        assert parse_kalshi_url("kxncaawbgame-26mar04stanmia") == "kxncaawbgame-26mar04stanmia"
+        assert parse_kalshi_url("kxncaawbgame-26mar04stanmia") == "KXNCAAWBGAME-26MAR04STANMIA"
+
+    def test_accepts_uppercase_ticker(self) -> None:
+        assert parse_kalshi_url("KXNCAAWBGAME-26MAR04STANMIA") == "KXNCAAWBGAME-26MAR04STANMIA"
 
     def test_rejects_empty_string(self) -> None:
         with pytest.raises(ValueError, match="empty"):
@@ -137,11 +140,11 @@ class TestGameManager:
         manager: GameManager,
         mock_rest: KalshiRESTClient,
     ) -> None:
-        event = self._make_event("kxncaawbgame-26mar04stanmia", ["STAN", "MIA"])
+        event = self._make_event("KXNCAAWBGAME-26MAR04STANMIA", ["STAN", "MIA"])
         mock_rest.get_event.return_value = event  # type: ignore[union-attr]
         url = "https://kalshi.com/markets/kxncaawbgame/college-basketball-womens-game/kxncaawbgame-26mar04stanmia"
         pair = await manager.add_game(url)
-        assert pair.event_ticker == "kxncaawbgame-26mar04stanmia"
+        assert pair.event_ticker == "KXNCAAWBGAME-26MAR04STANMIA"
 
     async def test_add_games_multiple(
         self,
@@ -191,3 +194,77 @@ class TestGameManager:
         await manager.add_game("EVT-1")
         assert len(manager.active_games) == 1
         assert manager.active_games[0].event_ticker == "EVT-1"
+
+    async def test_clear_all_games(
+        self,
+        manager: GameManager,
+        mock_rest: KalshiRESTClient,
+        mock_feed: MarketFeed,
+        mock_scanner: ArbitrageScanner,
+    ) -> None:
+        mock_rest.get_event.side_effect = [  # type: ignore[union-attr]
+            self._make_event("EVT-1", ["A1", "B1"]),
+            self._make_event("EVT-2", ["A2", "B2"]),
+        ]
+        await manager.add_game("EVT-1")
+        await manager.add_game("EVT-2")
+        assert len(manager.active_games) == 2
+
+        await manager.clear_all_games()
+        assert len(manager.active_games) == 0
+        assert mock_scanner.remove_pair.call_count == 2  # type: ignore[union-attr]
+        assert mock_feed.unsubscribe.call_count == 4  # type: ignore[union-attr]
+
+    async def test_on_change_fires_on_add(
+        self,
+        manager: GameManager,
+        mock_rest: KalshiRESTClient,
+    ) -> None:
+        callback = Mock()
+        manager.on_change = callback
+        event = self._make_event("EVT-1", ["TICK-A", "TICK-B"])
+        mock_rest.get_event.return_value = event  # type: ignore[union-attr]
+        await manager.add_game("EVT-1")
+        callback.assert_called_once()
+
+    async def test_on_change_fires_on_remove(
+        self,
+        manager: GameManager,
+        mock_rest: KalshiRESTClient,
+    ) -> None:
+        event = self._make_event("EVT-1", ["TICK-A", "TICK-B"])
+        mock_rest.get_event.return_value = event  # type: ignore[union-attr]
+        await manager.add_game("EVT-1")
+        callback = Mock()
+        manager.on_change = callback
+        await manager.remove_game("EVT-1")
+        callback.assert_called_once()
+
+    async def test_on_change_fires_once_on_clear(
+        self,
+        manager: GameManager,
+        mock_rest: KalshiRESTClient,
+    ) -> None:
+        mock_rest.get_event.side_effect = [  # type: ignore[union-attr]
+            self._make_event("EVT-1", ["A1", "B1"]),
+            self._make_event("EVT-2", ["A2", "B2"]),
+        ]
+        await manager.add_game("EVT-1")
+        await manager.add_game("EVT-2")
+        callback = Mock()
+        manager.on_change = callback
+        await manager.clear_all_games()
+        callback.assert_called_once()
+
+    async def test_on_change_not_fired_on_duplicate_add(
+        self,
+        manager: GameManager,
+        mock_rest: KalshiRESTClient,
+    ) -> None:
+        event = self._make_event("EVT-1", ["TICK-A", "TICK-B"])
+        mock_rest.get_event.return_value = event  # type: ignore[union-attr]
+        await manager.add_game("EVT-1")
+        callback = Mock()
+        manager.on_change = callback
+        await manager.add_game("EVT-1")
+        callback.assert_not_called()

@@ -74,7 +74,7 @@ class KalshiWSClient:
 
     async def connect(self) -> None:
         """Open the WebSocket connection with auth headers."""
-        headers = self._auth.headers("GET", "/")
+        headers = self._auth.headers("GET", "/trade-api/ws/v2")
         self._ws = await websockets.connect(self._ws_url, additional_headers=headers)
         logger.info("ws_connected", url=self._ws_url)
 
@@ -145,7 +145,10 @@ class KalshiWSClient:
         # Parse message into model
         msg_data = raw.get("msg", {})
         model_cls = _MESSAGE_MODELS.get(msg_type)
-        parsed = model_cls.model_validate(msg_data) if model_cls else msg_data
+        if model_cls is None:
+            logger.debug("ws_unknown_type", msg_type=msg_type, sid=sid)
+            return
+        parsed = model_cls.model_validate(msg_data)
 
         # Dispatch to callback
         callback = self._callbacks.get(channel)

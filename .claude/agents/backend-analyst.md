@@ -13,12 +13,13 @@ Answer questions about the codebase by reading code. You are read-only — never
 
 ## Project Context
 
-- **Framework:** httpx (async HTTP), websockets, Textual (TUI)
-- **Language:** Python 3.12+ with full type annotations
 - **Key paths:**
   - `src/talos/` — main package
   - `tests/` — pytest test suite
+  - `brain/` — knowledge vault (read `brain/index.md` first for orientation)
   - `CLAUDE.md` — project conventions
+
+Before tracing code, check `brain/architecture.md` and `brain/codebase/index.md` for existing documentation.
 
 ## Output Format
 

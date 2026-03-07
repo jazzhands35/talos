@@ -42,6 +42,7 @@ pip install -e ".[dev]"
 - `src/talos/` — main package (all source code lives here)
 - `tests/` — pytest test suite, mirrors src structure
 - `brain/` — knowledge vault (architecture, decisions, patterns)
+- `docs/` — Kalshi API reference specs and implementation plans
 
 ## Custom Agents
 
@@ -51,12 +52,7 @@ pip install -e ".[dev]"
 | **lint-check** | Before commits, after code changes | Runs ruff + pyright |
 | **backend-analyst** | Codebase exploration needing 3+ file reads | Traces data flows, explains architecture |
 
-**Agent usage rules:**
-- Run **test-runner** after ANY code change
-- Run **lint-check** before ANY commit
-- Run both **in parallel** when pre-committing
-- Use **backend-analyst** for exploration needing 3+ file reads
-- Use **direct Read/Grep** for quick single-file lookups (faster)
+Run both **test-runner** and **lint-check** in parallel before commits. Use **direct Read/Grep** for quick single-file lookups (faster than agents).
 
 ## Key Conventions
 
@@ -75,6 +71,8 @@ pip install -e ".[dev]"
 - **Audit trail:** All trade decisions and order actions must be logged with full context.
 - **Idempotency:** Order operations should be idempotent where possible to handle retries safely.
 
+Full trading principles with rationale: see `brain/principles.md`.
+
 ## Current Status
 
-Starting fresh — project scaffolding complete, no features yet.
+See `brain/architecture.md` for layer completion status.

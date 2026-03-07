@@ -214,10 +214,12 @@ class TestOrderEndpoints:
             "order": {
                 "order_id": "ord-123",
                 "ticker": "KXBTC-26MAR-T50000",
+                "action": "buy",
                 "side": "yes",
-                "order_type": "limit",
-                "price": 65,
-                "count": 10,
+                "type": "limit",
+                "yes_price": 65,
+                "no_price": 35,
+                "initial_count": 10,
                 "remaining_count": 10,
                 "fill_count": 0,
                 "status": "resting",
@@ -229,26 +231,29 @@ class TestOrderEndpoints:
 
         order = await client.create_order(
             ticker="KXBTC-26MAR-T50000",
+            action="buy",
             side="yes",
-            order_type="limit",
-            price=65,
+            yes_price=65,
             count=10,
         )
         assert order.order_id == "ord-123"
         # Verify POST body
         call_kwargs = client._http.request.call_args
         assert call_kwargs.kwargs["json"]["ticker"] == "KXBTC-26MAR-T50000"
-        assert call_kwargs.kwargs["json"]["price"] == 65
+        assert call_kwargs.kwargs["json"]["yes_price"] == 65
+        assert call_kwargs.kwargs["json"]["action"] == "buy"
 
     async def test_cancel_order(self, client: KalshiRESTClient) -> None:
         mock_data = {
             "order": {
                 "order_id": "ord-123",
                 "ticker": "KXBTC-26MAR-T50000",
+                "action": "buy",
                 "side": "yes",
-                "order_type": "limit",
-                "price": 65,
-                "count": 10,
+                "type": "limit",
+                "yes_price": 65,
+                "no_price": 35,
+                "initial_count": 10,
                 "remaining_count": 0,
                 "fill_count": 0,
                 "status": "canceled",
@@ -267,10 +272,12 @@ class TestOrderEndpoints:
                 {
                     "order_id": "ord-1",
                     "ticker": "KXBTC-26MAR-T50000",
+                    "action": "buy",
                     "side": "yes",
-                    "order_type": "limit",
-                    "price": 65,
-                    "count": 10,
+                    "type": "limit",
+                    "yes_price": 65,
+                    "no_price": 35,
+                    "initial_count": 10,
                     "remaining_count": 10,
                     "fill_count": 0,
                     "status": "resting",
@@ -284,6 +291,57 @@ class TestOrderEndpoints:
 
         orders = await client.get_orders()
         assert len(orders) == 1
+
+
+class TestQueuePositions:
+    async def test_get_queue_positions_prefers_fp(self, client: KalshiRESTClient) -> None:
+        mock_data = {
+            "queue_positions": [
+                {"order_id": "ord-1", "queue_position": 10, "queue_position_fp": "5.00"},
+                {"order_id": "ord-2", "queue_position": 20},
+            ]
+        }
+        client._http = AsyncMock(spec=httpx.AsyncClient)
+        client._http.request = AsyncMock(return_value=_mock_response(200, mock_data))
+
+        result = await client.get_queue_positions()
+        assert result["ord-1"] == 5  # prefers _fp (string → float → int)
+        assert result["ord-2"] == 20  # falls back to queue_position
+
+    async def test_small_fp_rounds_up_to_one(self, client: KalshiRESTClient) -> None:
+        mock_data = {
+            "queue_positions": [
+                {"order_id": "ord-1", "queue_position": 0, "queue_position_fp": "0.48"},
+            ]
+        }
+        client._http = AsyncMock(spec=httpx.AsyncClient)
+        client._http.request = AsyncMock(return_value=_mock_response(200, mock_data))
+
+        result = await client.get_queue_positions()
+        assert result["ord-1"] == 1  # small positive fp → at least 1
+
+    async def test_get_queue_positions_alternate_response_key(
+        self, client: KalshiRESTClient
+    ) -> None:
+        mock_data = {
+            "data": [
+                {"order_id": "ord-1", "queue_position": 15},
+            ]
+        }
+        client._http = AsyncMock(spec=httpx.AsyncClient)
+        client._http.request = AsyncMock(return_value=_mock_response(200, mock_data))
+
+        result = await client.get_queue_positions()
+        assert result["ord-1"] == 15
+
+    async def test_get_queue_positions_with_market_tickers(self, client: KalshiRESTClient) -> None:
+        mock_data = {"queue_positions": []}
+        client._http = AsyncMock(spec=httpx.AsyncClient)
+        client._http.request = AsyncMock(return_value=_mock_response(200, mock_data))
+
+        await client.get_queue_positions(market_tickers=["MKT-A", "MKT-B"])
+        call_kwargs = client._http.request.call_args
+        assert call_kwargs.kwargs["params"]["market_tickers"] == "MKT-A,MKT-B"
 
 
 class TestPortfolioEndpoints:

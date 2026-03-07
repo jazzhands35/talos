@@ -88,14 +88,12 @@ class OrderBookManager:
             None,
         )
 
-        if delta.delta == 0:
-            # Remove level
-            if idx is not None:
+        if idx is not None:
+            # Accumulate delta into existing level
+            side_levels[idx].quantity += delta.delta
+            if side_levels[idx].quantity <= 0:
                 side_levels.pop(idx)
-        elif idx is not None:
-            # Update existing level in place
-            side_levels[idx].quantity = delta.delta
-        else:
+        elif delta.delta > 0:
             # Insert new level, maintain descending sort via bisect
             new_level = OrderBookLevel(price=delta.price, quantity=delta.delta)
             bisect.insort(side_levels, new_level, key=lambda lvl: -lvl.price)

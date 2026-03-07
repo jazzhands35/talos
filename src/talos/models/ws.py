@@ -12,8 +12,8 @@ class OrderBookSnapshot(BaseModel):
 
     market_ticker: str
     market_id: str
-    yes: list[list[int]]
-    no: list[list[int]]
+    yes: list[list[int]] = []
+    no: list[list[int]] = []
 
 
 class OrderBookDelta(BaseModel):

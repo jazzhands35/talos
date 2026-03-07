@@ -57,6 +57,10 @@ class MarketFeed:
         if self.on_book_update:
             self.on_book_update(ticker)
 
+    async def connect(self) -> None:
+        """Connect the underlying WebSocket."""
+        await self._ws.connect()
+
     async def subscribe(self, ticker: str) -> None:
         """Subscribe to orderbook updates for a ticker."""
         await self._ws.subscribe(_ORDERBOOK_CHANNEL, ticker)

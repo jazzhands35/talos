@@ -7,7 +7,7 @@ from textual.containers import Vertical
 from textual.screen import ModalScreen
 from textual.widgets import Button, Input, Label, TextArea
 
-from talos.models.strategy import Opportunity
+from talos.models.strategy import BidConfirmation, Opportunity
 
 
 class AddGamesScreen(ModalScreen[list[str] | None]):
@@ -41,7 +41,7 @@ class AddGamesScreen(ModalScreen[list[str] | None]):
             self.dismiss(urls)
 
 
-class BidScreen(ModalScreen[dict[str, object] | None]):
+class BidScreen(ModalScreen[BidConfirmation | None]):
     """Confirmation modal for placing NO bids on both legs."""
 
     BINDINGS = [("escape", "cancel", "Cancel")]
@@ -55,23 +55,24 @@ class BidScreen(ModalScreen[dict[str, object] | None]):
 
     def compose(self) -> ComposeResult:
         opp = self._opp
-        cost = opp.no_a + opp.no_b
-        max_profit_cents = opp.raw_edge * opp.tradeable_qty
 
         with Vertical(id="modal-dialog"):
             yield Label("Place NO Bids", classes="modal-title")
-            yield Label(f"{opp.event_ticker} — Edge: {opp.raw_edge}¢")
+            yield Label(f"{opp.event_ticker} — Edge: {opp.fee_edge:.1f}¢ (raw {opp.raw_edge}¢)")
             yield Label(f"Leg A: BUY NO {opp.ticker_a} @ {opp.no_a}¢")
             yield Label(f"Leg B: BUY NO {opp.ticker_b} @ {opp.no_b}¢")
+            default_qty = min(5, opp.tradeable_qty)
             yield Label(f"Qty (max {opp.tradeable_qty}):")
             yield Input(
-                value=str(opp.tradeable_qty),
+                value=str(default_qty),
                 id="qty-input",
                 type="integer",
             )
+            total_cost = opp.cost * default_qty
+            fee_profit = opp.fee_edge * default_qty
             yield Label(
-                f"Total: ${cost * opp.tradeable_qty / 100:.2f} → "
-                f"Profit: ${max_profit_cents / 100:.2f}",
+                f"Total: ${total_cost / 100:.2f} → "
+                f"Profit: ${fee_profit / 100:.2f} (after 1.75% fee)",
                 id="cost-label",
             )
             yield Label("", id="modal-error", classes="modal-error")
@@ -95,11 +96,11 @@ class BidScreen(ModalScreen[dict[str, object] | None]):
                 )
                 return
             self.dismiss(
-                {
-                    "ticker_a": self._opp.ticker_a,
-                    "ticker_b": self._opp.ticker_b,
-                    "no_a": self._opp.no_a,
-                    "no_b": self._opp.no_b,
-                    "qty": qty,
-                }
+                BidConfirmation(
+                    ticker_a=self._opp.ticker_a,
+                    ticker_b=self._opp.ticker_b,
+                    no_a=self._opp.no_a,
+                    no_b=self._opp.no_b,
+                    qty=qty,
+                )
             )

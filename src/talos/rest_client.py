@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import uuid
 from typing import Any
 
 import httpx
@@ -139,18 +140,33 @@ class KalshiRESTClient:
         self,
         *,
         ticker: str,
+        action: str = "buy",
         side: str,
-        order_type: str,
-        price: int,
+        order_type: str = "limit",
+        no_price: int | None = None,
+        yes_price: int | None = None,
         count: int,
     ) -> Order:
-        body = {
+        body: dict[str, Any] = {
             "ticker": ticker,
+            "action": action,
             "side": side,
             "type": order_type,
-            "price": price,
             "count": count,
+            "client_order_id": str(uuid.uuid4()),
         }
+        if no_price is not None:
+            body["no_price"] = no_price
+        if yes_price is not None:
+            body["yes_price"] = yes_price
+        logger.info(
+            "create_order",
+            ticker=ticker,
+            action=action,
+            side=side,
+            price=no_price or yes_price,
+            count=count,
+        )
         data = await self._request("POST", "/portfolio/orders", json=body)
         return Order.model_validate(data["order"])
 
@@ -204,6 +220,42 @@ class KalshiRESTClient:
     async def get_order(self, order_id: str) -> Order:
         data = await self._request("GET", f"/portfolio/orders/{order_id}")
         return Order.model_validate(data["order"])
+
+    async def get_queue_positions(
+        self,
+        *,
+        event_ticker: str | None = None,
+        market_tickers: list[str] | None = None,
+    ) -> dict[str, int]:
+        """Fetch queue positions for resting orders. Returns {order_id: position}.
+
+        Prefers ``queue_position_fp`` (dollar-denominated) over ``queue_position``
+        when both are present.  Handles alternate response keys across API versions.
+        """
+        params: dict[str, Any] = {}
+        if event_ticker:
+            params["event_ticker"] = event_ticker
+        if market_tickers:
+            params["market_tickers"] = ",".join(market_tickers)
+        data = await self._request("GET", "/portfolio/orders/queue_positions", params=params)
+        items = data.get("queue_positions") or data.get("data") or data.get("results") or []
+        result: dict[str, int] = {}
+        for qp in items:
+            oid = qp.get("order_id", "")
+            fp = qp.get("queue_position_fp")
+            if fp is not None:
+                fp_val = float(fp)
+                pos = max(1, round(fp_val)) if fp_val > 0 else 0
+            else:
+                pos = qp.get("queue_position", 0)
+            result[oid] = pos
+        logger.debug(
+            "queue_positions_parsed",
+            count=len(result),
+            raw_items=len(items),
+            sample=dict(list(result.items())[:3]),
+        )
+        return result
 
     # --- Portfolio ---
 

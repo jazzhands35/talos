@@ -14,7 +14,7 @@ Run the test suite and report results concisely.
 ## Rules
 
 1. Run from the project root: `C:/Users/Sean/Documents/Python/Talos`
-2. Default command: `cd "C:/Users/Sean/Documents/Python/Talos" && python -m pytest -v`
+2. Default command: `cd "C:/Users/Sean/Documents/Python/Talos" && .venv/Scripts/python -m pytest -v`
 3. If the caller specifies particular test files, run only those.
 4. If tests fail, read the failing test file and the source file it tests to provide context.
 5. Do NOT fix code. Only diagnose and report.

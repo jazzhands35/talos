@@ -11,19 +11,19 @@ from talos.scanner import ArbitrageScanner
 
 def _setup_books(
     manager: OrderBookManager,
-    bid_a: int,
+    no_a: int,
     qty_a: int,
-    bid_b: int,
+    no_b: int,
     qty_b: int,
 ) -> None:
-    """Set up two books with given YES bid prices and quantities."""
+    """Set up two books with given NO bid prices and quantities."""
     manager.apply_snapshot(
         "GAME-STAN",
-        OrderBookSnapshot(market_ticker="GAME-STAN", market_id="u1", yes=[[bid_a, qty_a]], no=[]),
+        OrderBookSnapshot(market_ticker="GAME-STAN", market_id="u1", yes=[], no=[[no_a, qty_a]]),
     )
     manager.apply_snapshot(
         "GAME-MIA",
-        OrderBookSnapshot(market_ticker="GAME-MIA", market_id="u2", yes=[[bid_b, qty_b]], no=[]),
+        OrderBookSnapshot(market_ticker="GAME-MIA", market_id="u2", yes=[], no=[[no_b, qty_b]]),
     )
 
 
@@ -55,7 +55,7 @@ class TestPairManagement:
         manager = OrderBookManager()
         scanner = ArbitrageScanner(manager)
         scanner.add_pair("EVT-1", "GAME-STAN", "GAME-MIA")
-        _setup_books(manager, bid_a=62, qty_a=100, bid_b=45, qty_b=200)
+        _setup_books(manager, no_a=38, qty_a=100, no_b=55, qty_b=200)
         scanner.remove_pair("EVT-1")
         scanner.scan("GAME-STAN")
         assert len(scanner.opportunities) == 0
@@ -75,7 +75,8 @@ class TestScanFindsOpportunity:
     def test_detects_positive_edge(
         self, scanner: ArbitrageScanner, manager: OrderBookManager
     ) -> None:
-        _setup_books(manager, bid_a=62, qty_a=100, bid_b=45, qty_b=200)
+        # NO-A=38, NO-B=55 → cost=93, edge=7
+        _setup_books(manager, no_a=38, qty_a=100, no_b=55, qty_b=200)
         scanner.scan("GAME-STAN")
         opps = scanner.opportunities
         assert len(opps) == 1
@@ -86,14 +87,14 @@ class TestScanFindsOpportunity:
     def test_tradeable_qty_is_min(
         self, scanner: ArbitrageScanner, manager: OrderBookManager
     ) -> None:
-        _setup_books(manager, bid_a=62, qty_a=100, bid_b=45, qty_b=200)
+        _setup_books(manager, no_a=38, qty_a=100, no_b=55, qty_b=200)
         scanner.scan("GAME-STAN")
         assert scanner.opportunities[0].tradeable_qty == 100
 
     def test_scan_from_either_leg(
         self, scanner: ArbitrageScanner, manager: OrderBookManager
     ) -> None:
-        _setup_books(manager, bid_a=62, qty_a=100, bid_b=45, qty_b=200)
+        _setup_books(manager, no_a=38, qty_a=100, no_b=55, qty_b=200)
         scanner.scan("GAME-MIA")
         assert len(scanner.opportunities) == 1
 
@@ -109,27 +110,28 @@ class TestScanNoOpportunity:
         s.add_pair("GAME-1", "GAME-STAN", "GAME-MIA")
         return s
 
-    def test_no_edge_when_sum_under_100(
+    def test_no_edge_when_sum_over_100(
         self, scanner: ArbitrageScanner, manager: OrderBookManager
     ) -> None:
-        _setup_books(manager, bid_a=40, qty_a=100, bid_b=50, qty_b=100)
+        # NO-A=60, NO-B=50 → cost=110, edge=-10
+        _setup_books(manager, no_a=60, qty_a=100, no_b=50, qty_b=100)
         scanner.scan("GAME-STAN")
         assert len(scanner.opportunities) == 0
 
     def test_no_edge_when_sum_exactly_100(
         self, scanner: ArbitrageScanner, manager: OrderBookManager
     ) -> None:
-        _setup_books(manager, bid_a=50, qty_a=100, bid_b=50, qty_b=100)
+        _setup_books(manager, no_a=50, qty_a=100, no_b=50, qty_b=100)
         scanner.scan("GAME-STAN")
         assert len(scanner.opportunities) == 0
 
     def test_removes_vanished_opportunity(
         self, scanner: ArbitrageScanner, manager: OrderBookManager
     ) -> None:
-        _setup_books(manager, bid_a=62, qty_a=100, bid_b=45, qty_b=200)
+        _setup_books(manager, no_a=38, qty_a=100, no_b=55, qty_b=200)
         scanner.scan("GAME-STAN")
         assert len(scanner.opportunities) == 1
-        _setup_books(manager, bid_a=40, qty_a=100, bid_b=50, qty_b=200)
+        _setup_books(manager, no_a=60, qty_a=100, no_b=50, qty_b=200)
         scanner.scan("GAME-STAN")
         assert len(scanner.opportunities) == 0
 
@@ -150,7 +152,7 @@ class TestScanEdgeCases:
     ) -> None:
         manager.apply_snapshot(
             "GAME-STAN",
-            OrderBookSnapshot(market_ticker="GAME-STAN", market_id="u1", yes=[[62, 100]], no=[]),
+            OrderBookSnapshot(market_ticker="GAME-STAN", market_id="u1", yes=[], no=[[38, 100]]),
         )
         scanner.scan("GAME-STAN")
         assert len(scanner.opportunities) == 0
@@ -162,13 +164,13 @@ class TestScanEdgeCases:
         )
         manager.apply_snapshot(
             "GAME-MIA",
-            OrderBookSnapshot(market_ticker="GAME-MIA", market_id="u2", yes=[[45, 100]], no=[]),
+            OrderBookSnapshot(market_ticker="GAME-MIA", market_id="u2", yes=[], no=[[55, 100]]),
         )
         scanner.scan("GAME-STAN")
         assert len(scanner.opportunities) == 0
 
     def test_stale_book_skipped(self, scanner: ArbitrageScanner, manager: OrderBookManager) -> None:
-        _setup_books(manager, bid_a=62, qty_a=100, bid_b=45, qty_b=200)
+        _setup_books(manager, no_a=38, qty_a=100, no_b=55, qty_b=200)
         book = manager.get_book("GAME-STAN")
         assert book is not None
         book.stale = True
@@ -178,17 +180,18 @@ class TestScanEdgeCases:
     def test_scan_unrelated_ticker_is_noop(
         self, scanner: ArbitrageScanner, manager: OrderBookManager
     ) -> None:
-        _setup_books(manager, bid_a=62, qty_a=100, bid_b=45, qty_b=200)
+        _setup_books(manager, no_a=38, qty_a=100, no_b=55, qty_b=200)
         scanner.scan("UNRELATED")
         assert len(scanner.opportunities) == 0
 
     def test_updates_existing_opportunity(
         self, scanner: ArbitrageScanner, manager: OrderBookManager
     ) -> None:
-        _setup_books(manager, bid_a=62, qty_a=100, bid_b=45, qty_b=200)
+        _setup_books(manager, no_a=38, qty_a=100, no_b=55, qty_b=200)
         scanner.scan("GAME-STAN")
         assert scanner.opportunities[0].raw_edge == 7
-        _setup_books(manager, bid_a=65, qty_a=150, bid_b=45, qty_b=200)
+        # Improve edge: NO-A drops from 38 to 35
+        _setup_books(manager, no_a=35, qty_a=150, no_b=55, qty_b=200)
         scanner.scan("GAME-STAN")
         assert len(scanner.opportunities) == 1
         assert scanner.opportunities[0].raw_edge == 10
@@ -201,21 +204,23 @@ class TestOpportunitySorting:
         scanner = ArbitrageScanner(manager)
         scanner.add_pair("GAME-1", "GAME-A1", "GAME-B1")
         scanner.add_pair("GAME-2", "GAME-A2", "GAME-B2")
+        # Pair 1: NO=45+50=95, edge=5
         manager.apply_snapshot(
             "GAME-A1",
-            OrderBookSnapshot(market_ticker="GAME-A1", market_id="u1", yes=[[55, 100]], no=[]),
+            OrderBookSnapshot(market_ticker="GAME-A1", market_id="u1", yes=[], no=[[45, 100]]),
         )
         manager.apply_snapshot(
             "GAME-B1",
-            OrderBookSnapshot(market_ticker="GAME-B1", market_id="u2", yes=[[50, 100]], no=[]),
+            OrderBookSnapshot(market_ticker="GAME-B1", market_id="u2", yes=[], no=[[50, 100]]),
         )
+        # Pair 2: NO=40+50=90, edge=10
         manager.apply_snapshot(
             "GAME-A2",
-            OrderBookSnapshot(market_ticker="GAME-A2", market_id="u3", yes=[[60, 100]], no=[]),
+            OrderBookSnapshot(market_ticker="GAME-A2", market_id="u3", yes=[], no=[[40, 100]]),
         )
         manager.apply_snapshot(
             "GAME-B2",
-            OrderBookSnapshot(market_ticker="GAME-B2", market_id="u4", yes=[[50, 100]], no=[]),
+            OrderBookSnapshot(market_ticker="GAME-B2", market_id="u4", yes=[], no=[[50, 100]]),
         )
         scanner.scan("GAME-A1")
         scanner.scan("GAME-A2")

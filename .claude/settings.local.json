@@ -7,7 +7,12 @@
       "Bash(pip:*)",
       "Bash(python:*)",
       "Bash(source:*)",
-      "Bash(.venv/Scripts/python:*)"
+      "Bash(.venv/Scripts/python:*)",
+      "Bash(/c/Users/Sean/Documents/Python/Talos/.venv/Scripts/python:*)",
+      "Bash(/c/Users/Sean/Documents/Python/Talos/.venv/Scripts/pip install:*)",
+      "Bash(.venv/Scripts/pip install:*)",
+      "Bash(bash:*)",
+      "Bash(sh:*)"
     ]
   }
 }

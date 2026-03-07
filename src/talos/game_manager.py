@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import asyncio
+from collections.abc import Callable
 from urllib.parse import urlparse
 
 import structlog
 
+from talos.errors import KalshiAPIError
 from talos.market_feed import MarketFeed
 from talos.models.strategy import ArbPair
 from talos.rest_client import KalshiRESTClient
@@ -29,9 +32,10 @@ def parse_kalshi_url(url_or_ticker: str) -> str:
         if "kalshi.com" not in parsed.netloc:
             raise ValueError(f"Not a Kalshi URL: {parsed.netloc}")
         path = parsed.path.rstrip("/")
-        return path.rsplit("/", 1)[-1]
+        # Kalshi website uses lowercase URLs but API tickers are uppercase
+        return path.rsplit("/", 1)[-1].upper()
 
-    return url_or_ticker.strip()
+    return url_or_ticker.strip().upper()
 
 
 class GameManager:
@@ -50,6 +54,7 @@ class GameManager:
         self._feed = feed
         self._scanner = scanner
         self._games: dict[str, ArbPair] = {}
+        self.on_change: Callable[[], None] | None = None
 
     async def add_game(self, url_or_ticker: str) -> ArbPair:
         """Set up monitoring for a game from a URL or event ticker."""
@@ -58,7 +63,15 @@ class GameManager:
         if ticker in self._games:
             return self._games[ticker]
 
-        event = await self._rest.get_event(ticker, with_nested_markets=True)
+        try:
+            event = await self._rest.get_event(ticker, with_nested_markets=True)
+        except KalshiAPIError as e:
+            if e.status_code != 404:
+                raise
+            # Might be a market ticker — resolve to event ticker
+            logger.debug("event_not_found_trying_market", ticker=ticker)
+            market = await self._rest.get_market(ticker)
+            event = await self._rest.get_event(market.event_ticker, with_nested_markets=True)
 
         if len(event.markets) != 2:
             raise ValueError(f"Event {ticker} has {len(event.markets)} markets, expected exactly 2")
@@ -71,6 +84,8 @@ class GameManager:
         await self._feed.subscribe(ticker_a)
         await self._feed.subscribe(ticker_b)
         self._games[event.event_ticker] = pair
+        if self.on_change:
+            self.on_change()
 
         logger.info(
             "game_added",
@@ -82,12 +97,8 @@ class GameManager:
         return pair
 
     async def add_games(self, urls: list[str]) -> list[ArbPair]:
-        """Set up monitoring for multiple games."""
-        pairs = []
-        for url in urls:
-            pair = await self.add_game(url)
-            pairs.append(pair)
-        return pairs
+        """Set up monitoring for multiple games concurrently."""
+        return list(await asyncio.gather(*(self.add_game(url) for url in urls)))
 
     async def remove_game(self, event_ticker: str) -> None:
         """Remove a game from monitoring."""
@@ -97,7 +108,21 @@ class GameManager:
         self._scanner.remove_pair(event_ticker)
         await self._feed.unsubscribe(pair.ticker_a)
         await self._feed.unsubscribe(pair.ticker_b)
+        if self.on_change:
+            self.on_change()
         logger.info("game_removed", event_ticker=event_ticker)
+
+    async def clear_all_games(self) -> None:
+        """Remove all games from monitoring."""
+        tickers = list(self._games.keys())
+        for ticker in tickers:
+            pair = self._games.pop(ticker)
+            self._scanner.remove_pair(ticker)
+            await self._feed.unsubscribe(pair.ticker_a)
+            await self._feed.unsubscribe(pair.ticker_b)
+        if self.on_change:
+            self.on_change()
+        logger.info("all_games_cleared", count=len(tickers))
 
     @property
     def active_games(self) -> list[ArbPair]:

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Any, Literal
+from typing import Any
 
 from pydantic import BaseModel, model_validator
 
@@ -37,7 +37,8 @@ class Event(BaseModel):
     series_ticker: str
     title: str
     category: str
-    status: str
+    status: str | None = None
+    mutually_exclusive: bool | None = None
     markets: list[Market] = []
 
 
@@ -76,11 +77,35 @@ class OrderBook(BaseModel):
 
 
 class Trade(BaseModel):
-    """A single trade execution."""
+    """A single trade execution.
+
+    The Kalshi API returns ``taker_side`` (not ``side``) and ``price`` as a
+    dollar float (not cents int).  The validator normalizes both so downstream
+    code always sees ``side`` as a string and ``price`` as cents.
+    """
 
     ticker: str
     trade_id: str
     price: int
     count: int
-    side: Literal["yes", "no"]
+    side: str
     created_time: str
+    yes_price: int | None = None
+    no_price: int | None = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def _normalize(cls, data: Any) -> Any:
+        if isinstance(data, dict):
+            # API returns taker_side, normalize to side
+            if "taker_side" in data and "side" not in data:
+                data["side"] = data["taker_side"]
+            # API returns price as float (dollars), normalize to cents
+            if "price" in data:
+                p = data["price"]
+                if isinstance(p, float) and p <= 1.0:
+                    data["price"] = round(p * 100)
+            # If price missing but yes_price present, derive it
+            elif "yes_price" in data:
+                data["price"] = data["yes_price"]
+        return data

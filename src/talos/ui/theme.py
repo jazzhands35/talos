@@ -21,182 +21,134 @@ MAUVE = "#cba6f7"
 PEACH = "#fab387"
 LAVENDER = "#b4befe"
 
-APP_CSS = (
-    """
-Screen {
-    background: """
-    + BASE
-    + """;
-    color: """
-    + TEXT
-    + """;
-}
+APP_CSS = f"""
+Screen {{
+    background: {BASE};
+    color: {TEXT};
+}}
 
-Header {
-    background: """
-    + MANTLE
-    + """;
-    color: """
-    + BLUE
-    + """;
+Header {{
+    background: {MANTLE};
+    color: {BLUE};
     dock: top;
     height: 1;
-}
+}}
 
-Footer {
-    background: """
-    + MANTLE
-    + """;
+Footer {{
+    background: {MANTLE};
     dock: bottom;
-}
+}}
 
-#opportunities-table {
+#opportunities-table {{
     height: 1fr;
     min-height: 8;
-    border: solid """
-    + SURFACE1
-    + """;
-    background: """
-    + BASE
-    + """;
-}
+    border: solid {SURFACE1};
+    background: {BASE};
+}}
 
-#bottom-panels {
+#bottom-panels {{
     height: auto;
     max-height: 12;
     layout: horizontal;
-}
+}}
 
-#account-panel {
+#account-panel {{
     width: 2fr;
-    border: solid """
-    + SURFACE1
-    + """;
-    background: """
-    + SURFACE0
-    + """;
+    border: solid {SURFACE1};
+    background: {SURFACE0};
     padding: 0 1;
     height: auto;
     max-height: 12;
-}
+}}
 
-#order-log {
+#order-log {{
     width: 3fr;
-    border: solid """
-    + SURFACE1
-    + """;
-    background: """
-    + SURFACE0
-    + """;
+    border: solid {SURFACE1};
+    background: {SURFACE0};
     padding: 0 1;
     height: auto;
     max-height: 12;
-}
+}}
 
-.panel-title {
-    color: """
-    + BLUE
-    + """;
+.panel-title {{
+    color: {BLUE};
     text-style: bold;
-}
+}}
 
-.dim-row {
-    color: """
-    + OVERLAY0
-    + """;
-}
+.dim-row {{
+    color: {OVERLAY0};
+}}
 
-.edge-positive {
-    color: """
-    + GREEN
-    + """;
-}
+.edge-positive {{
+    color: {GREEN};
+}}
 
-.status-connected {
-    color: """
-    + GREEN
-    + """;
-}
+.status-connected {{
+    color: {GREEN};
+}}
 
-.status-disconnected {
-    color: """
-    + RED
-    + """;
-}
+.status-disconnected {{
+    color: {RED};
+}}
 
-.order-filled {
-    color: """
-    + GREEN
-    + """;
-}
+.order-filled {{
+    color: {GREEN};
+}}
 
-.order-open {
-    color: """
-    + YELLOW
-    + """;
-}
+.order-open {{
+    color: {YELLOW};
+}}
 
-.order-cancelled {
-    color: """
-    + RED
-    + """;
-}
+.order-cancelled {{
+    color: {RED};
+}}
 
 /* Modal styling */
-ModalScreen {
+ModalScreen {{
     align: center middle;
-}
+}}
 
-#modal-dialog {
+#modal-dialog {{
     width: 60;
     height: auto;
     max-height: 80%;
-    border: thick """
-    + SURFACE1
-    + """;
-    background: """
-    + SURFACE0
-    + """;
+    border: thick {SURFACE1};
+    background: {SURFACE0};
     padding: 1 2;
-}
+}}
 
-#modal-dialog Label {
+#modal-dialog Label {{
     width: 100%;
     margin: 0 0 1 0;
-}
+}}
 
-#modal-dialog TextArea {
+#modal-dialog TextArea {{
     height: 8;
     margin: 0 0 1 0;
-}
+}}
 
-#modal-dialog Input {
+#modal-dialog Input {{
     margin: 0 0 1 0;
-}
+}}
 
-#modal-buttons {
+#modal-buttons {{
     layout: horizontal;
     height: auto;
     align: right middle;
-}
+}}
 
-#modal-buttons Button {
+#modal-buttons Button {{
     margin: 0 0 0 1;
-}
+}}
 
-.modal-title {
-    color: """
-    + BLUE
-    + """;
+.modal-title {{
+    color: {BLUE};
     text-style: bold;
     margin: 0 0 1 0;
-}
+}}
 
-.modal-error {
-    color: """
-    + RED
-    + """;
+.modal-error {{
+    color: {RED};
     margin: 0 0 1 0;
-}
+}}
 """
-)

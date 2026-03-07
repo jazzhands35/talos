@@ -24,5 +24,21 @@ class Opportunity(BaseModel):
     qty_a: int
     qty_b: int
     raw_edge: int
+    fee_edge: float = 0.0
     tradeable_qty: int
     timestamp: str
+
+    @property
+    def cost(self) -> int:
+        """Total NO cost per contract in cents."""
+        return self.no_a + self.no_b
+
+
+class BidConfirmation(BaseModel):
+    """Result from the bid confirmation modal."""
+
+    ticker_a: str
+    ticker_b: str
+    no_a: int
+    no_b: int
+    qty: int
