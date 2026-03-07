@@ -8,17 +8,32 @@ from textual.app import App, ComposeResult
 from textual.containers import Horizontal
 from textual.widgets import DataTable, Footer, Header
 
+from talos.cpm import CPMTracker
 from talos.game_manager import GameManager
 from talos.market_feed import MarketFeed
+from talos.models.order import Order
+from talos.models.position import EventPositionSummary
 from talos.models.strategy import BidConfirmation
 from talos.position import compute_event_positions
 from talos.rest_client import KalshiRESTClient
 from talos.scanner import ArbitrageScanner
+from talos.top_of_market import TopOfMarketTracker
 from talos.ui.screens import AddGamesScreen, BidScreen
 from talos.ui.theme import APP_CSS
 from talos.ui.widgets import AccountPanel, OpportunitiesTable, OrderLog
 
 logger = structlog.get_logger()
+
+
+def _merge_queue(existing: int | None, incoming: int) -> int:
+    """Conservative queue position merge — keep smallest positive value."""
+    if existing is None:
+        return incoming
+    if incoming <= 0 < existing:
+        return existing
+    if existing <= 0 < incoming:
+        return incoming
+    return min(existing, incoming)
 
 
 class TalosApp(App):
@@ -29,6 +44,7 @@ class TalosApp(App):
     BINDINGS = [
         ("a", "add_games", "Add Games"),
         ("d", "remove_game", "Remove Game"),
+        ("x", "clear_games", "Clear All"),
         ("q", "quit", "Quit"),
     ]
 
@@ -39,12 +55,19 @@ class TalosApp(App):
         game_manager: GameManager | None = None,
         rest_client: KalshiRESTClient | None = None,
         market_feed: MarketFeed | None = None,
+        tracker: TopOfMarketTracker | None = None,
+        initial_games: list[str] | None = None,
     ) -> None:
         super().__init__()
         self._scanner = scanner
         self._game_manager = game_manager
         self._rest = rest_client
         self._feed = market_feed
+        self._tracker = tracker
+        self._initial_games = initial_games or []
+        self._queue_cache: dict[str, int] = {}
+        self._orders_cache: list[Order] = []
+        self._cpm = CPMTracker()
 
     def compose(self) -> ComposeResult:
         yield Header()
@@ -60,17 +83,33 @@ class TalosApp(App):
             self.set_interval(0.5, self.refresh_opportunities)
         if self._rest is not None:
             self.set_interval(10.0, self.refresh_account)
+            self.set_interval(3.0, self.refresh_queue_positions)
+            self.set_interval(10.0, self.refresh_trades)
+        if self._tracker is not None:
+            self._tracker.on_change = self._on_top_of_market_change
         if self._feed is not None:
             self._start_feed()
 
     @work(thread=False)
     async def _start_feed(self) -> None:
-        """Connect WebSocket and listen for market data."""
+        """Connect WebSocket, restore saved games, and listen for market data."""
         if self._feed is None:
             return
         try:
             await self._feed.connect()
             self.notify("WebSocket connected", severity="information")
+            # Restore saved games now that WS is ready
+            if self._game_manager is not None and self._initial_games:
+                restored = 0
+                for ticker in self._initial_games:
+                    try:
+                        await self._game_manager.add_game(ticker)
+                        restored += 1
+                    except Exception:
+                        logger.warning("restore_game_failed", game=ticker)
+                if restored:
+                    self.notify(f"Restored {restored} game(s)", severity="information")
+                self._initial_games.clear()
             await self._feed.start()
         except Exception as e:
             logger.exception("feed_connection_error")
@@ -78,6 +117,36 @@ class TalosApp(App):
                 f"WebSocket error: {type(e).__name__}: {e}",
                 severity="error",
                 markup=False,
+                timeout=15,
+            )
+
+    def _active_market_tickers(self) -> list[str]:
+        """Collect market tickers from all active scanner pairs."""
+        if self._scanner is None:
+            return []
+        tickers: list[str] = []
+        for pair in self._scanner.pairs:
+            tickers.append(pair.ticker_a)
+            tickers.append(pair.ticker_b)
+        return tickers
+
+    def _on_top_of_market_change(self, ticker: str, at_top: bool) -> None:
+        """Handle top-of-market state transition — show toast."""
+        if self._tracker is None:
+            return
+        resting = self._tracker.resting_price(ticker)
+        if at_top:
+            self.notify(
+                f"Back at top: {ticker} ({resting}c)",
+                severity="information",
+                timeout=10,
+            )
+        else:
+            best = self._tracker._books.best_ask(ticker)
+            top_price = best.price if best else "?"
+            self.notify(
+                f"Jumped: {ticker} (you: {resting}c, top: {top_price}c)",
+                severity="warning",
                 timeout=15,
             )
 
@@ -97,13 +166,43 @@ class TalosApp(App):
             panel.update_balance(balance.balance, balance.portfolio_value)
 
             orders = await self._rest.get_orders(limit=50)
+            self._orders_cache = orders
 
-            # Derive position summaries from orders + scanner pairs
+            # Update top-of-market tracker with current orders
+            if self._tracker is not None and self._scanner is not None:
+                self._tracker.update_orders(orders, self._scanner.pairs)
+
+            # Fetch queue positions and merge into cache (only positive values)
+            try:
+                tickers = self._active_market_tickers()
+                if tickers:
+                    new_qp = await self._rest.get_queue_positions(market_tickers=tickers)
+                    for oid, qp in new_qp.items():
+                        if qp > 0:
+                            self._queue_cache[oid] = _merge_queue(
+                                self._queue_cache.get(oid), qp
+                            )
+            except Exception:
+                logger.debug("queue_positions_fetch_failed")
+
+            # Apply cached queue positions to orders
+            for order in orders:
+                qp = self._queue_cache.get(order.order_id)
+                if qp is not None:
+                    order.queue_position = qp
+
+            # Prune cache entries for orders no longer active
+            active_ids = {o.order_id for o in orders if o.remaining_count > 0}
+            self._queue_cache = {
+                oid: v for oid, v in self._queue_cache.items() if oid in active_ids
+            }
+
+            # Derive position summaries from orders + scanner pairs → table
             if self._scanner is not None:
                 summaries = compute_event_positions(orders, self._scanner.pairs)
-                panel.update_event_positions(summaries)
-            else:
-                panel.update_event_positions([])
+                self._enrich_with_cpm(summaries)
+                table = self.query_one(OpportunitiesTable)
+                table.update_positions(summaries)
 
             # Build enriched order dicts for the order log
             order_data = [
@@ -115,9 +214,7 @@ class TalosApp(App):
                     "total": o.initial_count,
                     "remaining": o.remaining_count,
                     "status": o.status,
-                    "time": o.created_time[11:16]
-                    if len(o.created_time) > 16
-                    else o.created_time,
+                    "time": o.created_time[11:16] if len(o.created_time) > 16 else o.created_time,
                     "queue_pos": o.queue_position,
                 }
                 for o in orders
@@ -127,19 +224,76 @@ class TalosApp(App):
         except Exception:
             logger.exception("refresh_account_error")
 
-    def action_add_games(self) -> None:
-        """Open the Add Games modal."""
-        self.push_screen(AddGamesScreen(), callback=self._on_games_added)
-
-    def _on_games_added(self, urls: list[str] | None) -> None:
-        """Handle result from Add Games modal."""
-        if urls is None or self._game_manager is None:
+    @work(thread=False)
+    async def refresh_queue_positions(self) -> None:
+        """Poll queue positions on a fast cadence (3s) and update display."""
+        if self._rest is None or self._scanner is None:
             return
-        self._add_games_async(urls)
+        try:
+            tickers = self._active_market_tickers()
+            if not tickers:
+                return
+            new_qp = await self._rest.get_queue_positions(market_tickers=tickers)
+            for oid, qp in new_qp.items():
+                if qp > 0:
+                    self._queue_cache[oid] = _merge_queue(self._queue_cache.get(oid), qp)
+        except Exception:
+            logger.debug("queue_poll_failed")
+            return
+
+        if not self._orders_cache:
+            return
+
+        # Apply updated cache to cached orders and recompute positions
+        for order in self._orders_cache:
+            qp = self._queue_cache.get(order.order_id)
+            if qp is not None:
+                order.queue_position = qp
+        summaries = compute_event_positions(self._orders_cache, self._scanner.pairs)
+        self._enrich_with_cpm(summaries)
+        table = self.query_one(OpportunitiesTable)
+        table.update_positions(summaries)
 
     @work(thread=False)
-    async def _add_games_async(self, urls: list[str]) -> None:
-        """Add games in background."""
+    async def refresh_trades(self) -> None:
+        """Fetch recent trades for active tickers and update CPM tracker."""
+        if self._rest is None or self._scanner is None:
+            return
+        tickers = self._active_market_tickers()
+        if not tickers:
+            return
+        for ticker in tickers:
+            try:
+                trades = await self._rest.get_trades(ticker, limit=50)
+                self._cpm.ingest(ticker, trades)
+                logger.debug("trades_ingested", ticker=ticker, count=len(trades))
+            except Exception:
+                logger.warning("trade_fetch_failed", ticker=ticker, exc_info=True)
+        self._cpm.prune()
+
+    def _enrich_with_cpm(self, summaries: list[EventPositionSummary]) -> None:
+        """Set CPM and ETA fields on each leg summary from the CPM tracker."""
+        for s in summaries:
+            for leg in (s.leg_a, s.leg_b):
+                leg.cpm = self._cpm.cpm(leg.ticker)
+                leg.cpm_partial = self._cpm.is_partial(leg.ticker)
+                if leg.queue_position is not None and leg.queue_position > 0:
+                    leg.eta_minutes = self._cpm.eta_minutes(
+                        leg.ticker, leg.queue_position
+                    )
+
+    def action_add_games(self) -> None:
+        """Open the Add Games modal."""
+        self._open_add_games()
+
+    @work(thread=False, exclusive=True, group="add_games")
+    async def _open_add_games(self) -> None:
+        urls = await self.push_screen_wait(AddGamesScreen())
+        if urls is None or self._game_manager is None:
+            return
+        await self._do_add_games(urls)
+
+    async def _do_add_games(self, urls: list[str]) -> None:
         if self._game_manager is None:
             return
         try:
@@ -155,7 +309,7 @@ class TalosApp(App):
             return
         event_ticker = str(event.row_key.value)
         opp = self._scanner.get_opportunity(event_ticker)
-        if opp and opp.raw_edge > 0:
+        if opp is not None:
             self.push_screen(BidScreen(opp), callback=self._on_bid_confirmed)
 
     def _on_bid_confirmed(self, result: BidConfirmation | None) -> None:
@@ -221,5 +375,22 @@ class TalosApp(App):
         try:
             await self._game_manager.remove_game(event_ticker)
             self.notify(f"Removed {event_ticker}", severity="information")
+        except Exception as e:
+            self.notify(f"Error: {e}", severity="error", markup=False)
+
+    def action_clear_games(self) -> None:
+        """Clear all monitored games."""
+        if self._game_manager is None:
+            return
+        self._clear_all_games()
+
+    @work(thread=False)
+    async def _clear_all_games(self) -> None:
+        if self._game_manager is None:
+            return
+        try:
+            count = len(self._game_manager.active_games)
+            await self._game_manager.clear_all_games()
+            self.notify(f"Cleared {count} game(s)", severity="information")
         except Exception as e:
             self.notify(f"Error: {e}", severity="error", markup=False)
