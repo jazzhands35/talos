@@ -153,7 +153,7 @@ class TalosApp(App):
     def refresh_opportunities(self) -> None:
         """Update the opportunities table from scanner state."""
         table = self.query_one(OpportunitiesTable)
-        table.refresh_from_scanner(self._scanner)
+        table.refresh_from_scanner(self._scanner, self._tracker)
 
     @work(thread=False)
     async def refresh_account(self) -> None:
