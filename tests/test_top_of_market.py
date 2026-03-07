@@ -6,6 +6,7 @@ from talos.models.order import Order
 from talos.models.strategy import ArbPair
 from talos.models.ws import OrderBookSnapshot
 from talos.orderbook import OrderBookManager
+from talos.scanner import ArbitrageScanner
 from talos.top_of_market import TopOfMarketTracker
 
 
@@ -166,3 +167,28 @@ class TestCallbackTransitions:
         tracker.update_orders([], [PAIR])
         assert tracker.is_at_top("MKT-A") is None
         assert tracker.resting_price("MKT-A") is None
+
+
+class TestTableIntegration:
+    def test_warning_prefix_in_q_column(self) -> None:
+        """Q column shows !! prefix when not at top of market."""
+        books = OrderBookManager()
+        scanner = ArbitrageScanner(books)
+        tracker = TopOfMarketTracker(books)
+
+        scanner.add_pair("EVT-A", "MKT-A", "MKT-B")
+
+        # Set up orderbook: MKT-A has been jumped, MKT-B is at top
+        books.apply_snapshot("MKT-A", _snapshot(yes=[], no=[[48, 5], [47, 10]]))
+        books.apply_snapshot("MKT-B", _snapshot(yes=[], no=[[45, 10]]))
+        scanner.scan("MKT-A")
+        scanner.scan("MKT-B")
+
+        # Set resting orders
+        orders = [_order("MKT-A", 47), _order("MKT-B", 45)]
+        tracker.update_orders(orders, scanner.pairs)
+        tracker.check("MKT-A")
+        tracker.check("MKT-B")
+
+        assert tracker.is_at_top("MKT-A") is False
+        assert tracker.is_at_top("MKT-B") is True
