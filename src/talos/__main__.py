@@ -41,6 +41,8 @@ def main() -> None:
         sys.exit(1)
 
     from talos.auth import KalshiAuth
+    from talos.bid_adjuster import BidAdjuster
+    from talos.engine import TradingEngine
     from talos.game_manager import GameManager
     from talos.market_feed import MarketFeed
     from talos.orderbook import OrderBookManager
@@ -58,6 +60,7 @@ def main() -> None:
     feed = MarketFeed(ws, books)
     scanner = ArbitrageScanner(books)
     tracker = TopOfMarketTracker(books)
+    adjuster = BidAdjuster(books, [], unit_size=10)
     game_mgr = GameManager(rest, feed, scanner)
 
     # Wire scanner + tracker to book updates
@@ -73,14 +76,16 @@ def main() -> None:
         [p.event_ticker for p in game_mgr.active_games]
     )
 
-    app = TalosApp(
+    engine = TradingEngine(
         scanner=scanner,
         game_manager=game_mgr,
         rest_client=rest,
         market_feed=feed,
         tracker=tracker,
+        adjuster=adjuster,
         initial_games=saved_games,
     )
+    app = TalosApp(engine=engine)
     app.run()
 
 
