@@ -278,7 +278,7 @@ class PositionLedger:
             self._discrepancy = msg
             logger.warning(
                 "position_ledger_discrepancy",
-                event=self.event_ticker,
+                event_ticker=self.event_ticker,
                 problems=problems,
             )
         else:

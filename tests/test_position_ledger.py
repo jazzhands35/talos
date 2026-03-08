@@ -2,6 +2,7 @@
 
 import pytest
 
+from talos.models.order import Order
 from talos.position_ledger import PositionLedger, Side
 
 
@@ -164,3 +165,77 @@ class TestSafetyGate:
         ok, reason = ledger.is_placement_safe(Side.A, count=10, price=50)
         assert not ok
         assert "discrepancy" in reason
+
+
+def _make_order(
+    ticker: str,
+    fill_count: int = 0,
+    remaining_count: int = 0,
+    no_price: int = 50,
+    order_id: str = "ord-1",
+    status: str = "resting",
+) -> Order:
+    return Order(
+        order_id=order_id,
+        ticker=ticker,
+        action="buy",
+        side="no",
+        no_price=no_price,
+        fill_count=fill_count,
+        remaining_count=remaining_count,
+        initial_count=fill_count + remaining_count,
+        status=status,
+    )
+
+
+class TestReconciliation:
+    def test_sync_matching_state_no_discrepancy(self):
+        ledger = PositionLedger(event_ticker="EVT-1", unit_size=10)
+        ledger.record_fill(Side.A, count=5, price=50)
+        ledger.record_resting(Side.A, order_id="ord-a", count=5, price=50)
+        orders = [
+            _make_order("TK-A", fill_count=5, remaining_count=5, order_id="ord-a"),
+        ]
+        ledger.sync_from_orders(orders, ticker_a="TK-A", ticker_b="TK-B")
+        assert not ledger.has_discrepancy
+
+    def test_sync_fill_count_mismatch_flags(self):
+        ledger = PositionLedger(event_ticker="EVT-1", unit_size=10)
+        ledger.record_fill(Side.A, count=5, price=50)
+        # Kalshi says 8 filled — mismatch
+        orders = [
+            _make_order("TK-A", fill_count=8, remaining_count=2, order_id="ord-a"),
+        ]
+        ledger.sync_from_orders(orders, ticker_a="TK-A", ticker_b="TK-B")
+        assert ledger.has_discrepancy
+        assert ledger.discrepancy is not None
+        assert "filled" in ledger.discrepancy
+
+    def test_sync_multiple_resting_orders_flags(self):
+        ledger = PositionLedger(event_ticker="EVT-1", unit_size=10)
+        orders = [
+            _make_order("TK-A", fill_count=0, remaining_count=10, order_id="ord-1"),
+            _make_order("TK-A", fill_count=0, remaining_count=10, order_id="ord-2"),
+        ]
+        ledger.sync_from_orders(orders, ticker_a="TK-A", ticker_b="TK-B")
+        assert ledger.has_discrepancy
+        assert ledger.discrepancy is not None
+        assert "2 resting orders" in ledger.discrepancy
+
+    def test_discrepancy_blocks_placement(self):
+        ledger = PositionLedger(event_ticker="EVT-1", unit_size=10)
+        orders = [
+            _make_order("TK-A", fill_count=0, remaining_count=10, order_id="ord-1"),
+            _make_order("TK-A", fill_count=0, remaining_count=10, order_id="ord-2"),
+        ]
+        ledger.sync_from_orders(orders, ticker_a="TK-A", ticker_b="TK-B")
+        ok, reason = ledger.is_placement_safe(Side.B, count=10, price=48)
+        assert not ok
+        assert "discrepancy" in reason
+
+    def test_sync_clears_discrepancy_when_state_matches(self):
+        ledger = PositionLedger(event_ticker="EVT-1", unit_size=10)
+        ledger._discrepancy = "old problem"
+        orders = []  # no orders = no fills, no resting = matches empty ledger
+        ledger.sync_from_orders(orders, ticker_a="TK-A", ticker_b="TK-B")
+        assert not ledger.has_discrepancy
