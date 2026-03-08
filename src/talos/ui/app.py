@@ -287,6 +287,12 @@ class TalosApp(App):
                             ledger.sync_from_orders(
                                 orders, ticker_a=pair.ticker_a, ticker_b=pair.ticker_b
                             )
+                            # Check for completed sides → re-evaluate deferred jumps
+                            for side in (Side.A, Side.B):
+                                if ledger.is_unit_complete(side):
+                                    self._adjuster.on_side_complete(
+                                        pair.event_ticker, side
+                                    )
                         except KeyError:
                             pass  # Pair not registered with adjuster yet
 

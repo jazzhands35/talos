@@ -161,8 +161,9 @@ class BidAdjuster:
             if other_remaining == 0:
                 other_remaining = ledger.resting_count(other_side)
 
-            if this_remaining < other_remaining:
-                # Other side is more behind — defer this side
+            if this_remaining <= other_remaining:
+                # Other side is more behind (or equal) — defer this side
+                # Equal case: deterministic tiebreak by deferring this side
                 self._deferred.setdefault(pair.event_ticker, set()).add(side)
                 logger.info(
                     "jump_deferred",
@@ -171,6 +172,18 @@ class BidAdjuster:
                     reason=f"other side needs {other_remaining} vs this side {this_remaining}",
                 )
                 return None
+            else:
+                # This side is more behind — cancel other side's existing proposal
+                evt_proposals = self._proposals.get(pair.event_ticker, {})
+                if other_side in evt_proposals:
+                    logger.info(
+                        "proposal_superseded_by_tiebreaker",
+                        event_ticker=pair.event_ticker,
+                        superseded_side=other_side.value,
+                        winning_side=side.value,
+                    )
+                    del evt_proposals[other_side]
+                self._deferred.setdefault(pair.event_ticker, set()).add(other_side)
 
         # Build proposal — resting_order_id is guaranteed non-None (checked above)
         cancel_id = ledger.resting_order_id(side)
@@ -287,6 +300,15 @@ class BidAdjuster:
         side = Side(proposal.side)
         ledger = self._ledgers[proposal.event_ticker]
 
+        # Staleness check: verify the proposal's order still matches ledger state
+        current_resting = ledger.resting_order_id(side)
+        if current_resting != proposal.cancel_order_id:
+            self.clear_proposal(proposal.event_ticker, side)
+            raise ValueError(
+                f"Stale proposal: expected resting order {proposal.cancel_order_id}, "
+                f"but ledger has {current_resting}"
+            )
+
         # Find the ticker for this side
         ticker = self._side_ticker(proposal.event_ticker, side)
 
@@ -305,7 +327,7 @@ class BidAdjuster:
         )
 
         # Single atomic amend call
-        _old_order, amended_order = await rest_client.amend_order(  # type: ignore[attr-defined]
+        old_order, amended_order = await rest_client.amend_order(  # type: ignore[attr-defined]
             proposal.cancel_order_id,
             ticker=ticker,
             side="no",
@@ -313,6 +335,11 @@ class BidAdjuster:
             no_price=proposal.new_price,
             count=total_count,
         )
+
+        # Update fills from amend response (handles fills that arrived during approval)
+        fill_delta = old_order.fill_count - s.filled_count
+        if fill_delta > 0:
+            ledger.record_fill(side, count=fill_delta, price=old_order.no_price)
 
         # Update ledger from amend response
         ledger.record_resting(
@@ -361,6 +388,10 @@ class BidAdjuster:
         new_price: int,
     ) -> tuple[bool, str]:
         """Check safety as if the existing resting order were already cancelled."""
+        # P15: never act when position data is uncertain
+        if ledger.has_discrepancy:
+            return False, f"ledger has unresolved discrepancy: {ledger.discrepancy}"
+
         s = ledger._sides[side]
         # Simulate post-cancel state
         if s.filled_count + new_count > ledger.unit_size:
