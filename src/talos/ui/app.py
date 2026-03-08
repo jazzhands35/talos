@@ -8,13 +8,16 @@ from textual.app import App, ComposeResult
 from textual.containers import Horizontal
 from textual.widgets import DataTable, Footer, Header
 
+from talos.bid_adjuster import BidAdjuster
 from talos.cpm import CPMTracker
 from talos.game_manager import GameManager
 from talos.market_feed import MarketFeed
+from talos.models.adjustment import ProposedAdjustment
 from talos.models.order import Order
 from talos.models.position import EventPositionSummary
 from talos.models.strategy import BidConfirmation
 from talos.position import compute_event_positions
+from talos.position_ledger import Side
 from talos.rest_client import KalshiRESTClient
 from talos.scanner import ArbitrageScanner
 from talos.top_of_market import TopOfMarketTracker
@@ -56,6 +59,7 @@ class TalosApp(App):
         rest_client: KalshiRESTClient | None = None,
         market_feed: MarketFeed | None = None,
         tracker: TopOfMarketTracker | None = None,
+        adjuster: BidAdjuster | None = None,
         initial_games: list[str] | None = None,
     ) -> None:
         super().__init__()
@@ -64,6 +68,7 @@ class TalosApp(App):
         self._rest = rest_client
         self._feed = market_feed
         self._tracker = tracker
+        self._adjuster = adjuster
         self._initial_games = initial_games or []
         self._queue_cache: dict[str, int] = {}
         self._orders_cache: list[Order] = []
@@ -87,6 +92,8 @@ class TalosApp(App):
             self.set_interval(10.0, self.refresh_trades)
         if self._tracker is not None:
             self._tracker.on_change = self._on_top_of_market_change
+        if self._adjuster is not None:
+            self._adjuster.on_proposal = self._on_adjustment_proposed
         if self._feed is not None:
             self._start_feed()
 
@@ -131,7 +138,7 @@ class TalosApp(App):
         return tickers
 
     def _on_top_of_market_change(self, ticker: str, at_top: bool) -> None:
-        """Handle top-of-market state transition — show toast."""
+        """Handle top-of-market state transition — show toast and evaluate adjustment."""
         if self._tracker is None:
             return
         resting = self._tracker.resting_price(ticker)
@@ -148,6 +155,75 @@ class TalosApp(App):
                 severity="warning",
                 timeout=15,
             )
+
+        # Evaluate for bid adjustment
+        if self._adjuster is not None:
+            proposal = self._adjuster.evaluate_jump(ticker, at_top)
+            if proposal is not None:
+                logger.info(
+                    "adjustment_proposed",
+                    event_ticker=proposal.event_ticker,
+                    side=proposal.side,
+                    old_price=proposal.cancel_price,
+                    new_price=proposal.new_price,
+                    reason=proposal.reason,
+                )
+
+    def _on_adjustment_proposed(self, proposal: ProposedAdjustment) -> None:
+        """Handle a new bid adjustment proposal — show for operator approval."""
+        self.notify(
+            f"Adjustment proposed: {proposal.event_ticker} side {proposal.side}\n"
+            f"{proposal.reason}\n"
+            f"Before: {proposal.position_before}\n"
+            f"After: {proposal.position_after}\n"
+            f"Safety: {proposal.safety_check}",
+            severity="warning",
+            timeout=30,
+        )
+
+    @work(thread=False)
+    async def approve_adjustment(
+        self, event_ticker: str, side_value: str
+    ) -> None:
+        """Execute an approved bid adjustment via amend."""
+        if self._adjuster is None or self._rest is None:
+            return
+        side = Side(side_value)
+        proposal = self._adjuster.get_proposal(event_ticker, side)
+        if proposal is None:
+            self.notify("No pending proposal to approve", severity="warning")
+            return
+        try:
+            await self._adjuster.execute(proposal, self._rest)
+            self.notify(
+                f"Adjustment executed: {event_ticker} side {side_value} "
+                f"→ {proposal.new_price}c",
+                severity="information",
+                timeout=10,
+            )
+        except Exception as e:
+            self.notify(
+                f"Adjustment FAILED: {type(e).__name__}: {e}",
+                severity="error",
+                markup=False,
+                timeout=30,
+            )
+            logger.exception(
+                "adjustment_execute_error",
+                event_ticker=event_ticker,
+                side=side_value,
+            )
+
+    def reject_adjustment(self, event_ticker: str, side_value: str) -> None:
+        """Reject a pending bid adjustment proposal."""
+        if self._adjuster is None:
+            return
+        side = Side(side_value)
+        self._adjuster.clear_proposal(event_ticker, side)
+        self.notify(
+            f"Adjustment rejected: {event_ticker} side {side_value}",
+            severity="information",
+        )
 
     def refresh_opportunities(self) -> None:
         """Update the opportunities table from scanner state."""
@@ -202,6 +278,23 @@ class TalosApp(App):
                 self._enrich_with_cpm(summaries)
                 table = self.query_one(OpportunitiesTable)
                 table.update_positions(summaries)
+
+                # Sync position ledgers for bid adjustment safety (Principle 15)
+                if self._adjuster is not None:
+                    for pair in self._scanner.pairs:
+                        try:
+                            ledger = self._adjuster.get_ledger(pair.event_ticker)
+                            ledger.sync_from_orders(
+                                orders, ticker_a=pair.ticker_a, ticker_b=pair.ticker_b
+                            )
+                            # Check for completed sides → re-evaluate deferred jumps
+                            for side in (Side.A, Side.B):
+                                if ledger.is_unit_complete(side):
+                                    self._adjuster.on_side_complete(
+                                        pair.event_ticker, side
+                                    )
+                        except KeyError:
+                            pass  # Pair not registered with adjuster yet
 
             # Build enriched order dicts for the order log
             order_data = [

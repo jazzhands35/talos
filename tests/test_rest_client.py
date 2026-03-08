@@ -295,34 +295,70 @@ class TestOrderEndpoints:
 
     async def test_amend_order(self, client: KalshiRESTClient) -> None:
         mock_data = {
-            "order": {
+            "old_order": {
                 "order_id": "ord-123",
                 "ticker": "KXBTC-26MAR-T50000",
                 "action": "buy",
-                "side": "yes",
+                "side": "no",
                 "type": "limit",
-                "yes_price": 70,
-                "no_price": 30,
+                "yes_price": 30,
+                "no_price": 70,
                 "initial_count": 10,
                 "remaining_count": 10,
                 "fill_count": 0,
                 "status": "resting",
                 "created_time": "2026-03-03T12:00:00Z",
-            }
+            },
+            "order": {
+                "order_id": "ord-123",
+                "ticker": "KXBTC-26MAR-T50000",
+                "action": "buy",
+                "side": "no",
+                "type": "limit",
+                "yes_price": 25,
+                "no_price": 75,
+                "initial_count": 10,
+                "remaining_count": 10,
+                "fill_count": 0,
+                "status": "resting",
+                "created_time": "2026-03-03T12:00:00Z",
+            },
         }
         client._http = AsyncMock(spec=httpx.AsyncClient)
         client._http.request = AsyncMock(return_value=_mock_response(200, mock_data))
 
-        order = await client.amend_order("ord-123", new_price=70, new_count=10)
-        assert order.order_id == "ord-123"
-        assert order.yes_price == 70
+        old_order, amended_order = await client.amend_order(
+            "ord-123", ticker="KXBTC-26MAR-T50000", no_price=75, count=10
+        )
+        assert old_order.order_id == "ord-123"
+        assert old_order.no_price == 70
+        assert amended_order.order_id == "ord-123"
+        assert amended_order.no_price == 75
         call_kwargs = client._http.request.call_args
-        assert call_kwargs.kwargs["json"]["new_price"] == 70
-        assert call_kwargs.kwargs["json"]["new_count"] == 10
+        body = call_kwargs.kwargs["json"]
+        assert body["ticker"] == "KXBTC-26MAR-T50000"
+        assert body["side"] == "no"
+        assert body["action"] == "buy"
+        assert body["no_price"] == 75
+        assert body["count"] == 10
 
     async def test_amend_order_partial_fields(self, client: KalshiRESTClient) -> None:
-        """Only specified fields are sent in the amend body."""
+        """Only optional fields are sent when specified; required fields always present."""
         mock_data = {
+            "old_order": {
+                "order_id": "ord-123",
+                "ticker": "KXBTC-26MAR-T50000",
+                "action": "buy",
+                "side": "no",
+                "type": "limit",
+                "yes_price": 35,
+                "no_price": 65,
+                "initial_count": 10,
+                "remaining_count": 10,
+                "fill_count": 0,
+                "status": "resting",
+                "created_time": "2026-03-03T12:00:00Z",
+            },
             "order": {
                 "order_id": "ord-123",
                 "ticker": "KXBTC-26MAR-T50000",
@@ -336,16 +372,21 @@ class TestOrderEndpoints:
                 "fill_count": 0,
                 "status": "resting",
                 "created_time": "2026-03-03T12:00:00Z",
-            }
+            },
         }
         client._http = AsyncMock(spec=httpx.AsyncClient)
         client._http.request = AsyncMock(return_value=_mock_response(200, mock_data))
 
-        await client.amend_order("ord-123", new_price=65)
+        await client.amend_order("ord-123", ticker="KXBTC-26MAR-T50000", no_price=65)
         call_kwargs = client._http.request.call_args
         body = call_kwargs.kwargs["json"]
-        assert body == {"new_price": 65}
-        assert "new_count" not in body
+        # Required fields always present
+        assert body["ticker"] == "KXBTC-26MAR-T50000"
+        assert body["side"] == "no"
+        assert body["action"] == "buy"
+        # Optional: only no_price sent, count omitted
+        assert body["no_price"] == 65
+        assert "count" not in body
 
     async def test_get_order(self, client: KalshiRESTClient) -> None:
         mock_data = {
