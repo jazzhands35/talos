@@ -1,6 +1,11 @@
 """Tests for BidAdjuster — async orchestrator for bid adjustment."""
 
+from unittest.mock import AsyncMock
+
+import pytest
+
 from talos.bid_adjuster import BidAdjuster
+from talos.models.order import Order
 from talos.models.strategy import ArbPair
 from talos.position_ledger import Side
 
@@ -136,3 +141,113 @@ class TestDualJumpTiebreaker:
         proposal = self.adjuster.on_side_complete("EVT-1", Side.A)
         assert proposal is not None
         assert proposal.side == "B"
+
+
+def _make_order(
+    order_id: str, price: int, fill_count: int, remaining_count: int
+) -> Order:
+    return Order(
+        order_id=order_id,
+        ticker="TK-B",
+        side="no",
+        action="buy",
+        no_price=price,
+        status="resting",
+        remaining_count=remaining_count,
+        fill_count=fill_count,
+        initial_count=fill_count + remaining_count,
+    )
+
+
+class TestAsyncExecution:
+    @pytest.mark.asyncio
+    async def test_execute_amends_order(self):
+        pair = ArbPair(event_ticker="EVT-1", ticker_a="TK-A", ticker_b="TK-B")
+        books = FakeBookManager({"TK-A": 50, "TK-B": 48})
+        adjuster = BidAdjuster(book_manager=books, pairs=[pair], unit_size=10)
+
+        ledger = adjuster.get_ledger("EVT-1")
+        ledger.record_fill(Side.A, count=10, price=50)
+        ledger.record_resting(Side.B, order_id="ord-b", count=10, price=47)
+
+        proposal = adjuster.evaluate_jump("TK-B", at_top=False)
+        assert proposal is not None
+
+        old_order = _make_order("ord-b", price=47, fill_count=0, remaining_count=10)
+        amended_order = _make_order("ord-b", price=48, fill_count=0, remaining_count=10)
+
+        rest_client = AsyncMock()
+        rest_client.amend_order.return_value = (old_order, amended_order)
+
+        await adjuster.execute(proposal, rest_client)
+
+        rest_client.amend_order.assert_called_once_with(
+            "ord-b",
+            ticker="TK-B",
+            side="no",
+            action="buy",
+            no_price=48,
+            count=10,
+        )
+        # Ledger should reflect amended state
+        assert ledger.resting_order_id(Side.B) == "ord-b"
+        assert ledger.resting_price(Side.B) == 48
+        assert ledger.resting_count(Side.B) == 10
+
+    @pytest.mark.asyncio
+    async def test_execute_amend_with_partial_fill(self):
+        """Amend a partially filled order — only unfilled portion moves."""
+        pair = ArbPair(event_ticker="EVT-1", ticker_a="TK-A", ticker_b="TK-B")
+        books = FakeBookManager({"TK-A": 50, "TK-B": 33})
+        adjuster = BidAdjuster(book_manager=books, pairs=[pair], unit_size=10)
+
+        ledger = adjuster.get_ledger("EVT-1")
+        ledger.record_fill(Side.A, count=10, price=50)
+        ledger.record_fill(Side.B, count=6, price=32)
+        ledger.record_resting(Side.B, order_id="ord-b", count=4, price=32)
+
+        proposal = adjuster.evaluate_jump("TK-B", at_top=False)
+        assert proposal is not None
+        assert proposal.new_count == 4
+
+        old_order = _make_order("ord-b", price=32, fill_count=6, remaining_count=4)
+        amended_order = _make_order("ord-b", price=33, fill_count=6, remaining_count=4)
+
+        rest_client = AsyncMock()
+        rest_client.amend_order.return_value = (old_order, amended_order)
+
+        await adjuster.execute(proposal, rest_client)
+
+        # count passed to amend = fill_count + remaining_count (total)
+        rest_client.amend_order.assert_called_once_with(
+            "ord-b",
+            ticker="TK-B",
+            side="no",
+            action="buy",
+            no_price=33,
+            count=10,  # 6 filled + 4 remaining = 10 total
+        )
+        assert ledger.resting_price(Side.B) == 33
+        assert ledger.resting_count(Side.B) == 4
+
+    @pytest.mark.asyncio
+    async def test_execute_amend_fails_halts(self):
+        pair = ArbPair(event_ticker="EVT-1", ticker_a="TK-A", ticker_b="TK-B")
+        books = FakeBookManager({"TK-A": 50, "TK-B": 48})
+        adjuster = BidAdjuster(book_manager=books, pairs=[pair], unit_size=10)
+
+        ledger = adjuster.get_ledger("EVT-1")
+        ledger.record_fill(Side.A, count=10, price=50)
+        ledger.record_resting(Side.B, order_id="ord-b", count=10, price=47)
+
+        proposal = adjuster.evaluate_jump("TK-B", at_top=False)
+        assert proposal is not None
+        rest_client = AsyncMock()
+        rest_client.amend_order.side_effect = Exception("API error")
+
+        with pytest.raises(Exception, match="API error"):
+            await adjuster.execute(proposal, rest_client)
+
+        # Original order should still be in ledger (amend is atomic — failure = no change)
+        assert ledger.resting_order_id(Side.B) == "ord-b"
+        assert ledger.resting_price(Side.B) == 47

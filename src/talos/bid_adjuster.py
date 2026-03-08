@@ -269,6 +269,77 @@ class BidAdjuster:
         if evt:
             evt.pop(side, None)
 
+    # ── Async execution ─────────────────────────────────────────────
+
+    async def execute(
+        self, proposal: ProposedAdjustment, rest_client: object
+    ) -> None:
+        """Execute a proposed adjustment via amend (Principle 17).
+
+        Single atomic API call — changes price on existing order.
+        On failure: halt immediately, flag operator. Do NOT fall back
+        to cancel-then-place.
+
+        Args:
+            proposal: the approved ProposedAdjustment
+            rest_client: KalshiRESTClient instance (typed as object for testability)
+        """
+        side = Side(proposal.side)
+        ledger = self._ledgers[proposal.event_ticker]
+
+        # Find the ticker for this side
+        ticker = self._side_ticker(proposal.event_ticker, side)
+
+        # Compute total count for amend API (fill_count + remaining_count)
+        s = ledger._sides[side]
+        total_count = s.filled_count + s.resting_count
+
+        logger.info(
+            "adjustment_amend",
+            event_ticker=proposal.event_ticker,
+            side=side.value,
+            order_id=proposal.cancel_order_id,
+            old_price=proposal.cancel_price,
+            new_price=proposal.new_price,
+            total_count=total_count,
+        )
+
+        # Single atomic amend call
+        _old_order, amended_order = await rest_client.amend_order(  # type: ignore[attr-defined]
+            proposal.cancel_order_id,
+            ticker=ticker,
+            side="no",
+            action="buy",
+            no_price=proposal.new_price,
+            count=total_count,
+        )
+
+        # Update ledger from amend response
+        ledger.record_resting(
+            side,
+            order_id=amended_order.order_id,
+            count=amended_order.remaining_count,
+            price=amended_order.no_price,
+        )
+
+        # Clear the proposal
+        self.clear_proposal(proposal.event_ticker, side)
+
+        logger.info(
+            "adjustment_complete",
+            event_ticker=proposal.event_ticker,
+            side=side.value,
+            order_id=amended_order.order_id,
+            new_price=proposal.new_price,
+        )
+
+    def _side_ticker(self, event_ticker: str, side: Side) -> str:
+        """Look up the market ticker for a given event + side."""
+        for ticker, (pair, s) in self._ticker_map.items():
+            if pair.event_ticker == event_ticker and s is side:
+                return ticker
+        raise ValueError(f"No ticker found for {event_ticker} side {side.value}")
+
     # ── Internal helpers ────────────────────────────────────────────
 
     def _is_jumped(
