@@ -14,10 +14,8 @@ from talos.game_manager import GameManager
 from talos.market_feed import MarketFeed
 from talos.models.adjustment import ProposedAdjustment
 from talos.models.order import Order
-from talos.models.position import EventPositionSummary
 from talos.models.strategy import BidConfirmation
-from talos.position import compute_event_positions
-from talos.position_ledger import Side
+from talos.position_ledger import Side, compute_display_positions
 from talos.rest_client import KalshiRESTClient
 from talos.scanner import ArbitrageScanner
 from talos.top_of_market import TopOfMarketTracker
@@ -272,29 +270,31 @@ class TalosApp(App):
                 oid: v for oid, v in self._queue_cache.items() if oid in active_ids
             }
 
-            # Derive position summaries from orders + scanner pairs → table
-            if self._scanner is not None:
-                summaries = compute_event_positions(orders, self._scanner.pairs)
-                self._enrich_with_cpm(summaries)
+            # Sync position ledgers from orders (Principle 15), then derive display
+            if self._scanner is not None and self._adjuster is not None:
+                for pair in self._scanner.pairs:
+                    try:
+                        ledger = self._adjuster.get_ledger(pair.event_ticker)
+                        ledger.sync_from_orders(
+                            orders, ticker_a=pair.ticker_a, ticker_b=pair.ticker_b
+                        )
+                        # Check for completed sides → re-evaluate deferred jumps
+                        for side in (Side.A, Side.B):
+                            if ledger.is_unit_complete(side):
+                                self._adjuster.on_side_complete(
+                                    pair.event_ticker, side
+                                )
+                    except KeyError:
+                        pass  # Pair not registered with adjuster yet
+
+                summaries = compute_display_positions(
+                    self._adjuster._ledgers,
+                    self._scanner.pairs,
+                    self._queue_cache,
+                    self._cpm,
+                )
                 table = self.query_one(OpportunitiesTable)
                 table.update_positions(summaries)
-
-                # Sync position ledgers for bid adjustment safety (Principle 15)
-                if self._adjuster is not None:
-                    for pair in self._scanner.pairs:
-                        try:
-                            ledger = self._adjuster.get_ledger(pair.event_ticker)
-                            ledger.sync_from_orders(
-                                orders, ticker_a=pair.ticker_a, ticker_b=pair.ticker_b
-                            )
-                            # Check for completed sides → re-evaluate deferred jumps
-                            for side in (Side.A, Side.B):
-                                if ledger.is_unit_complete(side):
-                                    self._adjuster.on_side_complete(
-                                        pair.event_ticker, side
-                                    )
-                        except KeyError:
-                            pass  # Pair not registered with adjuster yet
 
             # Build enriched order dicts for the order log
             order_data = [
@@ -336,15 +336,16 @@ class TalosApp(App):
         if not self._orders_cache:
             return
 
-        # Apply updated cache to cached orders and recompute positions
-        for order in self._orders_cache:
-            qp = self._queue_cache.get(order.order_id)
-            if qp is not None:
-                order.queue_position = qp
-        summaries = compute_event_positions(self._orders_cache, self._scanner.pairs)
-        self._enrich_with_cpm(summaries)
-        table = self.query_one(OpportunitiesTable)
-        table.update_positions(summaries)
+        # Recompute positions from ledgers with updated queue cache
+        if self._adjuster is not None:
+            summaries = compute_display_positions(
+                self._adjuster._ledgers,
+                self._scanner.pairs,
+                self._queue_cache,
+                self._cpm,
+            )
+            table = self.query_one(OpportunitiesTable)
+            table.update_positions(summaries)
 
     @work(thread=False)
     async def refresh_trades(self) -> None:
@@ -362,17 +363,6 @@ class TalosApp(App):
             except Exception:
                 logger.warning("trade_fetch_failed", ticker=ticker, exc_info=True)
         self._cpm.prune()
-
-    def _enrich_with_cpm(self, summaries: list[EventPositionSummary]) -> None:
-        """Set CPM and ETA fields on each leg summary from the CPM tracker."""
-        for s in summaries:
-            for leg in (s.leg_a, s.leg_b):
-                leg.cpm = self._cpm.cpm(leg.ticker)
-                leg.cpm_partial = self._cpm.is_partial(leg.ticker)
-                if leg.queue_position is not None and leg.queue_position > 0:
-                    leg.eta_minutes = self._cpm.eta_minutes(
-                        leg.ticker, leg.queue_position
-                    )
 
     def action_add_games(self) -> None:
         """Open the Add Games modal."""

@@ -2,8 +2,10 @@
 
 import pytest
 
+from talos.cpm import CPMTracker
 from talos.models.order import Order
-from talos.position_ledger import PositionLedger, Side
+from talos.models.strategy import ArbPair
+from talos.position_ledger import PositionLedger, Side, compute_display_positions
 
 
 class TestBasicTracking:
@@ -239,3 +241,92 @@ class TestReconciliation:
         orders = []  # no orders = no fills, no resting = matches empty ledger
         ledger.sync_from_orders(orders, ticker_a="TK-A", ticker_b="TK-B")
         assert not ledger.has_discrepancy
+
+
+def _pair(event: str = "EVT-1", a: str = "TK-A", b: str = "TK-B") -> ArbPair:
+    return ArbPair(event_ticker=event, ticker_a=a, ticker_b=b)
+
+
+class TestComputeDisplayPositions:
+    def test_empty_ledger_returns_empty(self):
+        ledgers = {"EVT-1": PositionLedger(event_ticker="EVT-1")}
+        result = compute_display_positions(ledgers, [_pair()], {}, CPMTracker())
+        assert result == []
+
+    def test_both_sides_filled_equally(self):
+        ledger = PositionLedger(event_ticker="EVT-1", unit_size=10)
+        ledger.record_fill(Side.A, count=5, price=45)
+        ledger.record_fill(Side.B, count=5, price=47)
+        ledgers = {"EVT-1": ledger}
+
+        result = compute_display_positions(ledgers, [_pair()], {}, CPMTracker())
+        assert len(result) == 1
+        s = result[0]
+        assert s.matched_pairs == 5
+        assert s.unmatched_a == 0
+        assert s.unmatched_b == 0
+        assert s.locked_profit_cents > 0  # 45+47=92 < 100, profitable
+        assert s.exposure_cents == 0
+        assert s.leg_a.filled_count == 5
+        assert s.leg_b.filled_count == 5
+        assert s.leg_a.no_price == 45
+        assert s.leg_b.no_price == 47
+
+    def test_one_side_ahead(self):
+        ledger = PositionLedger(event_ticker="EVT-1", unit_size=10)
+        ledger.record_fill(Side.A, count=5, price=45)
+        ledger.record_fill(Side.B, count=3, price=47)
+        ledgers = {"EVT-1": ledger}
+
+        result = compute_display_positions(ledgers, [_pair()], {}, CPMTracker())
+        assert len(result) == 1
+        s = result[0]
+        assert s.matched_pairs == 3
+        assert s.unmatched_a == 2
+        assert s.unmatched_b == 0
+        assert s.exposure_cents > 0  # 2 unmatched contracts on A
+
+    def test_resting_only_shows_resting_price(self):
+        ledger = PositionLedger(event_ticker="EVT-1", unit_size=10)
+        ledger.record_resting(Side.A, order_id="ord-1", count=10, price=45)
+        ledgers = {"EVT-1": ledger}
+
+        result = compute_display_positions(ledgers, [_pair()], {}, CPMTracker())
+        assert len(result) == 1
+        assert result[0].leg_a.no_price == 45
+        assert result[0].leg_a.resting_count == 10
+
+    def test_queue_enrichment(self):
+        ledger = PositionLedger(event_ticker="EVT-1", unit_size=10)
+        ledger.record_resting(Side.A, order_id="ord-1", count=10, price=45)
+        queue_cache = {"ord-1": 42}
+        ledgers = {"EVT-1": ledger}
+
+        result = compute_display_positions(ledgers, [_pair()], queue_cache, CPMTracker())
+        assert result[0].leg_a.queue_position == 42
+
+    def test_cpm_enrichment(self):
+        from datetime import datetime, timezone
+
+        from talos.models.market import Trade
+
+        ledger = PositionLedger(event_ticker="EVT-1", unit_size=10)
+        ledger.record_resting(Side.A, order_id="ord-1", count=10, price=45)
+        ledgers = {"EVT-1": ledger}
+
+        # Use a recent timestamp so it falls within the 5-minute CPM window
+        recent_ts = datetime.now(timezone.utc).isoformat()
+        cpm = CPMTracker()
+        cpm.ingest("TK-A", [
+            Trade(trade_id="t1", ticker="TK-A", count=100, price=45,
+                  side="no", created_time=recent_ts),
+        ])
+
+        result = compute_display_positions(ledgers, [_pair()], {}, cpm)
+        assert result[0].leg_a.cpm is not None
+        assert result[0].leg_a.cpm > 0
+
+    def test_missing_ledger_skipped(self):
+        """Pairs with no corresponding ledger are silently skipped."""
+        result = compute_display_positions({}, [_pair()], {}, CPMTracker())
+        assert result == []

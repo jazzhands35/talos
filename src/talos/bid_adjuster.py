@@ -313,8 +313,7 @@ class BidAdjuster:
         ticker = self._side_ticker(proposal.event_ticker, side)
 
         # Compute total count for amend API (fill_count + remaining_count)
-        s = ledger._sides[side]
-        total_count = s.filled_count + s.resting_count
+        total_count = ledger.filled_count(side) + ledger.resting_count(side)
 
         logger.info(
             "adjustment_amend",
@@ -337,7 +336,7 @@ class BidAdjuster:
         )
 
         # Update fills from amend response (handles fills that arrived during approval)
-        fill_delta = old_order.fill_count - s.filled_count
+        fill_delta = old_order.fill_count - ledger.filled_count(side)
         if fill_delta > 0:
             ledger.record_fill(side, count=fill_delta, price=old_order.no_price)
 
@@ -392,20 +391,19 @@ class BidAdjuster:
         if ledger.has_discrepancy:
             return False, f"ledger has unresolved discrepancy: {ledger.discrepancy}"
 
-        s = ledger._sides[side]
         # Simulate post-cancel state
-        if s.filled_count + new_count > ledger.unit_size:
+        if ledger.filled_count(side) + new_count > ledger.unit_size:
             return (
                 False,
-                f"would exceed unit after cancel: filled={s.filled_count} + "
+                f"would exceed unit after cancel: filled={ledger.filled_count(side)} + "
                 f"new={new_count} > {ledger.unit_size}",
             )
         # Check profitability (reuse the gate logic without resting check)
-        other = ledger._sides[side.other]
-        if other.filled_count > 0:
-            other_price = other.filled_total_cost / other.filled_count
-        elif other.resting_count > 0:
-            other_price = other.resting_price
+        other_side = side.other
+        if ledger.filled_count(other_side) > 0:
+            other_price = ledger.filled_total_cost(other_side) / ledger.filled_count(other_side)
+        elif ledger.resting_count(other_side) > 0:
+            other_price = ledger.resting_price(other_side)
         else:
             return True, ""
 
@@ -430,11 +428,10 @@ class BidAdjuster:
         this_label = side.value
         other_label = other.value
         # After cancel+place: resting changes, filled stays
-        s = ledger._sides[side]
         this_parts: list[str] = []
-        if s.filled_count > 0:
+        if ledger.filled_count(side) > 0:
             avg = ledger.avg_filled_price(side)
-            this_parts.append(f"{s.filled_count} filled @ {avg:.1f}c")
+            this_parts.append(f"{ledger.filled_count(side)} filled @ {avg:.1f}c")
         this_parts.append(f"{new_count} resting @ {new_price}c")
 
         return (

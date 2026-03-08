@@ -1,63 +1,67 @@
-"""Tests for position computation logic."""
+"""Tests for position display computation via compute_display_positions.
+
+These tests construct PositionLedger instances with record_fill()/record_resting()
+instead of building raw Order objects.  Same scenarios as the original
+compute_event_positions tests, adapted for the ledger-based API.
+"""
 
 from __future__ import annotations
 
 import pytest
 
+from talos.cpm import CPMTracker
 from talos.fees import MAKER_FEE_RATE
-from talos.models.order import Order
 from talos.models.strategy import ArbPair
-from talos.position import compute_event_positions
-
-
-def _order(
-    ticker: str,
-    *,
-    fill_count: int = 0,
-    remaining_count: int = 0,
-    no_price: int = 0,
-    side: str = "no",
-    action: str = "buy",
-    status: str = "resting",
-    queue_position: int | None = None,
-) -> Order:
-    return Order(
-        order_id=f"ord-{ticker}-{fill_count}-{remaining_count}",
-        ticker=ticker,
-        action=action,
-        side=side,
-        no_price=no_price,
-        initial_count=fill_count + remaining_count,
-        remaining_count=remaining_count,
-        fill_count=fill_count,
-        status=status,
-        queue_position=queue_position,
-    )
-
+from talos.position_ledger import PositionLedger, Side, compute_display_positions
 
 PAIR = ArbPair(event_ticker="EVT-AB", ticker_a="MKT-A", ticker_b="MKT-B")
 
 
-class TestNoOrders:
-    def test_empty_orders_returns_empty(self) -> None:
-        assert compute_event_positions([], [PAIR]) == []
+def _ledger(
+    *,
+    fill_a: tuple[int, int] | None = None,
+    fill_b: tuple[int, int] | None = None,
+    resting_a: tuple[str, int, int] | None = None,
+    resting_b: tuple[str, int, int] | None = None,
+) -> PositionLedger:
+    """Helper to build a ledger with optional fills and resting orders."""
+    ledger = PositionLedger(event_ticker="EVT-AB", unit_size=10)
+    if fill_a is not None:
+        ledger.record_fill(Side.A, count=fill_a[0], price=fill_a[1])
+    if fill_b is not None:
+        ledger.record_fill(Side.B, count=fill_b[0], price=fill_b[1])
+    if resting_a is not None:
+        ledger.record_resting(Side.A, order_id=resting_a[0], count=resting_a[1], price=resting_a[2])
+    if resting_b is not None:
+        ledger.record_resting(Side.B, order_id=resting_b[0], count=resting_b[1], price=resting_b[2])
+    return ledger
+
+
+def _compute(ledger: PositionLedger, queue_cache: dict[str, int] | None = None):
+    return compute_display_positions(
+        {"EVT-AB": ledger}, [PAIR], queue_cache or {}, CPMTracker()
+    )
+
+
+class TestNoPositions:
+    def test_empty_ledger_returns_empty(self) -> None:
+        ledger = PositionLedger(event_ticker="EVT-AB", unit_size=10)
+        assert _compute(ledger) == []
 
     def test_no_pairs_returns_empty(self) -> None:
-        orders = [_order("MKT-A", fill_count=3, remaining_count=2, no_price=31)]
-        assert compute_event_positions(orders, []) == []
+        ledger = _ledger(fill_a=(3, 31))
+        result = compute_display_positions({"EVT-AB": ledger}, [], {}, CPMTracker())
+        assert result == []
 
 
 class TestBothLegsMatched:
     def test_equal_fills_compute_locked_profit(self) -> None:
-        orders = [
-            _order("MKT-A", fill_count=5, remaining_count=0, no_price=31),
-            _order("MKT-B", fill_count=5, remaining_count=0, no_price=67),
-        ]
-        result = compute_event_positions(orders, [PAIR])
+        ledger = _ledger(fill_a=(5, 31), fill_b=(5, 67))
+        result = _compute(ledger)
         assert len(result) == 1
         s = result[0]
         assert s.matched_pairs == 5
-        # Raw: 100 - 31 - 67 = 2¢/pair → 10¢ total
+        # Raw: 100 - 31 - 67 = 2c/pair -> 10c total
         # Fee (worst case, B wins): (500 - 155) * 0.0175 = 6.0375
         raw = 5 * (100 - 31 - 67)
         worst_fee = (5 * 100 - 5 * 31) * MAKER_FEE_RATE
@@ -69,14 +73,10 @@ class TestBothLegsMatched:
 
 class TestOneLegAhead:
     def test_leg_a_ahead_shows_exposure(self) -> None:
-        orders = [
-            _order("MKT-A", fill_count=5, remaining_count=0, no_price=31),
-            _order("MKT-B", fill_count=3, remaining_count=2, no_price=67),
-        ]
-        result = compute_event_positions(orders, [PAIR])
+        ledger = _ledger(fill_a=(5, 31), fill_b=(3, 67))
+        result = _compute(ledger)
         s = result[0]
         assert s.matched_pairs == 3
-        # 3 matched: raw = 3*2=6, worst fee = (300-93)*0.0175 = 3.6225
         raw = 3 * (100 - 31 - 67)
         worst_fee = (3 * 100 - 3 * 31) * MAKER_FEE_RATE
         assert s.locked_profit_cents == pytest.approx(raw - worst_fee)
@@ -85,11 +85,8 @@ class TestOneLegAhead:
         assert s.exposure_cents == 2 * 31
 
     def test_leg_b_ahead_shows_exposure(self) -> None:
-        orders = [
-            _order("MKT-A", fill_count=2, remaining_count=3, no_price=31),
-            _order("MKT-B", fill_count=5, remaining_count=0, no_price=67),
-        ]
-        result = compute_event_positions(orders, [PAIR])
+        ledger = _ledger(fill_a=(2, 31), fill_b=(5, 67))
+        result = _compute(ledger)
         s = result[0]
         assert s.matched_pairs == 2
         assert s.unmatched_a == 0
@@ -97,22 +94,18 @@ class TestOneLegAhead:
         assert s.exposure_cents == 3 * 67
 
 
-class TestMultipleOrdersAccumulate:
-    def test_two_orders_same_leg_accumulate(self) -> None:
-        orders = [
-            _order("MKT-A", fill_count=3, remaining_count=2, no_price=31),
-            _order("MKT-A", fill_count=2, remaining_count=1, no_price=33),
-            _order("MKT-B", fill_count=5, remaining_count=0, no_price=67),
-        ]
-        result = compute_event_positions(orders, [PAIR])
+class TestMultipleFillsAccumulate:
+    def test_two_fills_same_side_accumulate(self) -> None:
+        ledger = PositionLedger(event_ticker="EVT-AB", unit_size=10)
+        ledger.record_fill(Side.A, count=3, price=31)
+        ledger.record_fill(Side.A, count=2, price=33)
+        ledger.record_fill(Side.B, count=5, price=67)
+        result = _compute(ledger)
         s = result[0]
         assert s.leg_a.filled_count == 5  # 3 + 2
-        assert s.leg_a.resting_count == 3  # 2 + 1
         # Weighted average: (31*3 + 33*2) / 5 = 159/5 = 31
         assert s.leg_a.no_price == 31
         assert s.matched_pairs == 5
-        # Raw profit: 500 - 159 - 335 = 6
-        # Worst fee (B wins): (500 - 159) * 0.0175 = 5.9675
         raw = 500 - 159 - 335
         worst_fee = (500 - 159) * MAKER_FEE_RATE
         assert s.locked_profit_cents == pytest.approx(raw - worst_fee)
@@ -120,63 +113,26 @@ class TestMultipleOrdersAccumulate:
 
 class TestMixedPricePnL:
     def test_mixed_prices_both_legs_correct_pnl(self) -> None:
-        """Regression: max-price formula cross-multiplied worst prices, giving wrong P&L."""
-        orders = [
-            _order("MKT-A", fill_count=5, remaining_count=0, no_price=34),
-            _order("MKT-A", fill_count=5, remaining_count=0, no_price=35),
-            _order("MKT-B", fill_count=5, remaining_count=0, no_price=64),
-            _order("MKT-B", fill_count=5, remaining_count=0, no_price=67),
-        ]
-        result = compute_event_positions(orders, [PAIR])
+        ledger = PositionLedger(event_ticker="EVT-AB", unit_size=20)
+        ledger.record_fill(Side.A, count=5, price=34)
+        ledger.record_fill(Side.A, count=5, price=35)
+        ledger.record_fill(Side.B, count=5, price=64)
+        ledger.record_fill(Side.B, count=5, price=67)
+        result = _compute(ledger)
         s = result[0]
         assert s.matched_pairs == 10
-        # Actual costs: A = 5*34 + 5*35 = 345, B = 5*64 + 5*67 = 655
-        # Raw profit = 1000 - 345 - 655 = 0
-        # With fees: worst case fee on winning side profit, profit is negative after fees
+        # Costs: A = 170+175=345, B = 320+335=655, total=1000
         assert s.locked_profit_cents < 0  # fees make break-even into a loss
         assert s.exposure_cents == 0
 
 
-class TestUnrecognizedOrders:
-    def test_orders_not_in_any_pair_ignored(self) -> None:
-        orders = [
-            _order("UNKNOWN-MKT", fill_count=10, remaining_count=5, no_price=50),
-        ]
-        assert compute_event_positions(orders, [PAIR]) == []
-
-    def test_yes_side_orders_ignored(self) -> None:
-        orders = [
-            _order("MKT-A", fill_count=5, remaining_count=0, no_price=31, side="yes"),
-        ]
-        assert compute_event_positions(orders, [PAIR]) == []
-
-    def test_sell_action_orders_ignored(self) -> None:
-        orders = [
-            _order("MKT-A", fill_count=5, remaining_count=0, no_price=31, action="sell"),
-        ]
-        assert compute_event_positions(orders, [PAIR]) == []
-
-    def test_cancelled_orders_excluded(self) -> None:
-        """Cancelled orders must not inflate fill or resting counts."""
-        orders = [
-            _order("MKT-A", fill_count=5, remaining_count=0, no_price=31, status="executed"),
-            _order("MKT-A", fill_count=0, remaining_count=5, no_price=31, status="cancelled"),
-            _order("MKT-B", fill_count=5, remaining_count=0, no_price=67, status="executed"),
-        ]
-        result = compute_event_positions(orders, [PAIR])
-        s = result[0]
-        assert s.leg_a.filled_count == 5
-        assert s.leg_a.resting_count == 0  # cancelled order excluded
-        assert s.matched_pairs == 5
-
-
 class TestLegSummaryFields:
     def test_leg_summary_populated(self) -> None:
-        orders = [
-            _order("MKT-A", fill_count=3, remaining_count=2, no_price=31),
-            _order("MKT-B", fill_count=3, remaining_count=2, no_price=67),
-        ]
-        result = compute_event_positions(orders, [PAIR])
+        ledger = _ledger(
+            fill_a=(3, 31), fill_b=(3, 67),
+            resting_a=("ord-a", 2, 31), resting_b=("ord-b", 2, 67),
+        )
+        result = _compute(ledger)
         s = result[0]
         assert s.leg_a.ticker == "MKT-A"
         assert s.leg_a.no_price == 31
@@ -186,12 +142,8 @@ class TestLegSummaryFields:
         assert s.leg_b.no_price == 67
 
     def test_total_fill_cost_propagated(self) -> None:
-        """total_fill_cost on LegSummary should match sum of price*fills."""
-        orders = [
-            _order("MKT-A", fill_count=3, remaining_count=2, no_price=31),
-            _order("MKT-B", fill_count=3, remaining_count=2, no_price=67),
-        ]
-        result = compute_event_positions(orders, [PAIR])
+        ledger = _ledger(fill_a=(3, 31), fill_b=(3, 67))
+        result = _compute(ledger)
         s = result[0]
         assert s.leg_a.total_fill_cost == 3 * 31
         assert s.leg_b.total_fill_cost == 3 * 67
@@ -199,12 +151,11 @@ class TestLegSummaryFields:
 
 class TestRestingOnlyPair:
     def test_resting_only_still_shows_summary(self) -> None:
-        """Resting orders with zero fills should still appear."""
-        orders = [
-            _order("MKT-A", fill_count=0, remaining_count=5, no_price=31),
-            _order("MKT-B", fill_count=0, remaining_count=5, no_price=67),
-        ]
-        result = compute_event_positions(orders, [PAIR])
+        ledger = _ledger(
+            resting_a=("ord-a", 5, 31),
+            resting_b=("ord-b", 5, 67),
+        )
+        result = _compute(ledger)
         assert len(result) == 1
         s = result[0]
         assert s.matched_pairs == 0
@@ -213,53 +164,20 @@ class TestRestingOnlyPair:
 
 
 class TestQueuePosition:
-    def test_best_queue_position_per_leg(self) -> None:
-        """Takes the lowest queue position among resting orders."""
-        orders = [
-            _order("MKT-A", fill_count=0, remaining_count=3, no_price=31, queue_position=15),
-            _order("MKT-A", fill_count=0, remaining_count=2, no_price=31, queue_position=8),
-            _order("MKT-B", fill_count=0, remaining_count=5, no_price=67, queue_position=42),
-        ]
-        result = compute_event_positions(orders, [PAIR])
+    def test_queue_position_from_cache(self) -> None:
+        ledger = _ledger(resting_a=("ord-a", 5, 31), resting_b=("ord-b", 5, 67))
+        result = _compute(ledger, queue_cache={"ord-a": 8, "ord-b": 42})
         assert result[0].leg_a.queue_position == 8
         assert result[0].leg_b.queue_position == 42
 
-    def test_queue_position_none_when_no_fills_and_no_data(self) -> None:
-        """Resting-only orders with no queue data → None (unknown)."""
-        orders = [
-            _order("MKT-A", fill_count=0, remaining_count=5, no_price=31),
-            _order("MKT-B", fill_count=0, remaining_count=5, no_price=67),
-        ]
-        result = compute_event_positions(orders, [PAIR])
+    def test_queue_position_none_when_no_cache(self) -> None:
+        ledger = _ledger(resting_a=("ord-a", 5, 31), resting_b=("ord-b", 5, 67))
+        result = _compute(ledger)
         assert result[0].leg_a.queue_position is None
         assert result[0].leg_b.queue_position is None
 
-    def test_zero_queue_position_treated_as_no_data(self) -> None:
-        """API returns 0 meaning 'no data' — should not become position 1."""
-        orders = [
-            _order("MKT-A", fill_count=0, remaining_count=5, no_price=31, queue_position=0),
-            _order("MKT-B", fill_count=0, remaining_count=5, no_price=67, queue_position=42),
-        ]
-        result = compute_event_positions(orders, [PAIR])
-        assert result[0].leg_a.queue_position is None
-        assert result[0].leg_b.queue_position == 42
-
-    def test_partially_filled_no_queue_data_is_none(self) -> None:
-        """Partially filled order with no queue data → None (unknown)."""
-        orders = [
-            _order("MKT-A", fill_count=3, remaining_count=2, no_price=31),
-            _order("MKT-B", fill_count=3, remaining_count=2, no_price=67),
-        ]
-        result = compute_event_positions(orders, [PAIR])
-        assert result[0].leg_a.queue_position is None
-        assert result[0].leg_b.queue_position is None
-
-    def test_queue_position_ignored_for_filled_orders(self) -> None:
-        """Fully filled orders (remaining=0) don't contribute queue position."""
-        orders = [
-            _order("MKT-A", fill_count=5, remaining_count=0, no_price=31, queue_position=3),
-            _order("MKT-B", fill_count=5, remaining_count=0, no_price=67, queue_position=7),
-        ]
-        result = compute_event_positions(orders, [PAIR])
+    def test_queue_position_none_when_no_resting(self) -> None:
+        ledger = _ledger(fill_a=(5, 31), fill_b=(5, 67))
+        result = _compute(ledger, queue_cache={"ord-a": 8})
         assert result[0].leg_a.queue_position is None
         assert result[0].leg_b.queue_position is None

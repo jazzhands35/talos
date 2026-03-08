@@ -9,10 +9,16 @@ See brain/principles.md Principles 15-19 for safety invariants.
 from __future__ import annotations
 
 from enum import Enum
+from typing import TYPE_CHECKING
 
 import structlog
 
-from talos.fees import fee_adjusted_cost
+from talos.fees import fee_adjusted_cost, fee_adjusted_profit_matched
+from talos.models.position import EventPositionSummary, LegSummary
+
+if TYPE_CHECKING:
+    from talos.cpm import CPMTracker
+    from talos.models.strategy import ArbPair
 
 logger = structlog.get_logger()
 
@@ -311,3 +317,111 @@ class PositionLedger:
         if s.resting_count > 0:
             parts.append(f"{s.resting_count} resting @ {s.resting_price}c")
         return ", ".join(parts) if parts else "empty"
+
+
+def compute_display_positions(
+    ledgers: dict[str, PositionLedger],
+    pairs: list[ArbPair],
+    queue_cache: dict[str, int],
+    cpm_tracker: CPMTracker,
+) -> list[EventPositionSummary]:
+    """Compute position summaries from ledger state for UI display.
+
+    Replacement for compute_event_positions() — reads from PositionLedger
+    instead of raw orders. Also handles CPM/ETA enrichment inline.
+    """
+    summaries: list[EventPositionSummary] = []
+    for pair in pairs:
+        ledger = ledgers.get(pair.event_ticker)
+        if ledger is None:
+            continue
+
+        filled_a = ledger.filled_count(Side.A)
+        filled_b = ledger.filled_count(Side.B)
+        resting_a = ledger.resting_count(Side.A)
+        resting_b = ledger.resting_count(Side.B)
+
+        if filled_a + filled_b + resting_a + resting_b == 0:
+            continue
+
+        matched = min(filled_a, filled_b)
+        unmatched_a = filled_a - matched
+        unmatched_b = filled_b - matched
+
+        cost_a = ledger.filled_total_cost(Side.A)
+        cost_b = ledger.filled_total_cost(Side.B)
+
+        if matched > 0:
+            cost_a_matched = cost_a * matched // filled_a if filled_a > 0 else 0
+            cost_b_matched = cost_b * matched // filled_b if filled_b > 0 else 0
+            locked_profit = fee_adjusted_profit_matched(
+                matched, cost_a_matched, cost_b_matched
+            )
+        else:
+            locked_profit = 0.0
+
+        exposure = (
+            (cost_a * unmatched_a // filled_a if filled_a > 0 else 0)
+            + (cost_b * unmatched_b // filled_b if filled_b > 0 else 0)
+        )
+
+        avg_a = cost_a // filled_a if filled_a > 0 else ledger.resting_price(Side.A)
+        avg_b = cost_b // filled_b if filled_b > 0 else ledger.resting_price(Side.B)
+
+        # Queue positions from cache (keyed by order_id)
+        oid_a = ledger.resting_order_id(Side.A)
+        qp_a = queue_cache.get(oid_a) if oid_a is not None else None
+        oid_b = ledger.resting_order_id(Side.B)
+        qp_b = queue_cache.get(oid_b) if oid_b is not None else None
+
+        # CPM enrichment
+        cpm_a = cpm_tracker.cpm(pair.ticker_a)
+        cpm_a_partial = cpm_tracker.is_partial(pair.ticker_a)
+        eta_a = (
+            cpm_tracker.eta_minutes(pair.ticker_a, qp_a)
+            if qp_a is not None and qp_a > 0
+            else None
+        )
+
+        cpm_b = cpm_tracker.cpm(pair.ticker_b)
+        cpm_b_partial = cpm_tracker.is_partial(pair.ticker_b)
+        eta_b = (
+            cpm_tracker.eta_minutes(pair.ticker_b, qp_b)
+            if qp_b is not None and qp_b > 0
+            else None
+        )
+
+        summaries.append(
+            EventPositionSummary(
+                event_ticker=pair.event_ticker,
+                leg_a=LegSummary(
+                    ticker=pair.ticker_a,
+                    no_price=avg_a,
+                    filled_count=filled_a,
+                    resting_count=resting_a,
+                    total_fill_cost=cost_a,
+                    queue_position=qp_a,
+                    cpm=cpm_a,
+                    cpm_partial=cpm_a_partial,
+                    eta_minutes=eta_a,
+                ),
+                leg_b=LegSummary(
+                    ticker=pair.ticker_b,
+                    no_price=avg_b,
+                    filled_count=filled_b,
+                    resting_count=resting_b,
+                    total_fill_cost=cost_b,
+                    queue_position=qp_b,
+                    cpm=cpm_b,
+                    cpm_partial=cpm_b_partial,
+                    eta_minutes=eta_b,
+                ),
+                matched_pairs=matched,
+                locked_profit_cents=locked_profit,
+                unmatched_a=unmatched_a,
+                unmatched_b=unmatched_b,
+                exposure_cents=exposure,
+            )
+        )
+
+    return summaries
