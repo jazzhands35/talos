@@ -33,7 +33,7 @@ Split into pure state machine + async orchestrator. See [[patterns#Pure state + 
 ## 2026-03-07 — PositionLedger as single source of truth for UI and safety
 
 **Context:** The system needs a position model for bid adjustment safety gates. Two options: (A) single source of truth that feeds both UI display and safety logic, or (B) separate systems that both derive from polled order data independently.
-**Decision:** Option A — PositionLedger replaces `compute_event_positions()` and feeds everything. One system, not two.
+**Decision:** Option A — PositionLedger as single source of truth. Feeds both bid adjustment safety gates and UI display via `compute_display_positions()`. The old `compute_event_positions()` and `position.py` have been deleted. See [[decisions#2026-03-08 — TradingEngine extraction and position unification]].
 **Rationale:** Two systems deriving from the same data can disagree due to timing or implementation drift. If the UI shows "10 filled on side A" but the safety gate thinks it's 8, the operator can't trust either. A single source of truth means if the UI looks right, the safety logic is right — and if it's wrong, the operator sees it immediately. The risk of a larger blast radius (changing the UI data source) is worth the guarantee of consistency. See [[principles#15. Position Awareness Before Action]].
 
 ## 2026-03-07 — Semi-auto graduating to full-auto for bid adjustment
@@ -57,6 +57,20 @@ Key design choices and why:
 - **Fractional completion bids**: Partial fills may be topped up with a fractional bid at the new price, provided total resting + filled ≤ 1 unit and the arb remains profitable.
 
 **Rationale:** Every rule traces back to a specific failure mode from the previous system or a worst-case scenario analysis. The goal is to make unsafe states structurally impossible rather than relying on runtime checks that can be bypassed by timing issues. See [[principles#15. Position Awareness Before Action]] through [[principles#19. Most-Behind-First on Dual Jumps]].
+
+## 2026-03-08 — TradingEngine extraction and position unification
+
+**Context:** `TalosApp` was a 481-line god class owning subsystem references, mutable caches (queue, orders, CPM), and all polling/action methods. Position display was computed by `compute_event_positions()` from raw orders, separate from `PositionLedger` which drove safety gates — two systems deriving from the same data.
+
+**Decision:** Extract `TradingEngine` as a headless orchestrator (395 lines) owning all business logic. Slim `TalosApp` to a thin UI shell (196 lines) that delegates via callbacks. Unify position computation: `compute_display_positions()` reads from `PositionLedger` (the safety source of truth), replacing the deleted `compute_event_positions()` and `position.py`.
+
+Key changes:
+- **Engine owns state**: Queue cache, orders cache, CPM tracker, balance, position summaries all live in `TradingEngine`
+- **Callback-based UI**: Engine communicates via `on_notification(message, severity)`. App wires this to Textual toasts
+- **Single position truth**: `compute_display_positions()` lives in `position_ledger.py`, reads ledger state, enriches with queue/CPM data
+- **BidAdjuster encapsulation**: Replaced 4 `ledger._sides[side]` accesses with public accessors
+
+**Rationale:** Engine extraction enables headless testing of all business logic without Textual. Position unification eliminates the risk of UI and safety gates disagreeing. The callback pattern keeps the engine framework-agnostic — a future web UI or API could use the same engine. See [[principles#13. Test Purity Drives Architecture]].
 
 ## 2026-03-07 — Bid modal falls back to all_snapshots
 

@@ -17,7 +17,10 @@
 | `market_feed.py` | WS subscription orchestrator | `MarketFeed` |
 | `models/strategy.py` | Strategy data models | `ArbPair`, `Opportunity`, `BidConfirmation` |
 | `models/position.py` | Position tracking models | `LegSummary`, `EventPositionSummary` |
-| `position.py` | Position computation (pure) | `compute_event_positions` |
+| `models/adjustment.py` | Bid adjustment proposal model | `ProposedAdjustment` |
+| `position_ledger.py` | Per-event position state machine (fills, resting, safety gates, display) | `PositionLedger`, `Side`, `compute_display_positions` |
+| `bid_adjuster.py` | Async orchestrator for bid adjustment on jumps | `BidAdjuster` |
+| `engine.py` | Central trading orchestrator (polling, actions, caches) | `TradingEngine` |
 | `fees.py` | Pure fee calculations (maker fee, American odds, scenario P&L) | `fee_adjusted_edge`, `scenario_pnl`, `american_from_win_risk` |
 | `cpm.py` | Contracts-per-minute and ETA formatting | `format_cpm`, `format_eta` |
 | `scanner.py` | NO+NO arbitrage detection | `ArbitrageScanner` |
@@ -27,7 +30,7 @@
 | `ui/theme.py` | Catppuccin Mocha colors + TCSS | Color constants, `APP_CSS` |
 | `ui/widgets.py` | Dashboard widgets | `OpportunitiesTable`, `AccountPanel`, `OrderLog` |
 | `ui/screens.py` | Modal dialogs | `AddGamesScreen`, `BidScreen` |
-| `ui/app.py` | Main app orchestration | `TalosApp` |
+| `ui/app.py` | Thin UI shell (delegates to TradingEngine) | `TalosApp` |
 | `__main__.py` | Entry point | `python -m talos` |
 
 ## Gotchas
