@@ -169,6 +169,12 @@ class TradingEngine:
             except Exception:
                 logger.debug("queue_positions_fetch_failed")
 
+            # Apply cached queue positions to orders
+            for order in orders:
+                qp = self._queue_cache.get(order.order_id)
+                if qp is not None:
+                    order.queue_position = qp
+
             # Prune cache entries for orders no longer active
             active_ids = {o.order_id for o in orders if o.remaining_count > 0}
             self._queue_cache = {

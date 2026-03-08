@@ -1,5 +1,7 @@
 """Tests for PositionLedger — pure state machine for position tracking."""
 
+from datetime import UTC
+
 import pytest
 
 from talos.cpm import CPMTracker
@@ -306,7 +308,7 @@ class TestComputeDisplayPositions:
         assert result[0].leg_a.queue_position == 42
 
     def test_cpm_enrichment(self):
-        from datetime import datetime, timezone
+        from datetime import datetime
 
         from talos.models.market import Trade
 
@@ -315,7 +317,7 @@ class TestComputeDisplayPositions:
         ledgers = {"EVT-1": ledger}
 
         # Use a recent timestamp so it falls within the 5-minute CPM window
-        recent_ts = datetime.now(timezone.utc).isoformat()
+        recent_ts = datetime.now(UTC).isoformat()
         cpm = CPMTracker()
         cpm.ingest("TK-A", [
             Trade(trade_id="t1", ticker="TK-A", count=100, price=45,

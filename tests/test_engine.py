@@ -2,12 +2,12 @@
 
 from __future__ import annotations
 
+from datetime import UTC
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
 from talos.bid_adjuster import BidAdjuster
-from talos.cpm import CPMTracker
 from talos.engine import TradingEngine
 from talos.game_manager import GameManager
 from talos.market_feed import MarketFeed
@@ -222,10 +222,11 @@ class TestPolling:
     @pytest.mark.asyncio
     async def test_refresh_trades_ingests_into_cpm(self):
         engine, rest = _engine_with_pair()
-        from datetime import datetime, timezone
+        from datetime import datetime
+
         from talos.models.market import Trade
 
-        recent = datetime.now(timezone.utc).isoformat()
+        recent = datetime.now(UTC).isoformat()
         trades = [
             Trade(trade_id="t1", ticker="TK-A", count=50, price=45, side="no", created_time=recent),
         ]
