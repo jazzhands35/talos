@@ -178,16 +178,34 @@ class KalshiRESTClient:
         self,
         order_id: str,
         *,
-        new_price: int | None = None,
-        new_count: int | None = None,
-    ) -> Order:
-        body: dict[str, Any] = {}
-        if new_price is not None:
-            body["new_price"] = new_price
-        if new_count is not None:
-            body["new_count"] = new_count
+        ticker: str,
+        side: str = "no",
+        action: str = "buy",
+        no_price: int | None = None,
+        count: int | None = None,
+    ) -> tuple[Order, Order]:
+        """Amend an existing order's price and/or quantity.
+
+        For partially filled orders, ``count`` is the total
+        (``fill_count + remaining_count``), and only the unfilled
+        portion moves to the new price queue.
+
+        Returns ``(old_order, amended_order)``.
+        """
+        body: dict[str, Any] = {
+            "ticker": ticker,
+            "side": side,
+            "action": action,
+        }
+        if no_price is not None:
+            body["no_price"] = no_price
+        if count is not None:
+            body["count"] = count
         data = await self._request("POST", f"/portfolio/orders/{order_id}/amend", json=body)
-        return Order.model_validate(data["order"])
+        return (
+            Order.model_validate(data["old_order"]),
+            Order.model_validate(data["order"]),
+        )
 
     async def batch_create_orders(self, orders: list[dict[str, Any]]) -> list[BatchOrderResult]:
         data = await self._request("POST", "/portfolio/orders/batched", json={"orders": orders})

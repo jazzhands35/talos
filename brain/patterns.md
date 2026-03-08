@@ -4,26 +4,15 @@ Recurring patterns and conventions in this codebase.
 
 ## REST client method pattern
 
-Every REST method: positional args for required IDs, keyword-only for optional filters; build params dict conditionally; `_request` handles auth/logging/errors; return Pydantic model, never raw dict. List endpoints return `list[Model]` with optional `limit`/`cursor`.
+Positional args for IDs, keyword-only for filters, return Pydantic models. Exemplar: `rest_client.py`.
 
 ## Pydantic model pattern
 
-All models use Pydantic v2 BaseModel with minimal configuration:
-
-- `from __future__ import annotations` at top of every file
-- Optional fields use `field: type | None = None`
-- Money fields are `int` (cents), never `float`
-- Timestamps are `str` (ISO 8601) — no datetime parsing at the model layer
-- For API quirks (e.g. raw `[[int, int]]` arrays), use `@model_validator(mode="before")` — NOT `model_post_init`
+Pydantic v2 BaseModel. Money in cents (`int`), timestamps as `str`. Use `model_validator(mode="before")` for API quirks (not `model_post_init`). Exemplar: `models/market.py`.
 
 ## Test pattern
 
-- One test file per source module: `tests/test_{module}.py`
-- Mock HTTP with `AsyncMock(spec=httpx.AsyncClient)` replacing `client._http`
-- Use `_mock_response(status, json_data)` helper for consistency
-- Tests assert on model fields, not raw dicts
-- Fixtures for `config`, `mock_auth`, `client` at file level
-- For async orchestrators: `MagicMock(spec=Class)` + override async methods with `AsyncMock()` individually
+One file per module (`tests/test_{module}.py`). Mock HTTP via `AsyncMock(spec=httpx.AsyncClient)`. Assert on model fields. Exemplar: `tests/test_rest_client.py`.
 
 ## Pure state + async orchestrator split
 
@@ -45,7 +34,7 @@ The callback attribute is `None` by default (safe to ignore in tests). No event 
 
 ## Conditional wiring
 
-Optional behavior is activated by injecting a dependency, not by setting a flag. If `self._dep is None`, the feature does not exist — no dead code paths, no untested branches. Applied in: `TalosApp` (conditional timers), `MarketFeed` (`on_book_update`), test mode (inject only `scanner`).
+Optional behavior is activated by injecting a dependency, not by setting a flag. If `self._dep is None`, the feature does not exist — no dead code paths, no untested branches. Applied in: `TalosApp` (conditional timers), `MarketFeed` (`on_book_update`), test mode (inject only `scanner`). See [[principles#4. Subtract Before You Add]].
 
 ## TUI dependency injection
 
@@ -77,3 +66,19 @@ Applied in: `scenario_pnl()` takes `total_cost_a`/`total_cost_b`, `LegSummary.to
 ## Enrichment caching with split polling cadence
 
 When primary data (orders) is expensive to fetch and enrichment data (queue positions) changes faster, use separate polling timers with conservative merge for monotonically improving values. Applied in: `TalosApp` — `_orders_cache` + `_queue_cache` with `_merge_queue()`.
+
+## Proposal expiry (superseded by new events)
+
+When a proposed action is outstanding (awaiting human approval), a new event of the same type supersedes the old proposal rather than queuing behind it. The old proposal is discarded and logged. This prevents stale proposals from executing against a market that has already moved.
+
+Applied in: `BidAdjuster` — if a new jump event fires on the same side while a proposal is pending, the old proposal is expired and a new one is computed from current state.
+
+**Why not queue:** Queued proposals would execute sequentially against progressively stale state. Each proposal assumes a specific market price and position — by the time the second one executes, those assumptions are invalid.
+
+## Deferred action queue (blocked by precondition)
+
+When an action is blocked by a precondition (e.g., dual-jump tiebreaker — only the most-behind side adjusts first), the blocked action is remembered and automatically re-evaluated when the precondition clears. This avoids relying on external events that may never fire.
+
+Applied in: `BidAdjuster` — when both sides of a pair are jumped, the less-behind side is deferred. When the most-behind side's unit completes (precondition clears), the deferred side is re-evaluated for profitability and safety before proposing.
+
+**Why not rely on fresh events:** `TopOfMarketTracker` fires on state changes. If side B was already flagged as jumped and the price hasn't moved, no new event fires. Without the deferred queue, the jump goes unhandled indefinitely. See [[principles#19. Most-Behind-First on Dual Jumps]].

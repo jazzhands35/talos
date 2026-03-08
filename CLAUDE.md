@@ -17,12 +17,10 @@ Kalshi arbitrage trading system — manual-first with progressive automation.
 ## Development Commands
 
 ```bash
-# Install
-python -m venv .venv
-source .venv/Scripts/activate   # Windows (Git Bash)
+# All commands assume venv is activated: source .venv/Scripts/activate
 pip install -e ".[dev]"
 
-# Tests (use .venv/Scripts/python -m on Windows Git Bash)
+# Tests
 .venv/Scripts/python -m pytest              # all tests
 .venv/Scripts/python -m pytest tests/test_foo.py  # single file
 .venv/Scripts/python -m pytest -x           # stop on first failure
@@ -66,12 +64,7 @@ Run both **test-runner** and **lint-check** in parallel before commits. Use **di
 
 ## Trading-Specific Rules
 
-- **Safety first:** Any code touching real money (order placement, position management) must have explicit confirmation paths.
-- **Demo by default:** Default to Kalshi demo environment. Production must be explicitly opted into.
-- **Audit trail:** All trade decisions and order actions must be logged with full context.
-- **Idempotency:** Order operations should be idempotent where possible to handle retries safely.
-
-Full trading principles with rationale: see `brain/principles.md`.
+Demo environment by default — production requires explicit opt-in. See `brain/principles.md` for all trading rules.
 
 ## Current Status
 
