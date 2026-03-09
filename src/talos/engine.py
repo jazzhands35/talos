@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING
 
 import structlog
 
+from talos.automation_config import AutomationConfig
 from talos.bid_adjuster import BidAdjuster
 from talos.cpm import CPMTracker
 from talos.game_manager import GameManager
@@ -19,6 +20,7 @@ from talos.market_feed import MarketFeed
 from talos.models.order import Order
 from talos.models.position import EventPositionSummary
 from talos.models.proposal import Proposal, ProposalKey
+from talos.opportunity_proposer import OpportunityProposer
 from talos.position_ledger import Side, compute_display_positions
 from talos.proposal_queue import ProposalQueue
 from talos.rest_client import KalshiRESTClient
@@ -60,6 +62,7 @@ class TradingEngine:
         adjuster: BidAdjuster,
         initial_games: list[str] | None = None,
         proposal_queue: ProposalQueue | None = None,
+        automation_config: AutomationConfig | None = None,
     ) -> None:
         self._scanner = scanner
         self._game_manager = game_manager
@@ -69,6 +72,8 @@ class TradingEngine:
         self._adjuster = adjuster
         self._initial_games = list(initial_games or [])
         self._proposal_queue = proposal_queue or ProposalQueue()
+        self._auto_config = automation_config or AutomationConfig()
+        self._proposer = OpportunityProposer(self._auto_config)
 
         # Mutable caches
         self._queue_cache: dict[str, int] = {}
@@ -103,6 +108,10 @@ class TradingEngine:
     @property
     def proposal_queue(self) -> ProposalQueue:
         return self._proposal_queue
+
+    @property
+    def automation_config(self) -> AutomationConfig:
+        return self._auto_config
 
     @property
     def orders(self) -> list[Order]:
@@ -228,6 +237,9 @@ class TradingEngine:
                 }
                 for o in orders
             ]
+
+            # Evaluate scanner opportunities for automated bid proposals
+            self.evaluate_opportunities()
         except Exception:
             logger.exception("refresh_account_error")
 
@@ -309,6 +321,27 @@ class TradingEngine:
                 adjustment=proposal,
             )
             self._proposal_queue.add(envelope)
+
+    def evaluate_opportunities(self) -> None:
+        """Run OpportunityProposer against all scanner pairs.
+
+        Only active when automation is enabled.
+        """
+        if not self._auto_config.enabled:
+            return
+        pending_keys = {p.key for p in self._proposal_queue.pending()}
+        for pair in self._scanner.pairs:
+            opp = self._scanner.get_opportunity(pair.event_ticker)
+            if opp is None:
+                continue
+            try:
+                ledger = self._adjuster.get_ledger(pair.event_ticker)
+            except KeyError:
+                continue
+            proposal = self._proposer.evaluate(pair, opp, ledger, pending_keys)
+            if proposal is not None:
+                self._proposal_queue.add(proposal)
+                pending_keys.add(proposal.key)
 
     # ── Action methods ──────────────────────────────────────────────
 
@@ -406,9 +439,10 @@ class TradingEngine:
     def reject_proposal(self, key: ProposalKey) -> None:
         """Reject and remove a queued proposal."""
         self._proposal_queue.reject(key)
-        # Also clear from adjuster's internal proposals if it's an adjustment
         if key.kind == "adjustment" and key.side:
             self._adjuster.clear_proposal(key.event_ticker, Side(key.side))
+        elif key.kind == "bid":
+            self._proposer.record_rejection(key.event_ticker)
         self._notify(f"Rejected: {key.event_ticker} {key.kind}")
 
     async def approve_adjustment(self, event_ticker: str, side_value: str) -> None:

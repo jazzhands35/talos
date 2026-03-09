@@ -7,6 +7,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+from talos.automation_config import AutomationConfig
 from talos.bid_adjuster import BidAdjuster
 from talos.engine import TradingEngine
 from talos.game_manager import GameManager
@@ -15,6 +16,7 @@ from talos.models.order import Order
 from talos.models.portfolio import Balance
 from talos.models.proposal import ProposalKey
 from talos.models.strategy import ArbPair
+from talos.models.ws import OrderBookSnapshot
 from talos.orderbook import OrderBookManager
 from talos.position_ledger import Side
 from talos.rest_client import KalshiRESTClient
@@ -462,3 +464,102 @@ class TestProposalQueue:
         key = engine.proposal_queue.pending()[0].key
         engine.reject_proposal(key)
         assert len(engine.proposal_queue) == 0
+
+
+# ── Automation / OpportunityProposer integration ──────────────────────
+
+
+def _engine_with_automation() -> tuple[TradingEngine, AsyncMock]:
+    """Engine with automation enabled and one profitable scanner pair."""
+    books = OrderBookManager()
+    scanner = ArbitrageScanner(books)
+    scanner.add_pair("EVT-1", "TK-A", "TK-B")
+
+    # Apply snapshots: NO-A=45, NO-B=48 → fee_edge ≈ 6.04c (above 1.5c threshold)
+    books.apply_snapshot(
+        "TK-A",
+        OrderBookSnapshot(market_ticker="TK-A", market_id="m1", yes=[], no=[[45, 100]]),
+    )
+    books.apply_snapshot(
+        "TK-B",
+        OrderBookSnapshot(market_ticker="TK-B", market_id="m2", yes=[], no=[[48, 100]]),
+    )
+    scanner.scan("TK-A")
+    assert scanner.get_opportunity("EVT-1") is not None
+
+    pair = ArbPair(event_ticker="EVT-1", ticker_a="TK-A", ticker_b="TK-B")
+    adjuster = BidAdjuster(books, [pair], unit_size=10)
+    rest = AsyncMock(spec=KalshiRESTClient)
+    config = AutomationConfig(
+        edge_threshold_cents=1.5,
+        stability_seconds=0.0,
+        enabled=True,
+    )
+    engine = TradingEngine(
+        scanner=scanner,
+        game_manager=MagicMock(spec=GameManager),
+        rest_client=rest,
+        market_feed=MagicMock(spec=MarketFeed),
+        tracker=TopOfMarketTracker(books),
+        adjuster=adjuster,
+        automation_config=config,
+    )
+    return engine, rest
+
+
+class TestOpportunityProposerIntegration:
+    def test_automation_config_property(self):
+        """Engine exposes automation config via property."""
+        engine, _ = _engine_with_automation()
+        assert engine.automation_config.enabled is True
+        assert engine.automation_config.edge_threshold_cents == 1.5
+
+    def test_evaluate_opportunities_disabled(self):
+        """No proposals when automation is disabled."""
+        engine, _ = _engine_with_automation()
+        engine._auto_config.enabled = False
+        engine.evaluate_opportunities()
+        assert len(engine.proposal_queue) == 0
+
+    def test_evaluate_opportunities_proposes_bid(self):
+        """Profitable opportunity generates a bid proposal."""
+        engine, _ = _engine_with_automation()
+        engine.evaluate_opportunities()
+        assert len(engine.proposal_queue) == 1
+        p = engine.proposal_queue.pending()[0]
+        assert p.kind == "bid"
+        assert p.bid is not None
+        assert p.bid.event_ticker == "EVT-1"
+
+    def test_evaluate_opportunities_no_duplicate(self):
+        """Second evaluate does not create a duplicate proposal."""
+        engine, _ = _engine_with_automation()
+        engine.evaluate_opportunities()
+        engine.evaluate_opportunities()
+        assert len(engine.proposal_queue) == 1
+
+    def test_reject_bid_records_cooldown(self):
+        """Rejecting a bid proposal starts cooldown, blocking re-proposal."""
+        engine, _ = _engine_with_automation()
+        engine.evaluate_opportunities()
+        assert len(engine.proposal_queue) == 1
+        key = engine.proposal_queue.pending()[0].key
+        engine.reject_proposal(key)
+        assert len(engine.proposal_queue) == 0
+        # Proposer should now be in cooldown for this event
+        engine.evaluate_opportunities()
+        assert len(engine.proposal_queue) == 0  # still in cooldown
+
+    @pytest.mark.asyncio
+    async def test_refresh_account_calls_evaluate(self):
+        """refresh_account calls evaluate_opportunities at end of cycle."""
+        engine, rest = _engine_with_automation()
+        rest.get_balance.return_value = Balance(balance=1000, portfolio_value=1000)
+        rest.get_orders.return_value = []
+        rest.get_queue_positions.return_value = {}
+
+        await engine.refresh_account()
+
+        # Should have created a bid proposal during the polling cycle
+        assert len(engine.proposal_queue) == 1
+        assert engine.proposal_queue.pending()[0].kind == "bid"
