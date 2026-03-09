@@ -315,3 +315,15 @@ class TestBidModal:
             await pilot.press("escape")
             await pilot.pause()
             assert not isinstance(app.screen, BidScreen)
+
+
+class TestProposalPanel:
+    async def test_proposal_panel_exists_and_hidden(self) -> None:
+        from talos.ui.proposal_panel import ProposalPanel
+
+        app = TalosApp()
+        async with app.run_test():
+            panel = app.query_one(ProposalPanel)
+            assert panel is not None
+            panel.refresh_proposals()
+            assert panel.display is False

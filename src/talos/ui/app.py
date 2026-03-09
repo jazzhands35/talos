@@ -15,9 +15,11 @@ from textual.notifications import SeverityLevel
 from textual.widgets import DataTable, Footer, Header
 
 from talos.engine import TradingEngine
-from talos.models.adjustment import ProposedAdjustment
+from talos.models.proposal import ProposalKey
 from talos.models.strategy import BidConfirmation
+from talos.proposal_queue import ProposalQueue
 from talos.scanner import ArbitrageScanner
+from talos.ui.proposal_panel import ProposalPanel
 from talos.ui.screens import AddGamesScreen, BidScreen
 from talos.ui.theme import APP_CSS
 from talos.ui.widgets import AccountPanel, OpportunitiesTable, OrderLog
@@ -51,6 +53,10 @@ class TalosApp(App):
     def compose(self) -> ComposeResult:
         yield Header()
         yield OpportunitiesTable(id="opportunities-table")
+        yield ProposalPanel(
+            self._engine.proposal_queue if self._engine else ProposalQueue(),
+            id="proposal-panel",
+        )
         with Horizontal(id="bottom-panels"):
             yield AccountPanel(id="account-panel")
             yield OrderLog(id="order-log")
@@ -64,8 +70,8 @@ class TalosApp(App):
             self.set_interval(10.0, self._poll_account)
             self.set_interval(3.0, self._poll_queue)
             self.set_interval(10.0, self._poll_trades)
+            self.set_interval(1.0, self._refresh_proposals)
             self._engine.on_notification = self._on_engine_notification
-            self._engine.adjuster.on_proposal = self._on_adjustment_proposed
             self._engine.tracker.on_change = self._engine.on_top_of_market_change
             self._start_feed()
 
@@ -75,17 +81,25 @@ class TalosApp(App):
         """Forward engine notifications to Textual toasts."""
         self.notify(message, severity=cast(SeverityLevel, severity), markup=False)
 
-    def _on_adjustment_proposed(self, proposal: ProposedAdjustment) -> None:
-        """Show bid adjustment proposal for operator approval."""
-        self.notify(
-            f"Adjustment proposed: {proposal.event_ticker} side {proposal.side}\n"
-            f"{proposal.reason}\n"
-            f"Before: {proposal.position_before}\n"
-            f"After: {proposal.position_after}\n"
-            f"Safety: {proposal.safety_check}",
-            severity="warning",
-            timeout=30,
-        )
+    def _refresh_proposals(self) -> None:
+        """Update the proposal panel from queue state."""
+        self.query_one(ProposalPanel).refresh_proposals()
+
+    def on_proposal_panel_approved(self, event: ProposalPanel.Approved) -> None:
+        """Handle operator approving a proposal."""
+        self._execute_approval(event.key)
+
+    @work(thread=False)
+    async def _execute_approval(self, key: ProposalKey) -> None:
+        if self._engine is not None:
+            await self._engine.approve_proposal(key)
+        self.query_one(ProposalPanel).refresh_proposals()
+
+    def on_proposal_panel_rejected(self, event: ProposalPanel.Rejected) -> None:
+        """Handle operator rejecting a proposal."""
+        if self._engine is not None:
+            self._engine.reject_proposal(event.key)
+        self.query_one(ProposalPanel).refresh_proposals()
 
     # ── Polling delegations ───────────────────────────────────────
 
@@ -184,13 +198,3 @@ class TalosApp(App):
         if self._engine is not None:
             await self._engine.clear_games()
 
-    @work(thread=False)
-    async def approve_adjustment(
-        self, event_ticker: str, side_value: str
-    ) -> None:
-        if self._engine is not None:
-            await self._engine.approve_adjustment(event_ticker, side_value)
-
-    def reject_adjustment(self, event_ticker: str, side_value: str) -> None:
-        if self._engine is not None:
-            self._engine.reject_adjustment(event_ticker, side_value)
