@@ -68,8 +68,15 @@ class ProposalPanel(Vertical):
             super().__init__()
             self.key = key
 
-    def __init__(self, queue: ProposalQueue, **kwargs: object) -> None:
-        super().__init__(**kwargs)
+    def __init__(
+        self,
+        queue: ProposalQueue,
+        *,
+        name: str | None = None,
+        id: str | None = None,  # noqa: A002
+        classes: str | None = None,
+    ) -> None:
+        super().__init__(name=name, id=id, classes=classes)
         self._queue = queue
         self._keys: list[ProposalKey] = []
 
