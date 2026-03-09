@@ -43,12 +43,16 @@ Single source of truth for both UI display and bid adjustment safety gates. `com
 4. **Execution** (Layer 4) — **COMPLETE**
    `TopOfMarketTracker`: detects penny jumps on resting NO bids in real-time via WS deltas. TUI shows toast alerts and `!!` prefix in Q columns.
    `PositionLedger`: per-event single source of truth for filled counts, resting orders, avg prices, and safety gates. Pure state machine (no I/O). Also hosts `compute_display_positions()` for UI display.
-   `BidAdjuster`: async orchestrator that responds to jumps — queries ledger, checks profitability gate (P18), enforces most-behind-first tiebreaker (P19), proposes amend adjustments. Semi-auto (propose → human approves) graduating to full-auto. Uses `rest_client.amend_order()` for atomic price changes (P17).
-   `TradingEngine`: central orchestrator owning all subsystem references, mutable caches (queue, orders, CPM), and polling/action methods. Communicates with the UI via callbacks (`on_notification`, `on_proposal`). Extracted from `TalosApp` to enable headless testing and future API-driven control.
+   `BidAdjuster`: pure decision logic that responds to jumps — queries ledger, checks profitability gate (P18), enforces most-behind-first tiebreaker (P19), proposes amend adjustments. Uses `rest_client.amend_order()` for atomic price changes (P17).
+   `TradingEngine`: central orchestrator owning all subsystem references, mutable caches (queue, orders, CPM), and polling/action methods. Communicates with the UI via `on_notification` callback. Proposals flow through `ProposalQueue` for operator approval. Extracted from `TalosApp` to enable headless testing and future API-driven control.
    Bid modal uses `all_snapshots` fallback so any monitored pair is always selectable.
 5. **UI (Textual TUI)** (Layer 5) — **COMPLETE**
-   Thin UI shell (~196 lines). `OpportunitiesTable` (prices + positions + queue), `AccountPanel` (balance display), `OrderLog` (filled/total + queue position). `AddGamesScreen` + `BidScreen` modals. `TalosApp` delegates all polling and actions to `TradingEngine`; owns only widget wiring and Textual lifecycle.
-6. **Automation** — progressively takes over decision-making from the human. Current stage: semi-auto bid adjustment (Layer 4). See [[principles#2. Human in the Loop]] for the graduation path: manual → assisted → supervised → autonomous.
+   Thin UI shell. `OpportunitiesTable` (prices + positions + queue), `AccountPanel` (balance display), `OrderLog` (filled/total + queue position), `ProposalPanel` (collapsible right sidebar for pending proposals with keyboard approve/reject). `AddGamesScreen` + `BidScreen` modals. `TalosApp` delegates all polling and actions to `TradingEngine`; owns only widget wiring and Textual lifecycle.
+6. **Automation** (Layer 6) — **SUPERVISED**
+   `ProposalQueue`: pure state machine holding pending proposals (adjustments + bids). Single choke point — nothing executes without operator approval. Handles add/supersede, staleness sweep with auto-expiry, approve/reject.
+   `OpportunityProposer`: pure decision logic that evaluates scanner output against edge threshold + stability filter + position gate. Emits bid proposals into ProposalQueue.
+   `AutomationConfig`: settings dataclass (edge threshold, stability seconds, cooldown, unit size, enabled flag). Off by default, explicit opt-in.
+   Graduation path: manual → assisted → **supervised** (current) → autonomous. See [[principles#2. Human in the Loop]].
 
 See [[codebase/index]] for the full module map and gotchas.
 

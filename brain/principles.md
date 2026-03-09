@@ -16,7 +16,7 @@ The system advises; the human decides. Automation earns trust incrementally.
 
 - Start with full manual control, automate only what's proven
 - When data is uncertain or conditions are unusual, **flag and wait** — never guess
-- Progressive automation: manual → assisted → supervised → autonomous (we're at manual)
+- Progressive automation: manual → assisted → supervised → autonomous (we're at supervised — ProposalQueue with operator approve/reject)
 
 ## 3. Prove It Works
 
