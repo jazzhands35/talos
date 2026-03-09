@@ -13,6 +13,7 @@ from talos.game_manager import GameManager
 from talos.market_feed import MarketFeed
 from talos.models.order import Order
 from talos.models.portfolio import Balance
+from talos.models.proposal import ProposalKey
 from talos.models.strategy import ArbPair
 from talos.orderbook import OrderBookManager
 from talos.position_ledger import Side
@@ -67,7 +68,11 @@ class TestScaffold:
     def test_callbacks_default_none(self):
         engine = _make_engine()
         assert engine.on_notification is None
-        assert engine.on_proposal is None
+
+    def test_proposal_queue_property(self):
+        engine = _make_engine()
+        assert engine.proposal_queue is not None
+        assert len(engine.proposal_queue) == 0
 
     def test_active_market_tickers_empty(self):
         engine = _make_engine()
@@ -346,6 +351,114 @@ class TestActions:
         engine.adjuster._proposals.setdefault("EVT-1", {})[Side.A] = proposal
         assert engine.adjuster.has_pending_proposal("EVT-1", Side.A)
 
+        # Also add to the proposal queue so reject_adjustment (which now delegates
+        # to reject_proposal) can find it
+        from datetime import datetime
+
+        from talos.models.proposal import Proposal
+
+        key = ProposalKey(event_ticker="EVT-1", side="A", kind="adjustment")
+        envelope = Proposal(
+            key=key,
+            kind="adjustment",
+            summary="test",
+            detail="test",
+            created_at=datetime.now(UTC),
+            adjustment=proposal,
+        )
+        engine.proposal_queue.add(envelope)
+
         engine.reject_adjustment("EVT-1", "A")
 
         assert not engine.adjuster.has_pending_proposal("EVT-1", Side.A)
+
+
+class FakeBookManager:
+    """Minimal fake for OrderBookManager.best_ask()."""
+
+    def __init__(self, prices: dict[str, int]):
+        self._prices = prices
+
+    def best_ask(self, ticker: str):
+        price = self._prices.get(ticker)
+        if price is None:
+            return None
+
+        class Level:
+            pass
+
+        level = Level()
+        level.price = price
+        return level
+
+
+def _engine_with_jump_setup() -> TradingEngine:
+    """Engine with a pair where side B can be jumped from 47->48."""
+    books = FakeBookManager({"TK-A": 50, "TK-B": 48})
+    scanner = ArbitrageScanner(books)
+    scanner.add_pair("EVT-1", "TK-A", "TK-B")
+    pair = ArbPair(event_ticker="EVT-1", ticker_a="TK-A", ticker_b="TK-B")
+    adjuster = BidAdjuster(books, [pair], unit_size=10)
+    tracker = TopOfMarketTracker(books)
+    engine = TradingEngine(
+        scanner=scanner,
+        game_manager=MagicMock(spec=GameManager),
+        rest_client=AsyncMock(spec=KalshiRESTClient),
+        market_feed=MagicMock(spec=MarketFeed),
+        tracker=tracker,
+        adjuster=adjuster,
+    )
+    # Setup: side A filled, side B resting at 47
+    ledger = adjuster.get_ledger("EVT-1")
+    ledger.record_fill(Side.A, count=10, price=50)
+    ledger.record_resting(Side.B, order_id="ord-b", count=10, price=47)
+    return engine
+
+
+class TestProposalQueue:
+    def test_jump_adds_proposal_to_queue(self):
+        engine = _engine_with_jump_setup()
+        engine.on_top_of_market_change("TK-B", at_top=False)
+        assert len(engine.proposal_queue) == 1
+        p = engine.proposal_queue.pending()[0]
+        assert p.kind == "adjustment"
+        assert p.adjustment is not None
+        assert p.adjustment.new_price == 48
+
+    def test_back_at_top_no_proposal(self):
+        engine = _engine_with_jump_setup()
+        engine.on_top_of_market_change("TK-B", at_top=True)
+        assert len(engine.proposal_queue) == 0
+
+    @pytest.mark.asyncio
+    async def test_approve_proposal_executes_adjustment(self):
+        engine = _engine_with_jump_setup()
+        engine.on_top_of_market_change("TK-B", at_top=False)
+        key = engine.proposal_queue.pending()[0].key
+        # Mock the amend call
+        old_order = _make_order(
+            "TK-B", order_id="ord-b", fill_count=0, remaining_count=10, no_price=47
+        )
+        new_order = _make_order(
+            "TK-B", order_id="ord-b-new", fill_count=0, remaining_count=10, no_price=48
+        )
+        engine._rest.amend_order = AsyncMock(return_value=(old_order, new_order))
+        await engine.approve_proposal(key)
+        assert len(engine.proposal_queue) == 0
+        engine._rest.amend_order.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_approve_missing_proposal_notifies(self):
+        engine = _engine_with_jump_setup()
+        notifications: list[tuple[str, str]] = []
+        engine.on_notification = lambda msg, sev: notifications.append((msg, sev))
+        key = ProposalKey(event_ticker="EVT-1", side="B", kind="adjustment")
+        await engine.approve_proposal(key)
+        assert any("No pending" in msg for msg, _ in notifications)
+
+    def test_reject_proposal_removes_from_queue(self):
+        engine = _engine_with_jump_setup()
+        engine.on_top_of_market_change("TK-B", at_top=False)
+        key = engine.proposal_queue.pending()[0].key
+        engine.reject_proposal(key)
+        assert len(engine.proposal_queue) == 0

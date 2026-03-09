@@ -7,6 +7,7 @@ The TUI delegates to this engine rather than managing trading state directly.
 from __future__ import annotations
 
 from collections.abc import Callable
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
 import structlog
@@ -17,7 +18,9 @@ from talos.game_manager import GameManager
 from talos.market_feed import MarketFeed
 from talos.models.order import Order
 from talos.models.position import EventPositionSummary
+from talos.models.proposal import Proposal, ProposalKey
 from talos.position_ledger import Side, compute_display_positions
+from talos.proposal_queue import ProposalQueue
 from talos.rest_client import KalshiRESTClient
 from talos.scanner import ArbitrageScanner
 from talos.top_of_market import TopOfMarketTracker
@@ -43,7 +46,7 @@ class TradingEngine:
     """Central orchestrator for all trading logic.
 
     Owns subsystem references, caches, and polling/action methods.
-    Communicates with the UI via callbacks (on_notification, on_proposal).
+    Proposals flow through ProposalQueue for operator approval.
     """
 
     def __init__(
@@ -56,6 +59,7 @@ class TradingEngine:
         tracker: TopOfMarketTracker,
         adjuster: BidAdjuster,
         initial_games: list[str] | None = None,
+        proposal_queue: ProposalQueue | None = None,
     ) -> None:
         self._scanner = scanner
         self._game_manager = game_manager
@@ -64,6 +68,7 @@ class TradingEngine:
         self._tracker = tracker
         self._adjuster = adjuster
         self._initial_games = list(initial_games or [])
+        self._proposal_queue = proposal_queue or ProposalQueue()
 
         # Mutable caches
         self._queue_cache: dict[str, int] = {}
@@ -76,7 +81,6 @@ class TradingEngine:
 
         # Callbacks for UI communication
         self.on_notification: Callable[[str, str], None] | None = None
-        self.on_proposal: Callable[..., None] | None = None
 
     # ── Read-only properties ─────────────────────────────────────────
 
@@ -95,6 +99,10 @@ class TradingEngine:
     @property
     def game_manager(self) -> GameManager:
         return self._game_manager
+
+    @property
+    def proposal_queue(self) -> ProposalQueue:
+        return self._proposal_queue
 
     @property
     def orders(self) -> list[Order]:
@@ -123,23 +131,29 @@ class TradingEngine:
         try:
             await self._feed.connect()
             self._notify("WebSocket connected")
-            if self._initial_games:
+
+            # Auto-discover events with positions or resting orders
+            discovered = await self._discover_active_events()
+
+            # Merge with saved games (union, deduplicate)
+            all_tickers = list(dict.fromkeys(discovered + self._initial_games))
+
+            if all_tickers:
                 restored = 0
-                for ticker in self._initial_games:
+                for ticker in all_tickers:
                     try:
-                        await self._game_manager.add_game(ticker)
+                        pair = await self._game_manager.add_game(ticker)
+                        self._adjuster.add_event(pair)
                         restored += 1
                     except Exception:
                         logger.warning("restore_game_failed", game=ticker)
                 if restored:
-                    self._notify(f"Restored {restored} game(s)")
+                    self._notify(f"Loaded {restored} game(s)")
                 self._initial_games.clear()
             await self._feed.start()
         except Exception as e:
             logger.exception("feed_connection_error")
-            self._notify(
-                f"WebSocket error: {type(e).__name__}: {e}", "error"
-            )
+            self._notify(f"WebSocket error: {type(e).__name__}: {e}", "error")
 
     async def refresh_account(self) -> None:
         """Fetch balance + orders, sync ledgers, compute positions."""
@@ -158,14 +172,10 @@ class TradingEngine:
             try:
                 tickers = self._active_market_tickers()
                 if tickers:
-                    new_qp = await self._rest.get_queue_positions(
-                        market_tickers=tickers
-                    )
+                    new_qp = await self._rest.get_queue_positions(market_tickers=tickers)
                     for oid, qp in new_qp.items():
                         if qp > 0:
-                            self._queue_cache[oid] = _merge_queue(
-                                self._queue_cache.get(oid), qp
-                            )
+                            self._queue_cache[oid] = _merge_queue(self._queue_cache.get(oid), qp)
             except Exception:
                 logger.debug("queue_positions_fetch_failed")
 
@@ -181,18 +191,17 @@ class TradingEngine:
                 oid: v for oid, v in self._queue_cache.items() if oid in active_ids
             }
 
+            # Mark stale / purge proposals whose orders have vanished
+            self._proposal_queue.tick(active_order_ids=active_ids)
+
             # Sync position ledgers from orders (Principle 15)
             for pair in self._scanner.pairs:
                 try:
                     ledger = self._adjuster.get_ledger(pair.event_ticker)
-                    ledger.sync_from_orders(
-                        orders, ticker_a=pair.ticker_a, ticker_b=pair.ticker_b
-                    )
+                    ledger.sync_from_orders(orders, ticker_a=pair.ticker_a, ticker_b=pair.ticker_b)
                     for side in (Side.A, Side.B):
                         if ledger.is_unit_complete(side):
-                            self._adjuster.on_side_complete(
-                                pair.event_ticker, side
-                            )
+                            self._adjuster.on_side_complete(pair.event_ticker, side)
                 except KeyError:
                     pass  # Pair not registered with adjuster yet
 
@@ -214,11 +223,7 @@ class TradingEngine:
                     "total": o.initial_count,
                     "remaining": o.remaining_count,
                     "status": o.status,
-                    "time": (
-                        o.created_time[11:16]
-                        if len(o.created_time) > 16
-                        else o.created_time
-                    ),
+                    "time": (o.created_time[11:16] if len(o.created_time) > 16 else o.created_time),
                     "queue_pos": o.queue_position,
                 }
                 for o in orders
@@ -232,14 +237,10 @@ class TradingEngine:
             tickers = self._active_market_tickers()
             if not tickers:
                 return
-            new_qp = await self._rest.get_queue_positions(
-                market_tickers=tickers
-            )
+            new_qp = await self._rest.get_queue_positions(market_tickers=tickers)
             for oid, qp in new_qp.items():
                 if qp > 0:
-                    self._queue_cache[oid] = _merge_queue(
-                        self._queue_cache.get(oid), qp
-                    )
+                    self._queue_cache[oid] = _merge_queue(self._queue_cache.get(oid), qp)
         except Exception:
             logger.debug("queue_poll_failed")
             return
@@ -291,6 +292,23 @@ class TradingEngine:
                 new_price=proposal.new_price,
                 reason=proposal.reason,
             )
+            key = ProposalKey(
+                event_ticker=proposal.event_ticker,
+                side=proposal.side,
+                kind="adjustment",
+            )
+            envelope = Proposal(
+                key=key,
+                kind="adjustment",
+                summary=(
+                    f"ADJ {proposal.event_ticker} {proposal.side}"
+                    f" {proposal.cancel_price}\u2192{proposal.new_price}c"
+                ),
+                detail=proposal.reason,
+                created_at=datetime.now(UTC),
+                adjustment=proposal,
+            )
+            self._proposal_queue.add(envelope)
 
     # ── Action methods ──────────────────────────────────────────────
 
@@ -314,19 +332,18 @@ class TradingEngine:
             )
             logger.info("order_placed", ticker=bid.ticker_b, order_id=order_b.order_id)
             self._notify(
-                f"Orders placed: {bid.ticker_a} @ {bid.no_a}c, "
-                f"{bid.ticker_b} @ {bid.no_b}c",
+                f"Orders placed: {bid.ticker_a} @ {bid.no_a}c, {bid.ticker_b} @ {bid.no_b}c",
             )
         except Exception as e:
-            self._notify(
-                f"Order error: {type(e).__name__}: {e}", "error"
-            )
+            self._notify(f"Order error: {type(e).__name__}: {e}", "error")
             logger.exception("place_bids_error")
 
     async def add_games(self, urls: list[str]) -> None:
         """Add games by URL."""
         try:
-            await self._game_manager.add_games(urls)
+            pairs = await self._game_manager.add_games(urls)
+            for pair in pairs:
+                self._adjuster.add_event(pair)
             self._notify(f"Added {len(urls)} game(s)")
         except Exception as e:
             self._notify(f"Error: {e}", "error")
@@ -349,36 +366,84 @@ class TradingEngine:
         except Exception as e:
             self._notify(f"Error: {e}", "error")
 
-    async def approve_adjustment(self, event_ticker: str, side_value: str) -> None:
-        """Execute an approved bid adjustment via amend."""
-        side = Side(side_value)
-        proposal = self._adjuster.get_proposal(event_ticker, side)
-        if proposal is None:
+    async def approve_proposal(self, key: ProposalKey) -> None:
+        """Approve and execute a queued proposal."""
+        try:
+            envelope = self._proposal_queue.approve(key)
+        except KeyError:
             self._notify("No pending proposal to approve", "warning")
             return
-        try:
-            await self._adjuster.execute(proposal, self._rest)
-            self._notify(
-                f"Adjustment executed: {event_ticker} side {side_value} "
-                f"-> {proposal.new_price}c",
+
+        if envelope.kind == "adjustment" and envelope.adjustment is not None:
+            try:
+                await self._adjuster.execute(envelope.adjustment, self._rest)
+                self._notify(
+                    f"Adjusted: {envelope.adjustment.event_ticker}"
+                    f" {envelope.adjustment.side}"
+                    f" \u2192 {envelope.adjustment.new_price}c",
+                )
+            except Exception as e:
+                self._notify(
+                    f"Adjustment FAILED: {type(e).__name__}: {e}", "error"
+                )
+                logger.exception(
+                    "adjustment_execute_error",
+                    event_ticker=envelope.adjustment.event_ticker,
+                )
+        elif envelope.kind == "bid" and envelope.bid is not None:
+            bid = envelope.bid
+            from talos.models.strategy import BidConfirmation
+
+            confirmation = BidConfirmation(
+                ticker_a=bid.ticker_a,
+                ticker_b=bid.ticker_b,
+                no_a=bid.no_a,
+                no_b=bid.no_b,
+                qty=bid.qty,
             )
-        except Exception as e:
-            self._notify(
-                f"Adjustment FAILED: {type(e).__name__}: {e}", "error"
-            )
-            logger.exception(
-                "adjustment_execute_error",
-                event_ticker=event_ticker,
-                side=side_value,
-            )
+            await self.place_bids(confirmation)
+
+    def reject_proposal(self, key: ProposalKey) -> None:
+        """Reject and remove a queued proposal."""
+        self._proposal_queue.reject(key)
+        # Also clear from adjuster's internal proposals if it's an adjustment
+        if key.kind == "adjustment" and key.side:
+            self._adjuster.clear_proposal(key.event_ticker, Side(key.side))
+        self._notify(f"Rejected: {key.event_ticker} {key.kind}")
+
+    async def approve_adjustment(self, event_ticker: str, side_value: str) -> None:
+        """Execute an approved bid adjustment via amend.
+
+        Delegates to :meth:`approve_proposal` (kept for backward compatibility).
+        """
+        key = ProposalKey(
+            event_ticker=event_ticker, side=side_value, kind="adjustment"
+        )
+        await self.approve_proposal(key)
 
     def reject_adjustment(self, event_ticker: str, side_value: str) -> None:
-        """Reject a pending bid adjustment proposal."""
-        side = Side(side_value)
-        self._adjuster.clear_proposal(event_ticker, side)
-        self._notify(f"Adjustment rejected: {event_ticker} side {side_value}")
+        """Reject a pending bid adjustment proposal.
+
+        Delegates to :meth:`reject_proposal` (kept for backward compatibility).
+        """
+        key = ProposalKey(
+            event_ticker=event_ticker, side=side_value, kind="adjustment"
+        )
+        self.reject_proposal(key)
 
     # ── Internal helpers ─────────────────────────────────────────────
+
+    async def _discover_active_events(self) -> list[str]:
+        """Query Kalshi for events with positions or resting orders."""
+        try:
+            event_positions = await self._rest.get_event_positions()
+            tickers = [ep.event_ticker for ep in event_positions]
+            if tickers:
+                logger.info("discovered_active_events", count=len(tickers), tickers=tickers)
+            return tickers
+        except Exception:
+            logger.warning("event_discovery_failed", exc_info=True)
+            return []
 
     def _active_market_tickers(self) -> list[str]:
         """Collect market tickers from all active scanner pairs."""
