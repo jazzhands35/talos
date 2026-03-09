@@ -331,19 +331,23 @@ class TestActions:
         gm.remove_game.assert_called_once_with("EVT-1")
 
     @pytest.mark.asyncio
-    async def test_approve_adjustment_no_proposal(self):
+    async def test_approve_proposal_no_pending(self):
         engine, rest = _engine_with_pair()
         notifications = []
         engine.on_notification = lambda msg, sev: notifications.append((msg, sev))
 
-        await engine.approve_adjustment("EVT-1", "A")
+        key = ProposalKey(event_ticker="EVT-1", side="A", kind="adjustment")
+        await engine.approve_proposal(key)
 
         assert any("No pending proposal" in msg for msg, _ in notifications)
 
-    def test_reject_adjustment_clears_proposal(self):
+    def test_reject_proposal_clears_adjuster(self):
         engine, _ = _engine_with_pair()
-        # Inject a fake proposal
+        from datetime import datetime
+
         from talos.models.adjustment import ProposedAdjustment
+        from talos.models.proposal import Proposal
+
         proposal = ProposedAdjustment(
             event_ticker="EVT-1", side="A", action="follow_jump",
             cancel_order_id="ord-1", cancel_count=10, cancel_price=45,
@@ -352,12 +356,6 @@ class TestActions:
         )
         engine.adjuster._proposals.setdefault("EVT-1", {})[Side.A] = proposal
         assert engine.adjuster.has_pending_proposal("EVT-1", Side.A)
-
-        # Also add to the proposal queue so reject_adjustment (which now delegates
-        # to reject_proposal) can find it
-        from datetime import datetime
-
-        from talos.models.proposal import Proposal
 
         key = ProposalKey(event_ticker="EVT-1", side="A", kind="adjustment")
         envelope = Proposal(
@@ -370,7 +368,7 @@ class TestActions:
         )
         engine.proposal_queue.add(envelope)
 
-        engine.reject_adjustment("EVT-1", "A")
+        engine.reject_proposal(key)
 
         assert not engine.adjuster.has_pending_proposal("EVT-1", Side.A)
 

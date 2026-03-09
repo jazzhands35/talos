@@ -8,8 +8,6 @@ See brain/principles.md Principles 15-19 for safety invariants.
 
 from __future__ import annotations
 
-from collections.abc import Callable
-
 import structlog
 
 from talos.fees import fee_adjusted_cost
@@ -56,8 +54,6 @@ class BidAdjuster:
         # Deferred jumps: event_ticker → set of deferred sides
         self._deferred: dict[str, set[Side]] = {}
 
-        # Callback for emitting proposals to the UI
-        self.on_proposal: Callable[[ProposedAdjustment], None] | None = None
 
     def get_ledger(self, event_ticker: str) -> PositionLedger:
         """Get the position ledger for an event."""
@@ -236,9 +232,6 @@ class BidAdjuster:
         # Clear deferred flag for this side
         deferred = self._deferred.get(pair.event_ticker, set())
         deferred.discard(side)
-
-        if self.on_proposal:
-            self.on_proposal(proposal)
 
         return proposal
 

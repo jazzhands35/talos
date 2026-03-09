@@ -445,26 +445,6 @@ class TradingEngine:
             self._proposer.record_rejection(key.event_ticker)
         self._notify(f"Rejected: {key.event_ticker} {key.kind}")
 
-    async def approve_adjustment(self, event_ticker: str, side_value: str) -> None:
-        """Execute an approved bid adjustment via amend.
-
-        Delegates to :meth:`approve_proposal` (kept for backward compatibility).
-        """
-        key = ProposalKey(
-            event_ticker=event_ticker, side=side_value, kind="adjustment"
-        )
-        await self.approve_proposal(key)
-
-    def reject_adjustment(self, event_ticker: str, side_value: str) -> None:
-        """Reject a pending bid adjustment proposal.
-
-        Delegates to :meth:`reject_proposal` (kept for backward compatibility).
-        """
-        key = ProposalKey(
-            event_ticker=event_ticker, side=side_value, kind="adjustment"
-        )
-        self.reject_proposal(key)
-
     # ── Internal helpers ─────────────────────────────────────────────
 
     async def _discover_active_events(self) -> list[str]:
