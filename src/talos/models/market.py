@@ -36,6 +36,7 @@ class Event(BaseModel):
     event_ticker: str
     series_ticker: str
     title: str
+    sub_title: str = ""
     category: str
     status: str | None = None
     mutually_exclusive: bool | None = None

@@ -31,9 +31,7 @@ class FakeBookManager:
 
 class TestDecisionLogic:
     def setup_method(self):
-        self.pair = ArbPair(
-            event_ticker="EVT-1", ticker_a="TK-A", ticker_b="TK-B"
-        )
+        self.pair = ArbPair(event_ticker="EVT-1", ticker_a="TK-A", ticker_b="TK-B")
         # fee_adjusted_cost(48)=48.91, fee_adjusted_cost(50)=50.875
         # sum=99.785 < 100 → profitable
         self.books = FakeBookManager({"TK-A": 50, "TK-B": 48})
@@ -55,14 +53,16 @@ class TestDecisionLogic:
         assert proposal.cancel_order_id == "ord-b"
         assert proposal.new_count == 10
 
-    def test_jump_on_unprofitable_side_no_proposal(self):
+    def test_jump_on_unprofitable_side_returns_hold(self):
         ledger = self.adjuster.get_ledger("EVT-1")
         ledger.record_fill(Side.A, count=10, price=50)
         ledger.record_resting(Side.B, order_id="ord-b", count=10, price=47)
         # Top of market moved to 51 — unprofitable: 51.8575 + 50.875 > 100
         self.books._prices["TK-B"] = 51
         proposal = self.adjuster.evaluate_jump("TK-B", at_top=False)
-        assert proposal is None
+        assert proposal is not None
+        assert proposal.action == "hold"
+        assert "not profitable" in proposal.reason
 
     def test_back_at_top_no_proposal(self):
         ledger = self.adjuster.get_ledger("EVT-1")
@@ -94,9 +94,7 @@ class TestDecisionLogic:
 
 class TestDualJumpTiebreaker:
     def setup_method(self):
-        self.pair = ArbPair(
-            event_ticker="EVT-1", ticker_a="TK-A", ticker_b="TK-B"
-        )
+        self.pair = ArbPair(event_ticker="EVT-1", ticker_a="TK-A", ticker_b="TK-B")
         self.books = FakeBookManager({"TK-A": 48, "TK-B": 33})
         self.adjuster = BidAdjuster(
             book_manager=self.books,
@@ -143,9 +141,7 @@ class TestDualJumpTiebreaker:
         assert proposal.side == "B"
 
 
-def _make_order(
-    order_id: str, price: int, fill_count: int, remaining_count: int
-) -> Order:
+def _make_order(order_id: str, price: int, fill_count: int, remaining_count: int) -> Order:
     return Order(
         order_id=order_id,
         ticker="TK-B",

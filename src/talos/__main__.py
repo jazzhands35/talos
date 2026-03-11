@@ -49,6 +49,7 @@ def main() -> None:
     from talos.persistence import load_saved_games, save_games
     from talos.rest_client import KalshiRESTClient
     from talos.scanner import ArbitrageScanner
+    from talos.suggestion_log import SuggestionLog
     from talos.top_of_market import TopOfMarketTracker
     from talos.ui.app import TalosApp
     from talos.ws_client import KalshiWSClient
@@ -72,9 +73,7 @@ def main() -> None:
 
     # Wire game persistence
     saved_games = load_saved_games()
-    game_mgr.on_change = lambda: save_games(
-        [p.event_ticker for p in game_mgr.active_games]
-    )
+    game_mgr.on_change = lambda: save_games([p.event_ticker for p in game_mgr.active_games])
 
     engine = TradingEngine(
         scanner=scanner,
@@ -85,6 +84,12 @@ def main() -> None:
         adjuster=adjuster,
         initial_games=saved_games,
     )
+
+    # Wire suggestion audit log
+    log_path = Path(__file__).resolve().parents[2] / "suggestions.log"
+    suggestion_log = SuggestionLog(log_path)
+    engine.proposal_queue.on_lifecycle = suggestion_log.log
+
     app = TalosApp(engine=engine)
     app.run()
 

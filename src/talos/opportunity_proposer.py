@@ -47,17 +47,19 @@ class OpportunityProposer:
             self._stable_since.pop(event, None)
             return None
 
-        # Gate 2: position gate — skip if both sides are covered
-        has_a = (
-            ledger.resting_count(Side.A) > 0
-            or ledger.filled_count(Side.A) >= ledger.unit_size
-        )
-        has_b = (
-            ledger.resting_count(Side.B) > 0
-            or ledger.filled_count(Side.B) >= ledger.unit_size
-        )
-        if has_a and has_b:
-            return None
+        # Gate 2: position gate — skip if both sides are covered for the current unit
+        if ledger.both_sides_complete() and ledger.filled_count(Side.A) == ledger.filled_count(
+            Side.B
+        ):
+            # Both sides equally filled at unit boundary — eligible for next pair
+            # Still block if resting orders already placed for next pair
+            if ledger.resting_count(Side.A) > 0 or ledger.resting_count(Side.B) > 0:
+                return None
+        else:
+            has_a = ledger.resting_count(Side.A) > 0 or ledger.unit_remaining(Side.A) == 0
+            has_b = ledger.resting_count(Side.B) > 0 or ledger.unit_remaining(Side.B) == 0
+            if has_a and has_b:
+                return None
 
         # Gate 3: no pending bid proposal for this event
         bid_key = ProposalKey(event_ticker=event, side="", kind="bid")
@@ -130,4 +132,12 @@ class OpportunityProposer:
         if now is None:
             now = datetime.now(UTC)
         self._rejected_at[event_ticker] = now
+        self._stable_since.pop(event_ticker, None)
+
+    def record_approval(self, event_ticker: str) -> None:
+        """Reset stability timer after approval.
+
+        Prevents re-proposing during the ledger sync gap — the proposer must
+        re-observe stable edge for stability_seconds before proposing again.
+        """
         self._stable_since.pop(event_ticker, None)

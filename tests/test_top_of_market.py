@@ -144,7 +144,22 @@ class TestCallbackTransitions:
 
         assert changes == []
 
-    def test_no_callback_on_first_check(self) -> None:
+    def test_first_check_at_top_no_callback(self) -> None:
+        """First observation at top — no notification needed."""
+        books, tracker = _make_tracker()
+        books.apply_snapshot("MKT-A", _snapshot(yes=[], no=[[47, 10]]))
+        tracker.update_orders([_order("MKT-A", 47)], [PAIR])
+
+        changes: list[tuple[str, bool]] = []
+        tracker.on_change = lambda t, at: changes.append((t, at))
+
+        tracker.check("MKT-A")
+
+        assert changes == []
+        assert tracker.is_at_top("MKT-A") is True
+
+    def test_first_check_jumped_fires_callback(self) -> None:
+        """First observation already jumped — must notify (P20)."""
         books, tracker = _make_tracker()
         books.apply_snapshot("MKT-A", _snapshot(yes=[], no=[[48, 5], [47, 10]]))
         tracker.update_orders([_order("MKT-A", 47)], [PAIR])
@@ -152,9 +167,9 @@ class TestCallbackTransitions:
         changes: list[tuple[str, bool]] = []
         tracker.on_change = lambda t, at: changes.append((t, at))
 
-        tracker.check("MKT-A")  # first check — sets state, no transition
+        tracker.check("MKT-A")
 
-        assert changes == []
+        assert changes == [("MKT-A", False)]
         assert tracker.is_at_top("MKT-A") is False
 
     def test_order_removed_clears_state(self) -> None:

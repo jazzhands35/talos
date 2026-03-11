@@ -6,7 +6,7 @@ from talos.automation_config import AutomationConfig
 class TestAutomationConfigDefaults:
     def test_edge_threshold_cents(self) -> None:
         cfg = AutomationConfig()
-        assert cfg.edge_threshold_cents == 1.5
+        assert cfg.edge_threshold_cents == 1.0
 
     def test_stability_seconds(self) -> None:
         cfg = AutomationConfig()

@@ -15,13 +15,13 @@ class ProposedAdjustment(BaseModel):
 
     event_ticker: str
     side: Literal["A", "B"]
-    action: Literal["follow_jump"]
-    cancel_order_id: str
-    cancel_count: int
-    cancel_price: int
-    new_count: int
-    new_price: int
+    action: Literal["follow_jump", "hold"]
+    cancel_order_id: str = ""
+    cancel_count: int = 0
+    cancel_price: int = 0
+    new_count: int = 0
+    new_price: int = 0
     reason: str
-    position_before: str
-    position_after: str
-    safety_check: str
+    position_before: str = ""
+    position_after: str = ""
+    safety_check: str = ""

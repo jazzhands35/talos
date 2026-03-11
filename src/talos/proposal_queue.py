@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 
 import structlog
@@ -23,6 +24,9 @@ class ProposalQueue:
         self._proposals: dict[ProposalKey, Proposal] = {}
         self._staleness_grace = timedelta(seconds=staleness_grace_seconds)
 
+        # Lifecycle callback for audit logging — (action, proposal) -> None
+        self.on_lifecycle: Callable[[str, Proposal], None] | None = None
+
     # ------------------------------------------------------------------
     # Mutations
     # ------------------------------------------------------------------
@@ -37,17 +41,21 @@ class ProposalQueue:
                 key=str(proposal.key),
                 summary=proposal.summary,
             )
+            self._emit("SUPERSEDED", prev)
+            self._emit("PROPOSED", proposal)
         else:
             log.info(
                 "proposal_added",
                 key=str(proposal.key),
                 summary=proposal.summary,
             )
+            self._emit("PROPOSED", proposal)
 
     def approve(self, key: ProposalKey) -> Proposal:
         """Pop and return the proposal.  Raises ``KeyError`` if missing."""
         proposal = self._proposals.pop(key)  # KeyError if absent
         log.info("proposal_approved", key=str(key))
+        self._emit("APPROVED", proposal)
         return proposal
 
     def reject(self, key: ProposalKey) -> None:
@@ -55,6 +63,7 @@ class ProposalQueue:
         removed = self._proposals.pop(key, None)
         if removed is not None:
             log.info("proposal_rejected", key=str(key))
+            self._emit("REJECTED", removed)
 
     # ------------------------------------------------------------------
     # Staleness sweep
@@ -95,8 +104,9 @@ class ProposalQueue:
                 to_remove.append(key)
 
         for key in to_remove:
-            del self._proposals[key]
+            proposal = self._proposals.pop(key)
             log.info("proposal_stale_removed", key=str(key))
+            self._emit("EXPIRED", proposal)
 
     # ------------------------------------------------------------------
     # Queries
@@ -112,3 +122,12 @@ class ProposalQueue:
 
     def __len__(self) -> int:
         return len(self._proposals)
+
+    # ------------------------------------------------------------------
+    # Internal
+    # ------------------------------------------------------------------
+
+    def _emit(self, action: str, proposal: Proposal) -> None:
+        """Fire the lifecycle callback if set."""
+        if self.on_lifecycle is not None:
+            self.on_lifecycle(action, proposal)

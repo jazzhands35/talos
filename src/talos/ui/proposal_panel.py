@@ -32,7 +32,6 @@ class ProposalPanel(Vertical):
     ProposalPanel .proposal-row {
         padding: 0 1;
         margin: 0 0 0 0;
-        height: 1;
     }
     ProposalPanel .proposal-row.--selected {
         background: #45475a;
@@ -40,11 +39,16 @@ class ProposalPanel(Vertical):
     ProposalPanel .proposal-row.--stale {
         opacity: 0.4;
     }
+    ProposalPanel .proposal-row.--hold {
+        color: #f9e2af;
+    }
+    ProposalPanel .proposal-row.--rebalance {
+        color: #fab387;
+    }
     ProposalPanel .proposal-detail {
         color: #a6adc8;
         padding: 0 1;
         margin: 0 0 1 0;
-        height: 1;
     }
     ProposalPanel .proposal-hint {
         color: #6c7086;
@@ -115,6 +119,10 @@ class ProposalPanel(Vertical):
                 classes += " --selected"
             if proposal.stale:
                 classes += " --stale"
+            if proposal.kind == "hold":
+                classes += " --hold"
+            if proposal.kind == "rebalance":
+                classes += " --rebalance"
             row = Static(f"[{i + 1}] {proposal.summary}", classes=classes)
             detail = Static(f"    {proposal.detail}", classes="proposal-detail")
             if hint:
@@ -124,24 +132,24 @@ class ProposalPanel(Vertical):
                 self.mount(row)
                 self.mount(detail)
 
-    def key_up(self) -> None:
+    def select_previous(self) -> None:
         """Move selection up."""
         if self._keys:
             self.selected_index = max(0, self.selected_index - 1)
             self.refresh_proposals()
 
-    def key_down(self) -> None:
+    def select_next(self) -> None:
         """Move selection down."""
         if self._keys:
             self.selected_index = min(len(self._keys) - 1, self.selected_index + 1)
             self.refresh_proposals()
 
-    def key_y(self) -> None:
-        """Approve selected proposal."""
+    def approve_selected(self) -> None:
+        """Approve the currently selected proposal."""
         if self._keys and 0 <= self.selected_index < len(self._keys):
             self.post_message(self.Approved(self._keys[self.selected_index]))
 
-    def key_n(self) -> None:
-        """Reject selected proposal."""
+    def reject_selected(self) -> None:
+        """Reject the currently selected proposal."""
         if self._keys and 0 <= self.selected_index < len(self._keys):
             self.post_message(self.Rejected(self._keys[self.selected_index]))

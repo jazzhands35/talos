@@ -84,7 +84,8 @@ class TestPositionGate:
         result = proposer.evaluate(pair, opp, ledger, set(), now=now)
         assert result is None
 
-    def test_filled_on_both_sides_no_proposal(self) -> None:
+    def test_both_sides_complete_suggests_reentry(self) -> None:
+        """After both sides fill a full unit, suggest re-entry if profitable."""
         cfg = AutomationConfig(edge_threshold_cents=1.0, stability_seconds=0)
         proposer = OpportunityProposer(cfg)
         pair = _make_pair()
@@ -94,6 +95,46 @@ class TestPositionGate:
         ledger.record_fill(Side.A, 10, 48)
         ledger.record_resting(Side.B, "ord-b", 10, 50)
         ledger.record_fill(Side.B, 10, 50)
+        now = datetime.now(UTC)
+
+        result = proposer.evaluate(pair, opp, ledger, set(), now=now)
+        assert result is not None
+        assert result.kind == "bid"
+        assert result.bid is not None
+        assert result.bid.qty == 10
+
+    def test_both_sides_complete_with_resting_no_proposal(self) -> None:
+        """If next pair's bids are already resting, don't suggest again."""
+        cfg = AutomationConfig(edge_threshold_cents=1.0, stability_seconds=0)
+        proposer = OpportunityProposer(cfg)
+        pair = _make_pair()
+        opp = _make_opp(fee_edge=2.0)
+        ledger = PositionLedger("EVT-1", unit_size=10)
+        # First pair filled
+        ledger.record_resting(Side.A, "ord-a1", 10, 48)
+        ledger.record_fill(Side.A, 10, 48)
+        ledger.record_resting(Side.B, "ord-b1", 10, 50)
+        ledger.record_fill(Side.B, 10, 50)
+        # Second pair already resting
+        ledger.record_resting(Side.A, "ord-a2", 10, 47)
+        ledger.record_resting(Side.B, "ord-b2", 10, 49)
+        now = datetime.now(UTC)
+
+        result = proposer.evaluate(pair, opp, ledger, set(), now=now)
+        assert result is None
+
+    def test_imbalanced_fills_no_reentry(self) -> None:
+        """If sides have different fill counts, don't suggest re-entry."""
+        cfg = AutomationConfig(edge_threshold_cents=1.0, stability_seconds=0)
+        proposer = OpportunityProposer(cfg)
+        pair = _make_pair()
+        opp = _make_opp(fee_edge=2.0)
+        ledger = PositionLedger("EVT-1", unit_size=10)
+        ledger.record_resting(Side.A, "ord-a", 10, 48)
+        ledger.record_fill(Side.A, 10, 48)
+        # Side B only partially filled
+        ledger.record_resting(Side.B, "ord-b", 10, 50)
+        ledger.record_fill(Side.B, 5, 50)
         now = datetime.now(UTC)
 
         result = proposer.evaluate(pair, opp, ledger, set(), now=now)
@@ -221,3 +262,35 @@ class TestCooldown:
         t2 = t0 + timedelta(seconds=31)
         result2 = proposer.evaluate(pair, opp, ledger, set(), now=t2)
         assert result2 is not None
+
+    def test_approval_resets_stability_timer(self) -> None:
+        """After approving a bid, proposer must re-observe stable edge before re-proposing."""
+        cfg = AutomationConfig(
+            edge_threshold_cents=1.0,
+            stability_seconds=10,
+        )
+        proposer = OpportunityProposer(cfg)
+        pair = _make_pair()
+        opp = _make_opp(fee_edge=2.0)
+        ledger = PositionLedger("EVT-1", unit_size=10)
+        t0 = datetime.now(UTC)
+
+        # First call: starts stability timer
+        proposer.evaluate(pair, opp, ledger, set(), now=t0)
+        # After stability window: should propose
+        t1 = t0 + timedelta(seconds=11)
+        result = proposer.evaluate(pair, opp, ledger, set(), now=t1)
+        assert result is not None
+
+        # Simulate approval — resets stability timer
+        proposer.record_approval("EVT-1")
+
+        # Immediately after approval: stability timer was reset, must re-accumulate
+        t2 = t1 + timedelta(seconds=1)
+        result2 = proposer.evaluate(pair, opp, ledger, set(), now=t2)
+        assert result2 is None  # blocked by stability gate
+
+        # After stability window again: should propose
+        t3 = t2 + timedelta(seconds=11)
+        result3 = proposer.evaluate(pair, opp, ledger, set(), now=t3)
+        assert result3 is not None

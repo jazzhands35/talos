@@ -54,7 +54,6 @@ class BidAdjuster:
         # Deferred jumps: event_ticker → set of deferred sides
         self._deferred: dict[str, set[Side]] = {}
 
-
     def get_ledger(self, event_ticker: str) -> PositionLedger:
         """Get the position ledger for an event."""
         return self._ledgers[event_ticker]
@@ -73,18 +72,13 @@ class BidAdjuster:
         self._proposals.pop(event_ticker, None)
         self._deferred.pop(event_ticker, None)
         # Clean ticker map
-        to_remove = [
-            t for t, (p, _) in self._ticker_map.items()
-            if p.event_ticker == event_ticker
-        ]
+        to_remove = [t for t, (p, _) in self._ticker_map.items() if p.event_ticker == event_ticker]
         for t in to_remove:
             del self._ticker_map[t]
 
     # ── Decision logic (synchronous, testable) ──────────────────────
 
-    def evaluate_jump(
-        self, ticker: str, at_top: bool
-    ) -> ProposedAdjustment | None:
+    def evaluate_jump(self, ticker: str, at_top: bool) -> ProposedAdjustment | None:
         """Evaluate a jump event and return a proposal if appropriate.
 
         Called by TopOfMarketTracker.on_change callback.
@@ -119,17 +113,24 @@ class BidAdjuster:
         if new_price <= ledger.resting_price(side):
             return None
 
+        def _hold(reason: str) -> ProposedAdjustment:
+            return ProposedAdjustment(
+                event_ticker=pair.event_ticker,
+                side=side.value,
+                action="hold",
+                reason=reason,
+                position_before=(
+                    f"A: {ledger.format_position(Side.A)} | B: {ledger.format_position(Side.B)}"
+                ),
+            )
+
         # Profitability check (Principle 18)
         other_side = side.other
         if ledger.filled_count(other_side) > 0:
-            other_effective = fee_adjusted_cost(
-                int(round(ledger.avg_filled_price(other_side)))
-            )
+            other_effective = fee_adjusted_cost(int(round(ledger.avg_filled_price(other_side))))
         elif ledger.resting_count(other_side) > 0:
             # Use top-of-market for other side (worst case / most conservative)
-            other_ticker = (
-                pair.ticker_a if other_side is Side.A else pair.ticker_b
-            )
+            other_ticker = pair.ticker_a if other_side is Side.A else pair.ticker_b
             other_best = self._books.best_ask(other_ticker)
             other_book_price = other_best.price if other_best else ledger.resting_price(other_side)
             other_effective = fee_adjusted_cost(other_book_price)
@@ -144,7 +145,12 @@ class BidAdjuster:
                 new_price=new_price,
                 effective_sum=this_effective + other_effective,
             )
-            return None
+            return _hold(
+                f"stay at {ledger.resting_price(side)}c — "
+                f"following to {new_price}c not profitable "
+                f"({this_effective:.1f}+{other_effective:.1f}"
+                f"={this_effective + other_effective:.1f} >= 100)"
+            )
 
         # Dual-jump tiebreaker (Principle 19)
         other_ticker = pair.ticker_a if other_side is Side.A else pair.ticker_b
@@ -167,7 +173,10 @@ class BidAdjuster:
                     side=side.value,
                     reason=f"other side needs {other_remaining} vs this side {this_remaining}",
                 )
-                return None
+                return _hold(
+                    f"deferred — other side needs {other_remaining} fills "
+                    f"vs this side {this_remaining}"
+                )
             else:
                 # This side is more behind — cancel other side's existing proposal
                 evt_proposals = self._proposals.get(pair.event_ticker, {})
@@ -189,12 +198,10 @@ class BidAdjuster:
         new_count = cancel_count  # same quantity at new price
 
         # Safety gate check (simulating the post-cancel state)
-        test_ok, test_reason = self._check_post_cancel_safety(
-            ledger, side, new_count, new_price
-        )
+        test_ok, test_reason = self._check_post_cancel_safety(ledger, side, new_count, new_price)
         if not test_ok:
             logger.info("jump_blocked_by_safety", ticker=ticker, reason=test_reason)
-            return None
+            return _hold(f"stay — safety gate: {test_reason}")
 
         proposal = ProposedAdjustment(
             event_ticker=pair.event_ticker,
@@ -206,18 +213,18 @@ class BidAdjuster:
             new_count=new_count,
             new_price=new_price,
             reason=(
-                f"jumped {cancel_price}c->{new_price}c, "
-                f"arb: {this_effective:.1f}+{other_effective:.1f}"
-                f"={this_effective + other_effective:.1f} < 100"
+                f"cost: {this_effective:.1f} + {other_effective:.1f}"
+                f" = {this_effective + other_effective:.1f}c"
+                f" (profit {100 - this_effective - other_effective:.1f}c/pair)"
             ),
             position_before=(
-                f"A: {ledger.format_position(Side.A)} | "
-                f"B: {ledger.format_position(Side.B)}"
+                f"A: {ledger.format_position(Side.A)} | B: {ledger.format_position(Side.B)}"
             ),
             position_after=self._format_position_after(ledger, side, new_count, new_price),
             safety_check=(
-                f"filled+new={ledger.filled_count(side)+new_count} <= "
-                f"unit({ledger.unit_size}), "
+                f"filled_in_unit+new="
+                f"{ledger.filled_count(side) % ledger.unit_size + new_count}"
+                f" <= unit({ledger.unit_size}), "
                 f"arb={this_effective + other_effective:.1f}c < 100"
             ),
         )
@@ -264,9 +271,7 @@ class BidAdjuster:
     def has_deferred(self, event_ticker: str, side: Side) -> bool:
         return side in self._deferred.get(event_ticker, set())
 
-    def get_proposal(
-        self, event_ticker: str, side: Side
-    ) -> ProposedAdjustment | None:
+    def get_proposal(self, event_ticker: str, side: Side) -> ProposedAdjustment | None:
         return self._proposals.get(event_ticker, {}).get(side)
 
     def clear_proposal(self, event_ticker: str, side: Side) -> None:
@@ -277,9 +282,7 @@ class BidAdjuster:
 
     # ── Async execution ─────────────────────────────────────────────
 
-    async def execute(
-        self, proposal: ProposedAdjustment, rest_client: object
-    ) -> None:
+    async def execute(self, proposal: ProposedAdjustment, rest_client: object) -> None:
         """Execute a proposed adjustment via amend (Principle 17).
 
         Single atomic API call — changes price on existing order.
@@ -361,9 +364,7 @@ class BidAdjuster:
 
     # ── Internal helpers ────────────────────────────────────────────
 
-    def _is_jumped(
-        self, ticker: str, ledger: PositionLedger, side: Side
-    ) -> bool:
+    def _is_jumped(self, ticker: str, ledger: PositionLedger, side: Side) -> bool:
         """Check if a side has been jumped (book price > resting price)."""
         if ledger.resting_order_id(side) is None:
             return False
@@ -384,11 +385,12 @@ class BidAdjuster:
         if ledger.has_discrepancy:
             return False, f"ledger has unresolved discrepancy: {ledger.discrepancy}"
 
-        # Simulate post-cancel state
-        if ledger.filled_count(side) + new_count > ledger.unit_size:
+        # Simulate post-cancel state (use fills in current unit, not total)
+        filled_in_unit = ledger.filled_count(side) % ledger.unit_size
+        if filled_in_unit + new_count > ledger.unit_size:
             return (
                 False,
-                f"would exceed unit after cancel: filled={ledger.filled_count(side)} + "
+                f"would exceed unit after cancel: filled_in_unit={filled_in_unit} + "
                 f"new={new_count} > {ledger.unit_size}",
             )
         # Check profitability (reuse the gate logic without resting check)

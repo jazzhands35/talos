@@ -13,15 +13,23 @@ from talos.ui.proposal_panel import ProposalPanel
 
 def _make_proposal(event_ticker: str = "EVT-1", side: str = "A", new_price: int = 48) -> Proposal:
     adj = ProposedAdjustment(
-        event_ticker=event_ticker, side=side, action="follow_jump",
-        cancel_order_id="ord-1", cancel_count=10, cancel_price=47,
-        new_count=10, new_price=new_price,
+        event_ticker=event_ticker,
+        side=side,
+        action="follow_jump",
+        cancel_order_id="ord-1",
+        cancel_count=10,
+        cancel_price=47,
+        new_count=10,
+        new_price=new_price,
         reason=f"jumped 47->{new_price}c",
-        position_before="before", position_after="after", safety_check="ok",
+        position_before="before",
+        position_after="after",
+        safety_check="ok",
     )
     key = ProposalKey(event_ticker=event_ticker, side=side, kind="adjustment")
     return Proposal(
-        key=key, kind="adjustment",
+        key=key,
+        kind="adjustment",
         summary=f"ADJ {event_ticker} {side} 47→{new_price}c",
         detail=f"jumped 47->{new_price}c",
         created_at=datetime.now(UTC),
@@ -84,7 +92,7 @@ async def test_approve_posts_message():
     async with CapturingApp(queue).run_test() as pilot:
         panel = pilot.app.query_one(ProposalPanel)
         panel.refresh_proposals()
-        panel.key_y()
+        panel.approve_selected()
         await pilot.pause()
         assert len(messages) == 1
         assert messages[0] == p.key
@@ -104,7 +112,7 @@ async def test_reject_posts_message():
     async with CapturingApp(queue).run_test() as pilot:
         panel = pilot.app.query_one(ProposalPanel)
         panel.refresh_proposals()
-        panel.key_n()
+        panel.reject_selected()
         await pilot.pause()
         assert len(messages) == 1
         assert messages[0] == p.key

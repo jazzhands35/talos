@@ -76,7 +76,8 @@ class TopOfMarketTracker:
 
         self._at_top[ticker] = now_at_top
 
-        if was_at_top is not None and now_at_top != was_at_top:
+        # Fire on state transition, or on first observation if already jumped
+        if now_at_top != was_at_top and (was_at_top is not None or not now_at_top):
             logger.info(
                 "top_of_market_change",
                 ticker=ticker,

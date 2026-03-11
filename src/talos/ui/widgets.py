@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from rich.text import Text as RichText
 from textual.widgets import DataTable, Static
 
 from talos.cpm import format_cpm, format_eta
@@ -11,21 +12,38 @@ from talos.fees import american_from_win_risk, american_odds, fee_adjusted_cost,
 from talos.models.position import EventPositionSummary
 from talos.scanner import ArbitrageScanner
 from talos.top_of_market import TopOfMarketTracker
+from talos.ui.theme import BLUE, GREEN, PEACH, RED, YELLOW
 
 
-def _fmt_cents(value: int) -> str:
-    """Format an integer cents value as 'XX¢'."""
-    return f"{value}¢"
+def _fmt_cents(value: int) -> RichText:
+    """Format an integer cents value as 'XX¢', right-aligned."""
+    return RichText(f"{value}¢", justify="right")
 
 
-def _fmt_pos(filled: int, total: int, avg_no_price: int) -> str:
+def _fmt_edge(fee_edge: float) -> RichText:
+    """Format fee-adjusted edge: green if positive, dim otherwise."""
+    label = f"{fee_edge:.1f}¢"
+    if fee_edge > 0:
+        return RichText(label, style=GREEN, justify="right")
+    return RichText(label, style="dim", justify="right")
+
+
+def _fmt_pnl(net_cents: float) -> RichText:
+    """Format P&L in dollars: green positive, red negative."""
+    dollars = net_cents / 100
+    if dollars >= 0:
+        return RichText(f"${dollars:.2f}", style=GREEN, justify="right")
+    return RichText(f"-${abs(dollars):.2f}", style=RED, justify="right")
+
+
+def _fmt_pos(filled: int, total: int, avg_no_price: int) -> RichText:
     """Format position as 'filled/total avg¢' with fee-adjusted cost."""
     if total == 0:
-        return "—"
+        return DIM_DASH
     if filled == 0:
-        return f"0/{total}"
+        return RichText(f"0/{total}", justify="right")
     fee_avg = fee_adjusted_cost(avg_no_price)
-    return f"{filled}/{total} {fee_avg:.1f}¢"
+    return RichText(f"{filled}/{total} {fee_avg:.1f}¢", justify="right")
 
 
 def _fmt_odds(no_price: int) -> str:
@@ -37,6 +55,45 @@ def _fmt_odds(no_price: int) -> str:
     return f"+{r}" if r > 0 else str(r)
 
 
+def _dim(value: str) -> RichText:
+    """Wrap a placeholder value in dim styling."""
+    return RichText(value, style="dim")
+
+
+DIM_DASH = _dim("—")
+
+
+def _fmt_status(status: str) -> RichText:
+    """Format status with icon and color for at-a-glance scanning."""
+    if not status:
+        return DIM_DASH
+
+    status_styles: list[tuple[str, str, str]] = [
+        ("Low edge", "\u25cb", "dim"),
+        ("Unstable", "\u25cb", "dim"),
+        ("Sug. off", "\u25cb", "dim"),
+        ("Ready", "\u25cb", "dim"),
+        ("Stable", "\u25cb", "dim"),
+        ("Cooldown", "\u25cb", "dim"),
+        ("Proposed", "\u25ce", BLUE),
+        ("Resting", "\u25f7", YELLOW),
+        ("Bidding", "\u25f7", YELLOW),
+        ("Jumped", "\u25f7", PEACH),
+        ("Filling", "\u25d0", BLUE),
+        ("Waiting", "\u25d0", BLUE),
+        ("Need bid", "\u25d0", BLUE),
+        ("Locked", "\u2713", GREEN),
+        ("Imbalanced", "\u26a0", YELLOW),
+        ("Discrepancy", "\u26a0", RED),
+    ]
+
+    for prefix, icon, color in status_styles:
+        if status.startswith(prefix):
+            return RichText(f"{icon} {status}", style=color)
+
+    return RichText(status)
+
+
 def _fmt_net_odds(
     no_a: int,
     no_b: int,
@@ -44,7 +101,9 @@ def _fmt_net_odds(
     filled_b: int = 0,
     total_cost_a: int = 0,
     total_cost_b: int = 0,
-) -> str:
+    fees_a: int = 0,
+    fees_b: int = 0,
+) -> RichText:
     """Format net position as wager amount, side, and American odds.
 
     With no fills: shows per-leg odds only.
@@ -55,26 +114,26 @@ def _fmt_net_odds(
     odds_b = _fmt_odds(no_b)
     odds_str = f"{odds_a}/{odds_b}"
     if filled_a + filled_b == 0:
-        return odds_str
-    net_a, net_b = scenario_pnl(filled_a, total_cost_a, filled_b, total_cost_b)
+        return RichText(odds_str, justify="right")
+    net_a, net_b = scenario_pnl(filled_a, total_cost_a, filled_b, total_cost_b, fees_a, fees_b)
     worse = min(net_a, net_b)
     better = max(net_a, net_b)
     # Both scenarios profitable → guaranteed profit, no risk
     if worse > 0:
-        return f"GTD ${worse / 100:.2f}"
+        return RichText(f"GTD ${worse / 100:.2f}", style=GREEN, justify="right")
     # Both scenarios negative → underwater, no meaningful odds
     if better <= 0:
-        return f"-${abs(better) / 100:.2f}"
+        return RichText(f"-${abs(better) / 100:.2f}", style=RED, justify="right")
     # Mixed: one wins, one loses → directional bet
     eff = american_from_win_risk(better, abs(worse))
     if eff is None:
-        return f"— {odds_str}"
+        return RichText(f"— {odds_str}", justify="right")
     side = "A" if net_a > net_b else "B"
     eff_r = round(eff)
     eff_str = f"+{eff_r}" if eff_r > 0 else str(eff_r)
     # Base wager: loss if positive odds (underdog), win if negative (favorite)
     base = abs(worse) if eff_r > 0 else better
-    return f"${base / 100:.0f} {side} {eff_str}"
+    return RichText(f"${base / 100:.0f} {side} {eff_str}", justify="right")
 
 
 class OpportunitiesTable(DataTable):
@@ -89,6 +148,7 @@ class OpportunitiesTable(DataTable):
     def __init__(self, **kwargs: Any) -> None:
         super().__init__(**kwargs)
         self._positions: dict[str, EventPositionSummary] = {}
+        self._labels: dict[str, str] = {}
 
     def on_mount(self) -> None:
         self.cursor_type = "row"
@@ -105,12 +165,17 @@ class OpportunitiesTable(DataTable):
         self.add_column("Q-B", width=10)
         self.add_column("CPM-B", width=8)
         self.add_column("ETA-B", width=7)
+        self.add_column("Status", width=16)
         self.add_column("P&L   ")
         self.add_column("Net/Odds", width=20)
 
     def update_positions(self, summaries: list[EventPositionSummary]) -> None:
         """Store latest position summaries for next table refresh."""
         self._positions = {s.event_ticker: s for s in summaries}
+
+    def update_labels(self, labels: dict[str, str]) -> None:
+        """Store event ticker -> short display label mapping."""
+        self._labels = labels
 
     def refresh_from_scanner(
         self,
@@ -133,7 +198,7 @@ class OpportunitiesTable(DataTable):
         # Add or update rows (positive edge first, then rest)
         sorted_opps = sorted(all_snaps.values(), key=lambda o: o.raw_edge, reverse=True)
         for opp in sorted_opps:
-            edge_str = f"{opp.fee_edge:.1f}¢"
+            edge_str = _fmt_edge(opp.fee_edge)
 
             # Position columns
             pos = self._positions.get(opp.event_ticker)
@@ -142,40 +207,80 @@ class OpportunitiesTable(DataTable):
                 total_b = pos.leg_b.filled_count + pos.leg_b.resting_count
                 pos_a = _fmt_pos(pos.leg_a.filled_count, total_a, pos.leg_a.no_price)
                 pos_b = _fmt_pos(pos.leg_b.filled_count, total_b, pos.leg_b.no_price)
-                q_a = str(pos.leg_a.queue_position) if pos.leg_a.queue_position else "—"
-                q_b = str(pos.leg_b.queue_position) if pos.leg_b.queue_position else "—"
-                cpm_a = format_cpm(pos.leg_a.cpm, pos.leg_a.cpm_partial)
-                cpm_b = format_cpm(pos.leg_b.cpm, pos.leg_b.cpm_partial)
-                eta_a = format_eta(pos.leg_a.eta_minutes, pos.leg_a.cpm_partial)
-                eta_b = format_eta(pos.leg_b.eta_minutes, pos.leg_b.cpm_partial)
+
+                # Delta neutrality highlighting — yellow on behind side
+                fa, fb = pos.leg_a.filled_count, pos.leg_b.filled_count
+                ra, rb = pos.leg_a.resting_count, pos.leg_b.resting_count
+                ta, tb = fa + ra, fb + rb
+                if fa != fb:
+                    # Fill imbalance — highlight the side with fewer fills
+                    if fa < fb:
+                        pos_a = RichText(str(pos_a), style=YELLOW, justify="right")
+                    else:
+                        pos_b = RichText(str(pos_b), style=YELLOW, justify="right")
+                elif ta != tb:
+                    # Resting imbalance (fills equal) — highlight side with fewer total
+                    if ta < tb:
+                        pos_a = RichText(str(pos_a), style=YELLOW, justify="right")
+                    else:
+                        pos_b = RichText(str(pos_b), style=YELLOW, justify="right")
+
+                if pos.leg_a.queue_position:
+                    q_a = RichText(str(pos.leg_a.queue_position), justify="right")
+                else:
+                    q_a = DIM_DASH
+                if pos.leg_b.queue_position:
+                    q_b = RichText(str(pos.leg_b.queue_position), justify="right")
+                else:
+                    q_b = DIM_DASH
+                cpm_a = RichText(
+                    format_cpm(pos.leg_a.cpm, pos.leg_a.cpm_partial), justify="right"
+                )
+                cpm_b = RichText(
+                    format_cpm(pos.leg_b.cpm, pos.leg_b.cpm_partial), justify="right"
+                )
+                eta_a = RichText(
+                    format_eta(pos.leg_a.eta_minutes, pos.leg_a.cpm_partial), justify="right"
+                )
+                eta_b = RichText(
+                    format_eta(pos.leg_b.eta_minutes, pos.leg_b.cpm_partial), justify="right"
+                )
                 net = pos.locked_profit_cents - pos.exposure_cents
-                pnl = f"{net / 100:.2f}"
+                pnl = _fmt_pnl(net)
+                status = _fmt_status(pos.status)
                 net_odds = _fmt_net_odds(
-                    opp.no_a, opp.no_b,
-                    pos.leg_a.filled_count, pos.leg_b.filled_count,
-                    pos.leg_a.total_fill_cost, pos.leg_b.total_fill_cost,
+                    opp.no_a,
+                    opp.no_b,
+                    pos.leg_a.filled_count,
+                    pos.leg_b.filled_count,
+                    pos.leg_a.total_fill_cost,
+                    pos.leg_b.total_fill_cost,
+                    pos.leg_a.total_fees,
+                    pos.leg_b.total_fees,
                 )
             else:
-                pos_a = "—"
-                pos_b = "—"
-                q_a = "—"
-                q_b = "—"
-                cpm_a = "—"
-                cpm_b = "—"
-                eta_a = "—"
-                eta_b = "—"
-                pnl = "—"
+                pos_a = DIM_DASH
+                pos_b = DIM_DASH
+                q_a = DIM_DASH
+                q_b = DIM_DASH
+                cpm_a = DIM_DASH
+                cpm_b = DIM_DASH
+                eta_a = DIM_DASH
+                eta_b = DIM_DASH
+                pnl = DIM_DASH
+                status = _fmt_status("")
                 net_odds = _fmt_net_odds(opp.no_a, opp.no_b)
 
             # Top-of-market warning (applies regardless of position data)
             if tracker is not None:
                 if tracker.is_at_top(opp.ticker_a) is False:
-                    q_a = f"!! {q_a}"
+                    q_a = RichText(f"!! {q_a}", style=YELLOW, justify="right")
                 if tracker.is_at_top(opp.ticker_b) is False:
-                    q_b = f"!! {q_b}"
+                    q_b = RichText(f"!! {q_b}", style=YELLOW, justify="right")
 
+            display_name = self._labels.get(opp.event_ticker, opp.event_ticker)
             row_data = (
-                opp.event_ticker,
+                display_name,
                 _fmt_cents(opp.no_a),
                 _fmt_cents(opp.no_b),
                 edge_str,
@@ -187,6 +292,7 @@ class OpportunitiesTable(DataTable):
                 q_b,
                 cpm_b,
                 eta_b,
+                status,
                 pnl,
                 net_odds,
             )

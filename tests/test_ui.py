@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from rich.text import Text as RichText
+
 from talos.models.position import EventPositionSummary, LegSummary
 from talos.models.strategy import Opportunity
 from talos.models.ws import OrderBookSnapshot
@@ -69,10 +71,34 @@ class TestOpportunitiesTable:
             table = app.query_one(OpportunitiesTable)
             # Row 0 should have formatted price data
             row_data = table.get_row_at(0)
-            # NO-A=38¢, NO-B=55¢, Edge=5.9¢ (fee-adjusted)
+            # NO-A=38¢, NO-B=55¢, Edge=6.2¢ (quadratic fee-adjusted)
             assert "38¢" in str(row_data[1])
             assert "55¢" in str(row_data[2])
-            assert "5.9" in str(row_data[3])  # fee_edge ≈ 5.9¢
+            assert "6.2" in str(row_data[3])  # fee_edge ≈ 6.2¢
+
+    async def test_short_event_label_displayed(self) -> None:
+        """Table should show short label, not full event ticker."""
+        scanner = _make_scanner_with_opportunity()
+        app = TalosApp(scanner=scanner)
+        async with app.run_test() as pilot:
+            table = app.query_one(OpportunitiesTable)
+            table.update_labels({"EVT-STANMIA": "Stan-Mia"})
+            app.refresh_opportunities()
+            await pilot.pause()
+            row = table.get_row_at(0)
+            assert str(row[0]) == "Stan-Mia"
+
+    async def test_missing_label_falls_back_to_ticker(self) -> None:
+        """Without a label, full event ticker should display."""
+        scanner = _make_scanner_with_opportunity()
+        app = TalosApp(scanner=scanner)
+        async with app.run_test() as pilot:
+            table = app.query_one(OpportunitiesTable)
+            # No labels set
+            app.refresh_opportunities()
+            await pilot.pause()
+            row = table.get_row_at(0)
+            assert str(row[0]) == "EVT-STANMIA"
 
     async def test_table_shows_negative_edge_pairs(self) -> None:
         mgr = OrderBookManager()
@@ -164,23 +190,21 @@ class TestTablePositions:
             app.refresh_opportunities()
             await pilot.pause()
             row = table.get_row_at(0)
-            row_str = str(row)
-            # Pos-A: 3/5 at fee_adjusted_cost(31) = 31 + 69*0.0175 = 32.2¢
-            # Pos-B: 3/5 at fee_adjusted_cost(67) = 67 + 33*0.0175 = 67.6¢
-            assert "3/5 32.2" in row_str  # Pos-A with fee-adjusted avg
-            assert "3/5 67.6" in row_str  # Pos-B with fee-adjusted avg
-            assert "'8'" in row_str  # Q-A column
-            assert "'15'" in row_str  # Q-B column
-            assert "12.5" in row_str  # CPM-A
-            assert "6.00*" in row_str  # CPM-B (partial)
-            assert "1m" in row_str  # ETA-A (0.64 min rounds to 1m)
-            assert "2m*" in row_str  # ETA-B (2.5 rounds to 2m via banker's rounding, partial)
-            assert "0.02" in row_str  # P&L (fee-adjusted profit, no exposure)
+            # Pos-A: 3/5 at fee_adjusted_cost(31) = 31 + 31*69*0.0175/100 = 31.4¢
+            # Pos-B: 3/5 at fee_adjusted_cost(67) = 67 + 67*33*0.0175/100 = 67.4¢
+            assert "3/5 31.4" in str(row[4])  # Pos-A with fee-adjusted avg
+            assert "3/5 67.4" in str(row[5])  # Pos-B with fee-adjusted avg
+            assert "8" in str(row[6])  # Q-A column
+            assert "15" in str(row[9])  # Q-B column
+            assert "12.5" in str(row[7])  # CPM-A
+            assert "6.00*" in str(row[10])  # CPM-B (partial)
+            assert "1m" in str(row[8])  # ETA-A (0.64 min rounds to 1m)
+            assert "2m*" in str(row[11])  # ETA-B (2.5 rounds to 2m via banker's rounding, partial)
+            assert "0.02" in str(row[13])  # P&L (locked_profit_cents=2.38, no exposure)
             # Net/Odds: both scenarios positive → guaranteed profit
-            # 3 fills each at 31¢/67¢ (total costs 93/201):
-            # net_a = (300-201)*0.9825 - 93 = 4.27¢, net_b = (300-93)*0.9825 - 201 = 2.38¢
-            # GTD shows worst-case (smaller) profit: $0.02
-            assert "GTD $0.02" in row_str
+            # 3 fills each at 31¢/67¢ (total costs 93/201, fees=0 in test):
+            # total_outlay = 294, net = 300 - 294 = 6 → GTD $0.06
+            assert "GTD $0.06" in str(row[14])
 
     async def test_table_shows_odds_without_positions(self) -> None:
         scanner = _make_scanner_with_opportunity()
@@ -190,10 +214,163 @@ class TestTablePositions:
             await pilot.pause()
             table = app.query_one(OpportunitiesTable)
             row = table.get_row_at(0)
-            row_str = str(row)
-            assert "—" in row_str  # Position columns show dashes
+            assert str(row[4]) == "—"  # Pos-A shows dim dash
+            assert str(row[5]) == "—"  # Pos-B shows dim dash
             # Net/Odds shows per-leg odds only when no positions
-            assert "+160/-124" in row_str
+            assert "+160/-124" in str(row[14])
+
+
+class TestRichTextCells:
+    async def test_empty_cells_are_dim_rich_text(self) -> None:
+        """Em-dash placeholders should be dim Rich Text, not plain strings."""
+        scanner = _make_scanner_with_opportunity()
+        app = TalosApp(scanner=scanner)
+        async with app.run_test() as pilot:
+            app.refresh_opportunities()
+            await pilot.pause()
+            table = app.query_one(OpportunitiesTable)
+            row = table.get_row_at(0)
+            # Pos-A (index 4) should be a dim Rich Text em-dash (no positions loaded)
+            pos_a = row[4]
+            assert isinstance(pos_a, RichText)
+            assert str(pos_a) == "—"
+
+    async def test_numeric_cells_are_right_aligned(self) -> None:
+        """Numeric columns should be right-justified Rich Text."""
+        scanner = _make_scanner_with_opportunity()
+        app = TalosApp(scanner=scanner)
+        async with app.run_test() as pilot:
+            app.refresh_opportunities()
+            await pilot.pause()
+            table = app.query_one(OpportunitiesTable)
+            row = table.get_row_at(0)
+            # NO-A (index 1) should be right-aligned
+            no_a = row[1]
+            assert isinstance(no_a, RichText)
+            assert no_a.justify == "right"
+            assert "38¢" in str(no_a)
+
+    async def test_edge_positive_is_green(self) -> None:
+        """Positive edge should be green Rich Text."""
+        scanner = _make_scanner_with_opportunity()
+        app = TalosApp(scanner=scanner)
+        async with app.run_test() as pilot:
+            app.refresh_opportunities()
+            await pilot.pause()
+            table = app.query_one(OpportunitiesTable)
+            row = table.get_row_at(0)
+            edge = row[3]  # Edge column
+            assert isinstance(edge, RichText)
+            # Scanner has positive edge (NO-A=38, NO-B=55, fee_edge≈6.2)
+            assert edge.style is not None
+
+    async def test_jumped_queue_is_yellow(self) -> None:
+        """Queue position with !! prefix should be styled yellow."""
+        from talos.models.order import Order
+        from talos.models.strategy import ArbPair
+        from talos.top_of_market import TopOfMarketTracker
+
+        scanner = _make_scanner_with_opportunity()
+        mgr = scanner._books
+        tracker = TopOfMarketTracker(mgr)
+
+        # Register a resting NO buy order on GAME-STAN at price 38
+        order = Order(
+            order_id="o1",
+            ticker="GAME-STAN",
+            side="no",
+            action="buy",
+            no_price=38,
+            remaining_count=5,
+            status="resting",
+        )
+        pair = ArbPair(event_ticker="EVT-STANMIA", ticker_a="GAME-STAN", ticker_b="GAME-MIA")
+        tracker.update_orders([order], [pair])
+
+        # Update book so best NO ask is 39 (> our 38) → we've been jumped
+        mgr.apply_snapshot(
+            "GAME-STAN",
+            OrderBookSnapshot(market_ticker="GAME-STAN", market_id="u1", yes=[], no=[[39, 50]]),
+        )
+        scanner.scan("GAME-STAN")  # re-scan so snapshot reflects new book
+        tracker.check("GAME-STAN")
+        assert tracker.is_at_top("GAME-STAN") is False
+
+        app = TalosApp(scanner=scanner)
+        async with app.run_test() as pilot:
+            table = app.query_one(OpportunitiesTable)
+            table.refresh_from_scanner(scanner, tracker)
+            await pilot.pause()
+            row = table.get_row_at(0)
+            q_a = row[6]  # Q-A column
+            assert isinstance(q_a, RichText)
+            assert "!!" in str(q_a)
+
+    async def test_imbalanced_fills_highlighted_yellow(self) -> None:
+        """When fills are imbalanced, the behind side should be yellow."""
+        from talos.ui.theme import YELLOW
+
+        scanner = _make_scanner_with_opportunity()
+        app = TalosApp(scanner=scanner)
+        async with app.run_test() as pilot:
+            table = app.query_one(OpportunitiesTable)
+            table.update_positions(
+                [
+                    EventPositionSummary(
+                        event_ticker="EVT-STANMIA",
+                        leg_a=LegSummary(
+                            ticker="GAME-STAN", no_price=31,
+                            filled_count=3, resting_count=7, total_fill_cost=93,
+                        ),
+                        leg_b=LegSummary(
+                            ticker="GAME-MIA", no_price=67,
+                            filled_count=5, resting_count=5, total_fill_cost=335,
+                        ),
+                        matched_pairs=3, locked_profit_cents=0,
+                        unmatched_a=0, unmatched_b=2, exposure_cents=0,
+                    )
+                ]
+            )
+            app.refresh_opportunities()
+            await pilot.pause()
+            row = table.get_row_at(0)
+            pos_a = row[4]  # Pos-A: 3 filled (behind — fewer fills)
+            pos_b = row[5]  # Pos-B: 5 filled (ahead)
+            # Behind side (A) should show yellow styling
+            assert isinstance(pos_a, RichText)
+            assert isinstance(pos_b, RichText)
+            # A has fewer fills, so it should be yellow-styled
+            assert YELLOW in str(pos_a.style)
+
+
+    def test_status_low_edge_is_dim(self) -> None:
+        from talos.ui.widgets import _fmt_status
+
+        result = _fmt_status("Low edge")
+        assert "\u25cb" in str(result)
+        assert "dim" in str(result.style)
+
+    def test_status_jumped_is_peach(self) -> None:
+        from talos.ui.theme import PEACH
+        from talos.ui.widgets import _fmt_status
+
+        result = _fmt_status("Jumped A")
+        assert "\u25f7" in str(result)
+        assert PEACH in str(result.style)
+
+    def test_status_filling_is_blue(self) -> None:
+        from talos.ui.theme import BLUE
+        from talos.ui.widgets import _fmt_status
+
+        result = _fmt_status("Filling (B -3)")
+        assert "\u25d0" in str(result)
+        assert BLUE in str(result.style)
+
+    def test_status_empty_is_dim_dash(self) -> None:
+        from talos.ui.widgets import _fmt_status
+
+        result = _fmt_status("")
+        assert str(result) == "\u2014"
 
 
 class TestOrderLog:

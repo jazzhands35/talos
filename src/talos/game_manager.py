@@ -54,6 +54,7 @@ class GameManager:
         self._feed = feed
         self._scanner = scanner
         self._games: dict[str, ArbPair] = {}
+        self._labels: dict[str, str] = {}
         self.on_change: Callable[[], None] | None = None
 
     async def add_game(self, url_or_ticker: str) -> ArbPair:
@@ -84,6 +85,17 @@ class GameManager:
         await self._feed.subscribe(ticker_a)
         await self._feed.subscribe(ticker_b)
         self._games[event.event_ticker] = pair
+
+        # Build short display label from sub_title
+        label = event.sub_title or event.title
+        # sub_title is like "WAKE at VT (Mar 10)" — strip date suffix
+        if "(" in label:
+            label = label[: label.rfind("(")].strip()
+        # Compact separators
+        for sep in (" vs ", " at ", " vs. "):
+            label = label.replace(sep, "-")
+        self._labels[event.event_ticker] = label
+
         if self.on_change:
             self.on_change()
 
@@ -105,6 +117,7 @@ class GameManager:
         pair = self._games.pop(event_ticker, None)
         if pair is None:
             return
+        self._labels.pop(event_ticker, None)
         self._scanner.remove_pair(event_ticker)
         await self._feed.unsubscribe(pair.ticker_a)
         await self._feed.unsubscribe(pair.ticker_b)
@@ -117,6 +130,7 @@ class GameManager:
         tickers = list(self._games.keys())
         for ticker in tickers:
             pair = self._games.pop(ticker)
+            self._labels.pop(ticker, None)
             self._scanner.remove_pair(ticker)
             await self._feed.unsubscribe(pair.ticker_a)
             await self._feed.unsubscribe(pair.ticker_b)
@@ -128,3 +142,8 @@ class GameManager:
     def active_games(self) -> list[ArbPair]:
         """Currently monitored games."""
         return list(self._games.values())
+
+    @property
+    def labels(self) -> dict[str, str]:
+        """Event ticker -> short display label."""
+        return dict(self._labels)

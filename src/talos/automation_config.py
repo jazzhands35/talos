@@ -7,7 +7,7 @@ from dataclasses import dataclass
 class AutomationConfig:
     """Settings for the proposal system. Off by default."""
 
-    edge_threshold_cents: float = 1.5
+    edge_threshold_cents: float = 1.0
     stability_seconds: float = 5.0
     staleness_grace_seconds: float = 5.0
     rejection_cooldown_seconds: float = 30.0

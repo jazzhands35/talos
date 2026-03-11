@@ -91,9 +91,7 @@ class CPMTracker:
         """Remove events older than max_age seconds."""
         cutoff = time.time() - max_age
         for ticker in list(self._events):
-            self._events[ticker] = [
-                (ts, qty) for ts, qty in self._events[ticker] if ts >= cutoff
-            ]
+            self._events[ticker] = [(ts, qty) for ts, qty in self._events[ticker] if ts >= cutoff]
             if not self._events[ticker]:
                 del self._events[ticker]
         if len(self._seen) > self._MAX_SEEN:

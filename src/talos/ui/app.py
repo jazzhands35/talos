@@ -36,6 +36,9 @@ class TalosApp(App):
         ("a", "add_games", "Add Games"),
         ("d", "remove_game", "Remove Game"),
         ("x", "clear_games", "Clear All"),
+        ("s", "toggle_suggestions", "Suggestions"),
+        ("y", "approve_proposal", "Approve"),
+        ("n", "reject_proposal", "Reject"),
         ("q", "quit", "Quit"),
     ]
 
@@ -116,9 +119,7 @@ class TalosApp(App):
         self.query_one(AccountPanel).update_balance(
             self._engine.balance, self._engine.portfolio_value
         )
-        self.query_one(OpportunitiesTable).update_positions(
-            self._engine.position_summaries
-        )
+        self.query_one(OpportunitiesTable).update_positions(self._engine.position_summaries)
         self.query_one(OrderLog).update_orders(self._engine.order_data)
 
     @work(thread=False)
@@ -126,9 +127,7 @@ class TalosApp(App):
         if self._engine is None:
             return
         await self._engine.refresh_queue_positions()
-        self.query_one(OpportunitiesTable).update_positions(
-            self._engine.position_summaries
-        )
+        self.query_one(OpportunitiesTable).update_positions(self._engine.position_summaries)
 
     @work(thread=False)
     async def _poll_trades(self) -> None:
@@ -137,10 +136,11 @@ class TalosApp(App):
 
     def refresh_opportunities(self) -> None:
         """Update the opportunities table from scanner state."""
+        table = self.query_one(OpportunitiesTable)
+        if self._engine is not None:
+            table.update_labels(self._engine.game_manager.labels)
         tracker = self._engine.tracker if self._engine else None
-        self.query_one(OpportunitiesTable).refresh_from_scanner(
-            self._scanner, tracker
-        )
+        table.refresh_from_scanner(self._scanner, tracker)
 
     # ── Actions ───────────────────────────────────────────────────
 
@@ -189,6 +189,27 @@ class TalosApp(App):
         if self._engine is not None:
             await self._engine.remove_game(event_ticker)
 
+    def action_approve_proposal(self) -> None:
+        self.query_one(ProposalPanel).approve_selected()
+
+    def action_reject_proposal(self) -> None:
+        self.query_one(ProposalPanel).reject_selected()
+
+    def action_toggle_suggestions(self) -> None:
+        if self._engine is None:
+            return
+        cfg = self._engine.automation_config
+        cfg.enabled = not cfg.enabled
+        if cfg.enabled:
+            self.notify(
+                f"Suggestions ON (min edge: {cfg.edge_threshold_cents:.1f}c, "
+                f"stability: {cfg.stability_seconds:.0f}s)",
+                severity="information",
+                markup=False,
+            )
+        else:
+            self.notify("Suggestions OFF", severity="information", markup=False)
+
     def action_clear_games(self) -> None:
         if self._engine is not None:
             self._clear_all_games()
@@ -197,4 +218,3 @@ class TalosApp(App):
     async def _clear_all_games(self) -> None:
         if self._engine is not None:
             await self._engine.clear_games()
-
