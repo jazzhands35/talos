@@ -108,10 +108,10 @@ class TestDerivedQueries:
 
 class TestSafetyGate:
     def test_rejects_exceeding_unit(self):
+        """8 filled + 0 resting + 5 new = 13 > 10 → blocked by unit gate."""
         ledger = PositionLedger(event_ticker="EVT-1", unit_size=10)
-        ledger.record_fill(Side.A, count=6, price=50)
-        ledger.record_resting(Side.A, order_id="ord-1", count=4, price=48)
-        ok, reason = ledger.is_placement_safe(Side.A, count=1, price=47)
+        ledger.record_fill(Side.A, count=8, price=50)
+        ok, reason = ledger.is_placement_safe(Side.A, count=5, price=47)
         assert not ok
         assert "exceed unit" in reason
 
@@ -170,6 +170,34 @@ class TestSafetyGate:
         assert not ok
         assert "discrepancy" in reason
 
+    def test_allows_reentry_after_unit_complete(self):
+        """10 filled (unit complete) + 0 resting + 10 new → allowed via modular arithmetic."""
+        ledger = PositionLedger(event_ticker="EVT-1", unit_size=10)
+        ledger.record_fill(Side.A, count=10, price=45)
+        ledger.record_fill(Side.B, count=10, price=48)
+        # Side A: filled_in_unit = 10 % 10 = 0, so 0 + 0 + 10 = 10 <= 10
+        ok, reason = ledger.is_placement_safe(Side.A, count=10, price=46)
+        assert ok
+        assert reason == ""
+
+    def test_blocks_double_resting_after_unit_complete(self):
+        """10 filled + 10 resting + 10 new → blocked (already resting)."""
+        ledger = PositionLedger(event_ticker="EVT-1", unit_size=10)
+        ledger.record_fill(Side.A, count=10, price=45)
+        ledger.record_fill(Side.B, count=10, price=48)
+        ledger.record_resting(Side.A, order_id="ord-2", count=10, price=46)
+        ok, reason = ledger.is_placement_safe(Side.A, count=10, price=47)
+        assert not ok
+        assert "already resting" in reason
+
+    def test_blocks_reentry_with_incomplete_unit(self):
+        """5 filled + 0 resting + 10 new → blocked (5 + 10 = 15 > 10)."""
+        ledger = PositionLedger(event_ticker="EVT-1", unit_size=10)
+        ledger.record_fill(Side.A, count=5, price=45)
+        ok, reason = ledger.is_placement_safe(Side.A, count=10, price=46)
+        assert not ok
+        assert "exceed unit" in reason
+
 
 def _make_order(
     ticker: str,
@@ -203,39 +231,97 @@ class TestReconciliation:
         ledger.sync_from_orders(orders, ticker_a="TK-A", ticker_b="TK-B")
         assert not ledger.has_discrepancy
 
-    def test_sync_fill_count_mismatch_flags(self):
+    def test_sync_fill_increase_accepted(self):
+        """Fill count going up between polls is normal — should sync, not flag."""
         ledger = PositionLedger(event_ticker="EVT-1", unit_size=10)
         ledger.record_fill(Side.A, count=5, price=50)
-        # Kalshi says 8 filled — mismatch
+        ledger.record_resting(Side.A, order_id="ord-a", count=5, price=50)
+        # Kalshi says 8 filled (3 more fills happened between polls)
         orders = [
             _make_order("TK-A", fill_count=8, remaining_count=2, order_id="ord-a"),
         ]
         ledger.sync_from_orders(orders, ticker_a="TK-A", ticker_b="TK-B")
-        assert ledger.has_discrepancy
-        assert ledger.discrepancy is not None
-        assert "filled" in ledger.discrepancy
+        assert not ledger.has_discrepancy
+        assert ledger.filled_count(Side.A) == 8
 
-    def test_sync_multiple_resting_orders_flags(self):
+    def test_sync_fill_decrease_preserves_existing(self):
+        """Orders API may archive old orders — fills must never decrease."""
+        ledger = PositionLedger(event_ticker="EVT-1", unit_size=10)
+        ledger.record_fill(Side.A, count=8, price=50)
+        # Kalshi orders only reports 5 (3 were archived) — keep ledger's 8
+        orders = [
+            _make_order("TK-A", fill_count=5, remaining_count=5, order_id="ord-a"),
+        ]
+        ledger.sync_from_orders(orders, ticker_a="TK-A", ticker_b="TK-B")
+        assert not ledger.has_discrepancy
+        assert ledger.filled_count(Side.A) == 8  # preserved, not decreased
+        assert ledger.filled_total_cost(Side.A) == 400  # 8 * 50, not overwritten
+
+    def test_sync_multiple_resting_orders_sums_counts(self):
+        """Multiple resting orders on same side are summed, not flagged."""
         ledger = PositionLedger(event_ticker="EVT-1", unit_size=10)
         orders = [
             _make_order("TK-A", fill_count=0, remaining_count=10, order_id="ord-1"),
             _make_order("TK-A", fill_count=0, remaining_count=10, order_id="ord-2"),
         ]
         ledger.sync_from_orders(orders, ticker_a="TK-A", ticker_b="TK-B")
-        assert ledger.has_discrepancy
-        assert ledger.discrepancy is not None
-        assert "2 resting orders" in ledger.discrepancy
+        assert not ledger.has_discrepancy
+        assert ledger.resting_count(Side.A) == 20  # summed
+        assert ledger.resting_order_id(Side.A) == "ord-1"  # first order
 
     def test_discrepancy_blocks_placement(self):
+        """A manually set discrepancy still blocks placement."""
         ledger = PositionLedger(event_ticker="EVT-1", unit_size=10)
-        orders = [
-            _make_order("TK-A", fill_count=0, remaining_count=10, order_id="ord-1"),
-            _make_order("TK-A", fill_count=0, remaining_count=10, order_id="ord-2"),
-        ]
-        ledger.sync_from_orders(orders, ticker_a="TK-A", ticker_b="TK-B")
+        ledger._discrepancy = "manual test discrepancy"
         ok, reason = ledger.is_placement_safe(Side.B, count=10, price=48)
         assert not ok
         assert "discrepancy" in reason
+
+    def test_sync_resting_then_fill_updates_correctly(self):
+        """Resting order gets a fill between polls — the normal case."""
+        ledger = PositionLedger(event_ticker="EVT-1", unit_size=10)
+        # First sync: 10 resting, 0 filled on side A
+        orders = [
+            _make_order("TK-A", fill_count=0, remaining_count=10, order_id="ord-a"),
+        ]
+        ledger.sync_from_orders(orders, ticker_a="TK-A", ticker_b="TK-B")
+        assert ledger.filled_count(Side.A) == 0
+        assert ledger.resting_count(Side.A) == 10
+
+        # Second sync: 1 fill happened, 9 remaining
+        orders = [
+            _make_order("TK-A", fill_count=1, remaining_count=9, order_id="ord-a"),
+        ]
+        ledger.sync_from_orders(orders, ticker_a="TK-A", ticker_b="TK-B")
+        assert not ledger.has_discrepancy
+        assert ledger.filled_count(Side.A) == 1
+        assert ledger.resting_count(Side.A) == 9
+
+    def test_sync_resting_fully_fills_between_polls(self):
+        """Resting order fills completely between polls — no discrepancy."""
+        ledger = PositionLedger(event_ticker="EVT-1", unit_size=10)
+        # First sync: 10 resting on side A
+        orders = [
+            _make_order("TK-A", fill_count=0, remaining_count=10, order_id="ord-a"),
+        ]
+        ledger.sync_from_orders(orders, ticker_a="TK-A", ticker_b="TK-B")
+        assert ledger.resting_order_id(Side.A) == "ord-a"
+
+        # Second sync: order fully filled — 10 fills, 0 remaining, status "filled"
+        orders = [
+            _make_order(
+                "TK-A",
+                fill_count=10,
+                remaining_count=0,
+                order_id="ord-a",
+                status="filled",
+            ),
+        ]
+        ledger.sync_from_orders(orders, ticker_a="TK-A", ticker_b="TK-B")
+        assert not ledger.has_discrepancy
+        assert ledger.filled_count(Side.A) == 10
+        assert ledger.resting_count(Side.A) == 0
+        assert ledger.resting_order_id(Side.A) is None
 
     def test_sync_clears_discrepancy_when_state_matches(self):
         ledger = PositionLedger(event_ticker="EVT-1", unit_size=10)
@@ -243,6 +329,76 @@ class TestReconciliation:
         orders = []  # no orders = no fills, no resting = matches empty ledger
         ledger.sync_from_orders(orders, ticker_a="TK-A", ticker_b="TK-B")
         assert not ledger.has_discrepancy
+
+
+class TestSyncFromPositions:
+    """Tests for positions-API-based fill augmentation (P7/P15)."""
+
+    def test_augments_fills_when_orders_missed_archived(self):
+        """When orders-based sync shows 0 fills but positions shows 30, patch it."""
+        ledger = PositionLedger(event_ticker="EVT-1", unit_size=10)
+        # sync_from_orders found nothing (orders archived)
+        ledger.sync_from_orders([], ticker_a="TK-A", ticker_b="TK-B")
+        assert ledger.filled_count(Side.A) == 0
+
+        # positions API says we hold 30 NO on A, 10 NO on B
+        ledger.sync_from_positions(
+            position_fills={Side.A: 30, Side.B: 10},
+            position_costs={Side.A: 1380, Side.B: 520},
+        )
+        assert ledger.filled_count(Side.A) == 30
+        assert ledger.filled_count(Side.B) == 10
+        assert ledger.filled_total_cost(Side.A) == 1380
+
+    def test_no_op_when_orders_already_correct(self):
+        """When orders-based sync already has the right count, positions is a no-op."""
+        ledger = PositionLedger(event_ticker="EVT-1", unit_size=10)
+        ledger.record_fill(Side.A, count=30, price=46)
+        ledger.record_fill(Side.B, count=10, price=52)
+
+        ledger.sync_from_positions(
+            position_fills={Side.A: 30, Side.B: 10},
+            position_costs={Side.A: 1380, Side.B: 520},
+        )
+        # Unchanged — orders already had the data
+        assert ledger.filled_count(Side.A) == 30
+        assert ledger.filled_total_cost(Side.A) == 1380  # 30 * 46
+
+    def test_partial_augmentation(self):
+        """Orders captured some fills, positions patches the rest."""
+        ledger = PositionLedger(event_ticker="EVT-1", unit_size=10)
+        ledger.record_fill(Side.A, count=10, price=46)  # partial from orders
+        # Positions says 30 total
+        ledger.sync_from_positions(
+            position_fills={Side.A: 30, Side.B: 0},
+            position_costs={Side.A: 1380, Side.B: 0},
+        )
+        assert ledger.filled_count(Side.A) == 30
+        # Cost kept from orders (non-zero), not overwritten
+        assert ledger.filled_total_cost(Side.A) == 460  # 10 * 46
+
+    def test_cost_patched_even_when_fills_equal(self):
+        """Positions API provides cost when orders had none."""
+        ledger = PositionLedger(event_ticker="EVT-1", unit_size=10)
+        # Fills set by positions (no cost data from orders)
+        ledger._sides[Side.A].filled_count = 30
+        ledger._sides[Side.A].filled_total_cost = 0  # no cost yet
+        ledger.sync_from_positions(
+            position_fills={Side.A: 30, Side.B: 0},
+            position_costs={Side.A: 1380, Side.B: 0},
+        )
+        assert ledger.filled_count(Side.A) == 30
+        assert ledger.filled_total_cost(Side.A) == 1380  # patched
+
+    def test_zero_positions_no_change(self):
+        """When positions API shows 0, nothing changes."""
+        ledger = PositionLedger(event_ticker="EVT-1", unit_size=10)
+        ledger.sync_from_positions(
+            position_fills={Side.A: 0, Side.B: 0},
+            position_costs={Side.A: 0, Side.B: 0},
+        )
+        assert ledger.filled_count(Side.A) == 0
+        assert ledger.filled_count(Side.B) == 0
 
 
 def _pair(event: str = "EVT-1", a: str = "TK-A", b: str = "TK-B") -> ArbPair:
@@ -319,10 +475,19 @@ class TestComputeDisplayPositions:
         # Use a recent timestamp so it falls within the 5-minute CPM window
         recent_ts = datetime.now(UTC).isoformat()
         cpm = CPMTracker()
-        cpm.ingest("TK-A", [
-            Trade(trade_id="t1", ticker="TK-A", count=100, price=45,
-                  side="no", created_time=recent_ts),
-        ])
+        cpm.ingest(
+            "TK-A",
+            [
+                Trade(
+                    trade_id="t1",
+                    ticker="TK-A",
+                    count=100,
+                    price=45,
+                    side="no",
+                    created_time=recent_ts,
+                ),
+            ],
+        )
 
         result = compute_display_positions(ledgers, [_pair()], {}, cpm)
         assert result[0].leg_a.cpm is not None

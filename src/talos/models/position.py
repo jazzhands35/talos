@@ -13,6 +13,7 @@ class LegSummary(BaseModel):
     filled_count: int
     resting_count: int
     total_fill_cost: int = 0
+    total_fees: int = 0
     queue_position: int | None = None
     cpm: float | None = None
     cpm_partial: bool = False
@@ -30,3 +31,4 @@ class EventPositionSummary(BaseModel):
     unmatched_a: int
     unmatched_b: int
     exposure_cents: int
+    status: str = ""

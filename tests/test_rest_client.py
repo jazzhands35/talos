@@ -292,7 +292,6 @@ class TestOrderEndpoints:
         orders = await client.get_orders()
         assert len(orders) == 1
 
-
     async def test_amend_order(self, client: KalshiRESTClient) -> None:
         mock_data = {
             "old_order": {

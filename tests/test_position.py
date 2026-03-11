@@ -10,7 +10,6 @@ from __future__ import annotations
 import pytest
 
 from talos.cpm import CPMTracker
-from talos.fees import MAKER_FEE_RATE
 from talos.models.strategy import ArbPair
 from talos.position_ledger import PositionLedger, Side, compute_display_positions
 
@@ -38,9 +37,7 @@ def _ledger(
 
 
 def _compute(ledger: PositionLedger, queue_cache: dict[str, int] | None = None):
-    return compute_display_positions(
-        {"EVT-AB": ledger}, [PAIR], queue_cache or {}, CPMTracker()
-    )
+    return compute_display_positions({"EVT-AB": ledger}, [PAIR], queue_cache or {}, CPMTracker())
 
 
 class TestNoPositions:
@@ -62,10 +59,8 @@ class TestBothLegsMatched:
         s = result[0]
         assert s.matched_pairs == 5
         # Raw: 100 - 31 - 67 = 2c/pair -> 10c total
-        # Fee (worst case, B wins): (500 - 155) * 0.0175 = 6.0375
-        raw = 5 * (100 - 31 - 67)
-        worst_fee = (5 * 100 - 5 * 31) * MAKER_FEE_RATE
-        assert s.locked_profit_cents == pytest.approx(raw - worst_fee)
+        # Fees are 0 here (record_fill doesn't track fees; sync_from_orders does)
+        assert s.locked_profit_cents == pytest.approx(10)
         assert s.unmatched_a == 0
         assert s.unmatched_b == 0
         assert s.exposure_cents == 0
@@ -77,9 +72,8 @@ class TestOneLegAhead:
         result = _compute(ledger)
         s = result[0]
         assert s.matched_pairs == 3
-        raw = 3 * (100 - 31 - 67)
-        worst_fee = (3 * 100 - 3 * 31) * MAKER_FEE_RATE
-        assert s.locked_profit_cents == pytest.approx(raw - worst_fee)
+        # 3 matched pairs at 31+67=98, raw profit = 3 * 2 = 6
+        assert s.locked_profit_cents == pytest.approx(6)
         assert s.unmatched_a == 2
         assert s.unmatched_b == 0
         assert s.exposure_cents == 2 * 31
@@ -106,9 +100,8 @@ class TestMultipleFillsAccumulate:
         # Weighted average: (31*3 + 33*2) / 5 = 159/5 = 31
         assert s.leg_a.no_price == 31
         assert s.matched_pairs == 5
-        raw = 500 - 159 - 335
-        worst_fee = (500 - 159) * MAKER_FEE_RATE
-        assert s.locked_profit_cents == pytest.approx(raw - worst_fee)
+        # Raw profit: 500 - 159 - 335 = 6 (no fees via record_fill)
+        assert s.locked_profit_cents == pytest.approx(6)
 
 
 class TestMixedPricePnL:
@@ -122,15 +115,18 @@ class TestMixedPricePnL:
         s = result[0]
         assert s.matched_pairs == 10
         # Costs: A = 170+175=345, B = 320+335=655, total=1000
-        assert s.locked_profit_cents < 0  # fees make break-even into a loss
+        # Revenue = 1000, raw profit = 0 (no fees via record_fill)
+        assert s.locked_profit_cents == pytest.approx(0)
         assert s.exposure_cents == 0
 
 
 class TestLegSummaryFields:
     def test_leg_summary_populated(self) -> None:
         ledger = _ledger(
-            fill_a=(3, 31), fill_b=(3, 67),
-            resting_a=("ord-a", 2, 31), resting_b=("ord-b", 2, 67),
+            fill_a=(3, 31),
+            fill_b=(3, 67),
+            resting_a=("ord-a", 2, 31),
+            resting_b=("ord-b", 2, 67),
         )
         result = _compute(ledger)
         s = result[0]

@@ -38,6 +38,7 @@ class _SideState:
     __slots__ = (
         "filled_count",
         "filled_total_cost",
+        "filled_fees",
         "resting_order_id",
         "resting_count",
         "resting_price",
@@ -46,6 +47,7 @@ class _SideState:
     def __init__(self) -> None:
         self.filled_count: int = 0
         self.filled_total_cost: int = 0
+        self.filled_fees: int = 0
         self.resting_order_id: str | None = None
         self.resting_count: int = 0
         self.resting_price: int = 0
@@ -53,6 +55,7 @@ class _SideState:
     def reset(self) -> None:
         self.filled_count = 0
         self.filled_total_cost = 0
+        self.filled_fees = 0
         self.resting_order_id = None
         self.resting_count = 0
         self.resting_price = 0
@@ -91,6 +94,9 @@ class PositionLedger:
 
     def resting_price(self, side: Side) -> int:
         return self._sides[side].resting_price
+
+    def filled_fees(self, side: Side) -> int:
+        return self._sides[side].filled_fees
 
     # ── Derived queries ─────────────────────────────────────────────
 
@@ -141,17 +147,19 @@ class PositionLedger:
 
         s = self._sides[side]
 
-        # P16: resting + filled + new must not exceed unit
-        if s.filled_count + s.resting_count + count > self.unit_size:
-            return (
-                False,
-                f"would exceed unit: filled={s.filled_count} + "
-                f"resting={s.resting_count} + new={count} > {self.unit_size}",
-            )
-
-        # P16: only one resting order per side
+        # P16: only one resting order per side (check first — more specific error)
         if s.resting_order_id is not None:
             return False, f"order already resting on side {side.value}: {s.resting_order_id}"
+
+        # P16: resting + filled-in-unit + new must not exceed unit.
+        # Modular arithmetic allows re-entry after a complete unit (10/10 → next pair).
+        filled_in_unit = s.filled_count % self.unit_size
+        if filled_in_unit + s.resting_count + count > self.unit_size:
+            return (
+                False,
+                f"would exceed unit: filled_in_unit={filled_in_unit} + "
+                f"resting={s.resting_count} + new={count} > {self.unit_size}",
+            )
 
         # P18: fee-adjusted profitability
         other = self._sides[side.other]
@@ -215,21 +223,20 @@ class PositionLedger:
     def sync_from_orders(self, orders: list, ticker_a: str, ticker_b: str) -> None:
         """Reconcile ledger against polled order state from Kalshi.
 
-        This is the safety net (Principle 15). Called every polling cycle.
-        On mismatch: sets discrepancy flag, halting all proposals.
-        Does NOT silently correct — flags and waits for operator.
+        Fill counts: monotonically increasing — the orders API archives old
+        filled/cancelled orders, so it may report fewer fills than the
+        positions API has already set. We never decrease fills (P7/P15).
 
-        Args:
-            orders: list of Order objects from REST polling
-            ticker_a: the ticker for side A of this event's pair
-            ticker_b: the ticker for side B of this event's pair
+        Resting orders: authoritative — summed across all active orders per
+        side to support multiple resting orders on the same side.
+
+        Called every polling cycle. See also sync_from_positions() which
+        patches fill gaps from the positions API.
         """
-        from talos.models.order import ACTIVE_STATUSES
-
         ticker_to_side = {ticker_a: Side.A, ticker_b: Side.B}
-        # Accumulate what Kalshi reports
         kalshi_filled: dict[Side, int] = {Side.A: 0, Side.B: 0}
         kalshi_fill_cost: dict[Side, int] = {Side.A: 0, Side.B: 0}
+        kalshi_fees: dict[Side, int] = {Side.A: 0, Side.B: 0}
         kalshi_resting: dict[Side, list[tuple[str, int, int]]] = {
             Side.A: [],
             Side.B: [],
@@ -238,74 +245,93 @@ class PositionLedger:
         for order in orders:
             if order.side != "no" or order.action != "buy":
                 continue
-            if order.status not in ACTIVE_STATUSES:
-                continue
             side = ticker_to_side.get(order.ticker)
             if side is None:
                 continue
-            kalshi_filled[side] += order.fill_count
-            kalshi_fill_cost[side] += order.no_price * order.fill_count
-            if order.remaining_count > 0:
+            # Count fills from ALL orders including cancelled — fills are real
+            # regardless of whether the order was later cancelled or amended
+            if order.fill_count > 0:
+                kalshi_filled[side] += order.fill_count
+                kalshi_fill_cost[side] += order.no_price * order.fill_count
+                kalshi_fees[side] += order.maker_fees
+            # Only track resting from active orders
+            if order.remaining_count > 0 and order.status in ("resting", "executed"):
                 kalshi_resting[side].append((order.order_id, order.remaining_count, order.no_price))
 
-        # Check for discrepancies
-        problems: list[str] = []
         for side in (Side.A, Side.B):
             s = self._sides[side]
 
-            # Check filled count
-            if kalshi_filled[side] != s.filled_count:
-                problems.append(
-                    f"side {side.value} filled: ledger={s.filled_count}, "
-                    f"kalshi={kalshi_filled[side]}"
-                )
-
-            # Check resting orders — should be 0 or 1
-            resting_list = kalshi_resting[side]
-            if len(resting_list) > 1:
-                problems.append(
-                    f"side {side.value} has {len(resting_list)} resting orders (expected 0 or 1)"
-                )
-            elif len(resting_list) == 1:
-                oid, cnt, price = resting_list[0]
-                if s.resting_order_id is not None and s.resting_order_id != oid:
-                    problems.append(
-                        f"side {side.value} resting order_id: "
-                        f"ledger={s.resting_order_id}, kalshi={oid}"
-                    )
-            elif len(resting_list) == 0 and s.resting_order_id is not None:
-                problems.append(
-                    f"side {side.value}: ledger has resting order "
-                    f"{s.resting_order_id}, kalshi shows none"
-                )
-
-        if problems:
-            msg = "; ".join(problems)
-            self._discrepancy = msg
-            logger.warning(
-                "position_ledger_discrepancy",
-                event_ticker=self.event_ticker,
-                problems=problems,
-            )
-        else:
-            # Clear any previous discrepancy — state is consistent
-            self._discrepancy = None
-
-            # Sync resting state from Kalshi (authoritative) when consistent
-            for side in (Side.A, Side.B):
-                s = self._sides[side]
-                resting_list = kalshi_resting[side]
+            # Fills: only increase. Orders API archives old orders, so
+            # kalshi_filled may be lower than positions-augmented fills.
+            # When orders reports >= current, use its data (more detailed
+            # cost/fee breakdown). When less, keep existing.
+            if kalshi_filled[side] >= s.filled_count and kalshi_filled[side] > 0:
                 s.filled_count = kalshi_filled[side]
                 s.filled_total_cost = kalshi_fill_cost[side]
-                if resting_list:
-                    oid, cnt, price = resting_list[0]
-                    s.resting_order_id = oid
-                    s.resting_count = cnt
-                    s.resting_price = price
-                else:
-                    s.resting_order_id = None
-                    s.resting_count = 0
-                    s.resting_price = 0
+                s.filled_fees = kalshi_fees[side]
+
+            # Resting: trust orders API. Sum across multiple orders.
+            resting_list = kalshi_resting[side]
+            if resting_list:
+                total_resting = sum(cnt for _, cnt, _ in resting_list)
+                s.resting_order_id = resting_list[0][0]
+                s.resting_count = total_resting
+                s.resting_price = resting_list[0][2]
+                if len(resting_list) > 1:
+                    logger.info(
+                        "multiple_resting_orders_summed",
+                        event_ticker=self.event_ticker,
+                        side=side.value,
+                        order_count=len(resting_list),
+                        total_resting=total_resting,
+                    )
+            else:
+                if s.resting_order_id is not None:
+                    logger.info(
+                        "resting_order_cleared",
+                        event_ticker=self.event_ticker,
+                        side=side.value,
+                        order_id=s.resting_order_id,
+                    )
+                s.resting_order_id = None
+                s.resting_count = 0
+                s.resting_price = 0
+
+        # Two-source sync (orders + positions) keeps the ledger accurate.
+        # Clear any stale discrepancy from previous cycles.
+        self._discrepancy = None
+
+    def sync_from_positions(
+        self,
+        position_fills: dict[Side, int],
+        position_costs: dict[Side, int],
+    ) -> None:
+        """Augment ledger with authoritative fill counts from positions API.
+
+        GET /portfolio/positions always reflects the true state — it never
+        archives, unlike GET /portfolio/orders. When orders-based fill counts
+        are lower than what positions reports, the ledger is missing fills
+        from archived orders. This method patches the gap (P7/P15).
+
+        Called AFTER sync_from_orders so it can detect and fix shortfalls.
+        """
+        for side in (Side.A, Side.B):
+            s = self._sides[side]
+            auth_fills = position_fills[side]
+
+            if auth_fills > s.filled_count:
+                logger.warning(
+                    "fills_augmented_from_positions_api",
+                    event_ticker=self.event_ticker,
+                    side=side.value,
+                    ledger_fills=s.filled_count,
+                    positions_fills=auth_fills,
+                )
+                s.filled_count = auth_fills
+
+            # Use positions-reported cost if orders didn't provide any
+            if s.filled_total_cost == 0 and position_costs[side] > 0:
+                s.filled_total_cost = position_costs[side]
 
     def format_position(self, side: Side) -> str:
         """Human-readable position string for proposals."""
@@ -350,19 +376,22 @@ def compute_display_positions(
 
         cost_a = ledger.filled_total_cost(Side.A)
         cost_b = ledger.filled_total_cost(Side.B)
+        fees_a = ledger.filled_fees(Side.A)
+        fees_b = ledger.filled_fees(Side.B)
 
         if matched > 0:
             cost_a_matched = cost_a * matched // filled_a if filled_a > 0 else 0
             cost_b_matched = cost_b * matched // filled_b if filled_b > 0 else 0
+            fees_a_matched = fees_a * matched // filled_a if filled_a > 0 else 0
+            fees_b_matched = fees_b * matched // filled_b if filled_b > 0 else 0
             locked_profit = fee_adjusted_profit_matched(
-                matched, cost_a_matched, cost_b_matched
+                matched, cost_a_matched, cost_b_matched, fees_a_matched, fees_b_matched
             )
         else:
             locked_profit = 0.0
 
-        exposure = (
-            (cost_a * unmatched_a // filled_a if filled_a > 0 else 0)
-            + (cost_b * unmatched_b // filled_b if filled_b > 0 else 0)
+        exposure = (cost_a * unmatched_a // filled_a if filled_a > 0 else 0) + (
+            cost_b * unmatched_b // filled_b if filled_b > 0 else 0
         )
 
         avg_a = cost_a // filled_a if filled_a > 0 else ledger.resting_price(Side.A)
@@ -378,17 +407,13 @@ def compute_display_positions(
         cpm_a = cpm_tracker.cpm(pair.ticker_a)
         cpm_a_partial = cpm_tracker.is_partial(pair.ticker_a)
         eta_a = (
-            cpm_tracker.eta_minutes(pair.ticker_a, qp_a)
-            if qp_a is not None and qp_a > 0
-            else None
+            cpm_tracker.eta_minutes(pair.ticker_a, qp_a) if qp_a is not None and qp_a > 0 else None
         )
 
         cpm_b = cpm_tracker.cpm(pair.ticker_b)
         cpm_b_partial = cpm_tracker.is_partial(pair.ticker_b)
         eta_b = (
-            cpm_tracker.eta_minutes(pair.ticker_b, qp_b)
-            if qp_b is not None and qp_b > 0
-            else None
+            cpm_tracker.eta_minutes(pair.ticker_b, qp_b) if qp_b is not None and qp_b > 0 else None
         )
 
         summaries.append(
@@ -400,6 +425,7 @@ def compute_display_positions(
                     filled_count=filled_a,
                     resting_count=resting_a,
                     total_fill_cost=cost_a,
+                    total_fees=fees_a,
                     queue_position=qp_a,
                     cpm=cpm_a,
                     cpm_partial=cpm_a_partial,
@@ -411,6 +437,7 @@ def compute_display_positions(
                     filled_count=filled_b,
                     resting_count=resting_b,
                     total_fill_cost=cost_b,
+                    total_fees=fees_b,
                     queue_position=qp_b,
                     cpm=cpm_b,
                     cpm_partial=cpm_b_partial,

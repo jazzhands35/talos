@@ -13,7 +13,7 @@ from talos.config import KalshiConfig
 from talos.errors import KalshiAPIError, KalshiRateLimitError
 from talos.models.market import Event, Market, OrderBook, Series, Trade
 from talos.models.order import BatchOrderResult, Fill, Order
-from talos.models.portfolio import Balance, ExchangeStatus, Position
+from talos.models.portfolio import Balance, EventPosition, ExchangeStatus, Position
 
 logger = structlog.get_logger()
 
@@ -298,6 +298,11 @@ class KalshiRESTClient:
             params["cursor"] = cursor
         data = await self._request("GET", "/portfolio/positions", params=params)
         return [Position.model_validate(p) for p in data["market_positions"]]
+
+    async def get_event_positions(self) -> list[EventPosition]:
+        """Fetch event-level positions (events with fills or resting orders)."""
+        data = await self._request("GET", "/portfolio/positions")
+        return [EventPosition.model_validate(ep) for ep in data.get("event_positions", [])]
 
     async def get_fills(
         self,
