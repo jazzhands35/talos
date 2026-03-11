@@ -1,15 +1,19 @@
 # Brain
 
-## Codebase
-- [[codebase/index]]
+## Plans
+- [[plans/01-trading-engine-extraction/overview]]
+- [[plans/01-trading-engine-extraction/phase-1-encapsulation-fix]]
+- [[plans/01-trading-engine-extraction/phase-2-ledger-display-formatter]]
+- [[plans/01-trading-engine-extraction/phase-3-position-unification]]
+- [[plans/01-trading-engine-extraction/phase-4-engine-scaffold]]
+- [[plans/01-trading-engine-extraction/phase-5-engine-polling]]
+- [[plans/01-trading-engine-extraction/phase-6-engine-actions]]
+- [[plans/01-trading-engine-extraction/phase-7-slim-app]]
+- [[plans/01-trading-engine-extraction/phase-8-wiring-and-cleanup]]
 
-## Knowledge
-- [[principles]]
+## Other
 - [[architecture]]
 - [[decisions]]
 - [[patterns]]
+- [[principles]]
 
-## Reference Docs
-- `docs/KALSHI_POSITION_AND_PNL.md` — position tracking, P&L, fee model spec
-- `docs/KALSHI_QUEUE_POSITION.md` — queue position API behavior
-- `docs/KALSHI_CPM_AND_ETA.md` — contracts-per-minute and ETA spec

@@ -66,6 +66,8 @@ Run both **test-runner** and **lint-check** in parallel before commits. Use **di
 
 Demo environment by default — production requires explicit opt-in. See `brain/principles.md` for all trading rules.
 
+**Cardinal rule: Kalshi is the single source of truth for positions and resting orders — always, unconditionally, without exception.** Talos must have a 100% accurate picture of what it holds at all times. Every suggestion, safety gate, and action depends on this accuracy. Before any money-touching action, re-fetch from Kalshi. If fresh data is unavailable, do not act. See Principles 7 and 15.
+
 ## Current Status
 
 See `brain/architecture.md` for layer completion status.

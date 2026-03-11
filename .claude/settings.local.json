@@ -12,7 +12,15 @@
       "Bash(/c/Users/Sean/Documents/Python/Talos/.venv/Scripts/pip install:*)",
       "Bash(.venv/Scripts/pip install:*)",
       "Bash(bash:*)",
-      "Bash(sh:*)"
+      "Bash(sh:*)",
+      "Bash(chmod +x:*)",
+      "Bash(COMPACT_THRESHOLD=3 CLAUDE_SESSION_ID=test bash:*)",
+      "Bash(COMPACT_THRESHOLD=3 CLAUDE_SESSION_ID=test HOME=\"C:/Users/Sean\" bash:*)",
+      "Bash(export:*)",
+      "Bash(wc:*)",
+      "Bash(git:*)",
+      "Bash(echo exit: $?:*)",
+      "Bash(set:*)"
     ]
   }
 }

@@ -33,6 +33,7 @@ Simpler is better. Try removing complexity before introducing it.
 - No abstractions for one-time operations; three similar lines > a premature abstraction
 - No speculative design for hypothetical futures
 - **Exception:** Architectural splits that enable mock-free testing (see Principle 13) are not premature abstraction — they are structural correctness
+- **Exception:** Observability mechanisms required by Principle 20 (hold proposals, visible inaction) are not unnecessary complexity — operator trust requires visible decision outcomes
 
 ## 5. Plan Then Build
 
@@ -42,15 +43,17 @@ Money-touching and decision-making code gets a written plan before implementatio
 
 Pick the well-known, battle-tested approach. Standard patterns over novel ones. If two approaches both work, pick the one a new contributor would understand fastest.
 
-## 7. Audit Everything, Trust Kalshi
+## 7. Kalshi Is the Source of Truth — Always
 
-Every trade decision and system action must leave a trail. Kalshi is the source of truth, but we keep receipts.
+Kalshi's API is the single, unconditional source of truth for all position and order state. Talos never computes, predicts, or caches position state as a substitute for asking Kalshi. Every trade decision and system action must leave a trail.
 
+- **Positions and resting orders come from Kalshi, period.** No local computation may override, substitute, or bypass what Kalshi reports. See Principle 15
 - All order actions logged with full context (why, what, when, outcome)
 - Structured logging — every line machine-parseable
 - Centralize logging in I/O boundaries (`_request`, callback dispatch) — full coverage, minimal per-site code
 - API responses are trusted beyond basic type/model validation, but logged with full payload for post-hoc analysis
-- "Trust" means not re-verifying Kalshi's matching engine logic. Domain-level sanity checks (price range 1-99, qty > 0) are always applied at the Pydantic model layer
+- "Trust" means not re-verifying Kalshi's matching engine logic. Structural validation (field names, types, response shape) is always enforced at the Pydantic boundary per Principle 14
+- Domain-level sanity checks (price range 1-99, qty > 0) are always applied at the Pydantic model layer
 
 ## 8. Layered Observability
 
@@ -79,16 +82,20 @@ A missed opportunity is acceptable. A bad trade is not. Never skip validation or
 
 Talos does one thing: cross-event NO+NO arbitrage. Build for this specific strategy, not a generic framework. If scope expands later, refactor then.
 
-## 15. Position Awareness Before Action
+## 15. Position Accuracy Is Non-Negotiable
 
-No automated or semi-automated action may be taken without a complete, verified picture of current and projected positions. The system must always be able to answer: "What do I hold right now? What will I hold if these resting orders fill?"
+**Talos must have a 100% accurate picture of positions and resting orders at all times. Without this, every suggestion, safety gate, and action is based on a lie.**
 
-A previous system failed catastrophically because it lost track of filled orders and resting order counts simultaneously. It placed new bids without knowing what it already had, leading to runaway exposure on one side. **This is the failure mode we are engineering against.**
+Kalshi is the single source of truth for position state — always, unconditionally, without exception. Talos does not compute, predict, or assume what positions exist. It asks Kalshi, and it trusts the answer. Every code path that reads or acts on position data must ultimately trace back to data fetched from Kalshi's API.
 
-- The position model is the single source of truth — no component may place, amend, or cancel orders without consulting it
+- No automated or semi-automated action may be taken without a complete, verified picture of current and projected positions
+- The system must always be able to answer: "What do I hold right now? What will I hold if these resting orders fill?"
 - Position means: filled contracts, resting contracts, and the sum of both, tracked per side per event
-- The model must project future states: "if resting batch X fills, my position becomes P2; if Y also fills, it becomes P3"
 - When data sources disagree (e.g., fill count from polling vs. expected from placement), halt and flag — never guess
+- Before any money-touching action (placement, amend, cancel, rebalance), re-fetch from Kalshi and re-verify. Stale data has caused runaway exposure in production
+- If Talos cannot fetch fresh position data, it must not act. A missed opportunity is acceptable; an action based on stale state is not
+
+**Failure mode this prevents:** A previous system lost track of positions and placed bids without knowing what it already held, causing runaway exposure. A later bug trusted stale ledger data for catch-up rebalances, escalating corrections on each cycle (A went from 20 to 50 contracts). Both failures had the same root cause: acting on data that didn't reflect Kalshi's actual state.
 
 ## 16. Delta Neutral by Construction
 
@@ -129,6 +136,35 @@ When both sides of a pair have partial fills and both get jumped, the side with 
 
 **Why only one at a time:** If both sides adjust simultaneously and both fill at the new (worse) prices, you may end up with a pair where `avg_A + avg_B ≥ 100` — an unprofitable arb created by racing adjustments. Sequential adjustment lets each step re-verify profitability before the next.
 
+## 20. Inaction Is a Decision — Make It Visible
+
+When the system evaluates a market change and decides not to act, that decision must be surfaced to the operator with a reason. Silent non-action is indistinguishable from a broken system.
+
+- Every evaluation path that could result in action must produce a visible outcome — either "do X" or "hold because Y"
+- The operator should never have to wonder whether the system saw a change, failed to process it, or deliberately chose inaction
+- This applies to jump evaluations, opportunity scanning, and any future automated decision point
+
+**Why:** A jumped order with no proposal looks identical to a system that crashed, lost its WebSocket, or has a bug. The operator can't trust the system unless non-action is as transparent as action. Evidence: the `sync_from_orders` discrepancy bug silently blocked all proposals — indistinguishable from "working correctly, nothing to do."
+
+## 22. End-to-End Before Done
+
+A feature is not complete until the operator can trigger it, see it, and act on it — from input to execution. Every feature must ship with its full interaction chain: activation path → visible output → actionable response → execution.
+
+**Why:** Three separate features shipped incomplete because only the "detection" or "logic" layer was built without wiring the operator's ability to use it:
+1. **Suggestion mode** — proposer logic existed, but no keybinding to enable it
+2. **Proposal approval** — proposals appeared in the UI, but approving a bid proposal had no execution path
+3. **Rebalance detection** — imbalance proposals appeared, but approving them only dismissed the notification without acting
+
+Each required a follow-up fix to wire the missing segment. The pattern is always the same: the interesting logic gets built, but the boring plumbing that connects it to the operator gets deferred or forgotten.
+
+**Checklist for every feature touching operator interaction:**
+- [ ] Can the operator activate/trigger this? (keybinding, toggle, config)
+- [ ] Does the operator see the result? (toast, panel, table column, log)
+- [ ] Can the operator respond to it? (approve, reject, dismiss, override)
+- [ ] Does the response execute? (API call, state change, order mutation)
+
+If any box is unchecked, the feature is not done.
+
 ## 13. Test Purity Drives Architecture
 
 When designing a module, split it until the core logic can be tested with zero mocks.
@@ -146,3 +182,12 @@ Raw data is converted to domain types at the system boundary (API response parsi
 - REST methods return Pydantic models, never raw dicts
 - If business logic needs to interpret a raw format, the boundary is in the wrong place
 - Verify model schemas against actual API responses, not documentation alone — mock-based tests can't catch schema drift
+
+## 21. Authoritative Data Over Computed Data
+
+When an authoritative source provides exact values (e.g., Kalshi's `maker_fees` on orders, `fee_cost` on fills), prefer those over computing them from formulas — even if the formula is correct.
+
+- Computed values are susceptible to rounding, formula drift, and parameter staleness
+- API-provided actuals reflect edge cases the formula may not model (rounding modes, fee rebates, accumulator adjustments)
+- Use formulas for projections and estimates; use actuals for P&L and settled amounts
+- Applied in: `sync_from_orders` uses `order.maker_fees` for fee tracking, not `quadratic_fee(price)`. See [[decisions#2026-03-09 — Quadratic fee model and fill-time charging]]
