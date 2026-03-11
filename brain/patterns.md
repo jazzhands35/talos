@@ -129,7 +129,7 @@ Applied in: `PositionLedger` — `sync_from_orders` takes `max(orders_reported, 
 
 After any action that changes Kalshi state (place, amend, cancel), immediately re-sync from Kalshi to confirm the outcome. Don't wait for the next polling cycle — the system must know truth within milliseconds of acting, not 10 seconds later.
 
-Applied in: `_verify_after_action()` in `engine.py` — runs the full two-source sync (orders + positions) after every rebalance, adjustment, and bid placement. Wrapped in try/except so a failed verification never blocks the action itself. See [[principles#7. Audit Everything, Trust Kalshi]] and [[principles#15. Position Accuracy Is Non-Negotiable]].
+Applied in: `_verify_after_action()` in `engine.py` — runs the full two-source sync (orders + positions) after every rebalance, adjustment, and bid placement. Wrapped in try/except so a failed verification never blocks the action itself. See [[principles#7. Kalshi Is the Source of Truth — Always]] and [[principles#15. Position Accuracy Is Non-Negotiable]].
 
 **Why not rely on the next poll:** The polling cycle runs `check_imbalances` which skips events where `delta < unit_size`. If the action succeeded and resolved the imbalance, the next poll correctly sees "balanced" and does nothing — but the system never confirmed the action's outcome. If the action failed silently, the system assumes everything is fine for 10s. Immediate verification catches both cases.
 
