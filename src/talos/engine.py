@@ -6,6 +6,7 @@ The TUI delegates to this engine rather than managing trading state directly.
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Callable
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
@@ -143,6 +144,10 @@ class TradingEngine:
     def portfolio_value(self) -> int:
         return self._portfolio_value
 
+    def _display_name(self, event_ticker: str) -> str:
+        """Resolve event ticker to short human-readable label (e.g. 'Gorgodze-Kalinina')."""
+        return self._game_manager.labels.get(event_ticker, event_ticker)
+
     # ── Polling methods ─────────────────────────────────────────────
 
     async def start_feed(self) -> None:
@@ -176,6 +181,7 @@ class TradingEngine:
 
     async def refresh_account(self) -> None:
         """Fetch balance + orders, sync ledgers, compute positions."""
+        await self._recover_stale_books()
         try:
             balance = await self._rest.get_balance()
             self._balance = balance.balance
@@ -252,17 +258,7 @@ class TradingEngine:
             except Exception:
                 logger.warning("positions_sync_failed", exc_info=True)
 
-            # Compute position summaries from ledger state
-            self._position_summaries = compute_display_positions(
-                self._adjuster._ledgers,
-                self._scanner.pairs,
-                self._queue_cache,
-                self._cpm,
-            )
-
-            # Enrich summaries with status (P20 — why isn't Talos acting?)
-            for summary in self._position_summaries:
-                summary.status = self._compute_event_status(summary.event_ticker)
+            self._recompute_positions()
 
             # Build enriched order dicts for the order log
             self._order_data = [
@@ -308,30 +304,28 @@ class TradingEngine:
         if not self._orders_cache:
             return
 
-        # Recompute positions from ledgers with updated queue cache
-        self._position_summaries = compute_display_positions(
-            self._adjuster._ledgers,
-            self._scanner.pairs,
-            self._queue_cache,
-            self._cpm,
-        )
-
-        # Enrich summaries with status (must match refresh_account behavior)
-        for summary in self._position_summaries:
-            summary.status = self._compute_event_status(summary.event_ticker)
+        self._recompute_positions()
 
     async def refresh_trades(self) -> None:
         """Fetch recent trades for CPM tracking."""
         tickers = self._active_market_tickers()
         if not tickers:
             return
-        for ticker in tickers:
+
+        async def _fetch(ticker: str) -> tuple[str, list] | None:
             try:
                 trades = await self._rest.get_trades(ticker, limit=50)
-                self._cpm.ingest(ticker, trades)
-                logger.debug("trades_ingested", ticker=ticker, count=len(trades))
+                return (ticker, trades)
             except Exception:
                 logger.warning("trade_fetch_failed", ticker=ticker, exc_info=True)
+                return None
+
+        results = await asyncio.gather(*[_fetch(t) for t in tickers])
+        for result in results:
+            if result is not None:
+                ticker, trades = result
+                self._cpm.ingest(ticker, trades)
+                logger.debug("trades_ingested", ticker=ticker, count=len(trades))
         self._cpm.prune()
 
     def on_top_of_market_change(self, ticker: str, at_top: bool) -> None:
@@ -356,10 +350,8 @@ class TradingEngine:
         """
         proposal = self._adjuster.evaluate_jump(ticker, at_top)
         if proposal is not None:
-            # Build human-readable summary
-            # Shorten event ticker: KXATPCHALLENGEMATCH-26MAR08RODMAL → ...RODMAL
             evt = proposal.event_ticker
-            short_evt = evt if len(evt) <= 20 else f"...{evt[-12:]}"
+            name = self._display_name(evt)
 
             if proposal.action == "hold":
                 logger.info(
@@ -369,7 +361,7 @@ class TradingEngine:
                     reason=proposal.reason,
                 )
                 kind = "hold"
-                summary = f"HOLD {short_evt} side {proposal.side}"
+                summary = f"HOLD {name} side {proposal.side}"
             else:
                 logger.info(
                     "adjustment_proposed",
@@ -381,7 +373,7 @@ class TradingEngine:
                 )
                 kind = "adjustment"
                 summary = (
-                    f"MOVE {short_evt} side {proposal.side}"
+                    f"MOVE {name} side {proposal.side}"
                     f"\n  {proposal.cancel_price}c \u2192 {proposal.new_price}c"
                 )
             key = ProposalKey(
@@ -445,6 +437,20 @@ class TradingEngine:
             if committed_a == 0 and committed_b == 0:
                 continue
 
+            # No resting orders + fills balanced → event settled, nothing actionable
+            if (
+                ledger.resting_count(Side.A) == 0
+                and ledger.resting_count(Side.B) == 0
+                and ledger.filled_count(Side.A) == ledger.filled_count(Side.B)
+            ):
+                continue
+
+            # No resting + markets closed → settled with imbalance, nothing actionable
+            if ledger.resting_count(Side.A) == 0 and ledger.resting_count(Side.B) == 0:
+                books = self._feed.book_manager
+                if not books.best_ask(pair.ticker_a) and not books.best_ask(pair.ticker_b):
+                    continue
+
             delta = committed_a - committed_b
             if abs(delta) < ledger.unit_size:
                 continue  # Less than one unit — normal
@@ -472,7 +478,7 @@ class TradingEngine:
             under_resting = ledger.resting_count(under)
 
             evt = pair.event_ticker
-            short_evt = evt if len(evt) <= 20 else f"...{evt[-12:]}"
+            name = self._display_name(evt)
             over_ticker = pair.ticker_a if over == Side.A else pair.ticker_b
             under_ticker = pair.ticker_a if under == Side.A else pair.ticker_b
             over_order_id = ledger.resting_order_id(over)
@@ -552,7 +558,7 @@ class TradingEngine:
             envelope = Proposal(
                 key=key,
                 kind="rebalance",
-                summary=f"REBALANCE {short_evt} side {over.value}",
+                summary=f"REBALANCE {name} side {over.value}",
                 detail=(
                     f"Imbalanced: {over.value}={over_committed} vs "
                     f"{under.value}={under_committed} "
@@ -580,7 +586,13 @@ class TradingEngine:
                 ledger = self._adjuster.get_ledger(pair.event_ticker)
             except KeyError:
                 continue
-            proposal = self._proposer.evaluate(pair, opp, ledger, pending_keys)
+            proposal = self._proposer.evaluate(
+                pair,
+                opp,
+                ledger,
+                pending_keys,
+                display_name=self._display_name(pair.event_ticker),
+            )
             if proposal is not None:
                 self._proposal_queue.add(proposal)
                 pending_keys.add(proposal.key)
@@ -958,6 +970,17 @@ class TradingEngine:
         if total_a == 0 and total_b == 0:
             return ""
 
+        # Settled — no resting orders and either balanced fills or markets closed
+        if resting_a == 0 and resting_b == 0 and (filled_a > 0 or filled_b > 0):
+            if filled_a == filled_b:
+                return "Settled"
+            # Unbalanced fills but markets closed → settled with loss
+            pair = self._find_pair(event_ticker)
+            if pair is not None:
+                books = self._feed.book_manager
+                if not books.best_ask(pair.ticker_a) and not books.best_ask(pair.ticker_b):
+                    return "Settled"
+
         # Discrepancy — ledger doesn't trust its own data
         if ledger.has_discrepancy:
             return "Discrepancy"
@@ -1002,20 +1025,20 @@ class TradingEngine:
                 return "Low edge"
 
             # Check stability timer
-            first_seen = self._proposer._stable_since.get(event_ticker)
-            if first_seen is not None and self._auto_config.stability_seconds > 0:
-                elapsed = (datetime.now(UTC) - first_seen).total_seconds()
-                if elapsed < self._auto_config.stability_seconds:
-                    remaining = self._auto_config.stability_seconds - elapsed
-                    return f"Stable {remaining:.0f}s"
+            stability = self._proposer.stability_elapsed(event_ticker)
+            if (
+                stability is not None
+                and self._auto_config.stability_seconds > 0
+                and stability < self._auto_config.stability_seconds
+            ):
+                remaining = self._auto_config.stability_seconds - stability
+                return f"Stable {remaining:.0f}s"
 
             # Check cooldown
-            rejected_at = self._proposer._rejected_at.get(event_ticker)
-            if rejected_at is not None:
-                elapsed = (datetime.now(UTC) - rejected_at).total_seconds()
-                if elapsed < self._auto_config.rejection_cooldown_seconds:
-                    remaining = self._auto_config.rejection_cooldown_seconds - elapsed
-                    return f"Cooldown {remaining:.0f}s"
+            cooldown = self._proposer.cooldown_elapsed(event_ticker)
+            if cooldown is not None and cooldown < self._auto_config.rejection_cooldown_seconds:
+                remaining = self._auto_config.rejection_cooldown_seconds - cooldown
+                return f"Cooldown {remaining:.0f}s"
 
             return "Ready"
 
@@ -1057,6 +1080,38 @@ class TradingEngine:
                 except KeyError:
                     return None
         return None
+
+    def _recompute_positions(self) -> None:
+        """Recompute position summaries from ledger state and enrich with status."""
+        self._position_summaries = compute_display_positions(
+            self._adjuster.ledgers,
+            self._scanner.pairs,
+            self._queue_cache,
+            self._cpm,
+        )
+        for summary in self._position_summaries:
+            summary.status = self._compute_event_status(summary.event_ticker)
+
+    async def _recover_stale_books(self) -> None:
+        """Resubscribe to any tickers with stale orderbooks.
+
+        A single dropped WS message marks a book stale permanently.
+        Unsubscribe+resubscribe triggers a fresh snapshot from Kalshi,
+        which resets the stale flag and restores the live delta stream.
+        """
+        stale = self._feed.book_manager.stale_tickers()
+        if not stale:
+            return
+        active = set(self._active_market_tickers())
+        for ticker in stale:
+            if ticker not in active:
+                continue
+            try:
+                await self._feed.unsubscribe(ticker)
+                await self._feed.subscribe(ticker)
+                logger.info("stale_book_recovered", ticker=ticker)
+            except Exception:
+                logger.warning("stale_book_recovery_failed", ticker=ticker, exc_info=True)
 
     def _active_market_tickers(self) -> list[str]:
         """Collect market tickers from all active scanner pairs."""

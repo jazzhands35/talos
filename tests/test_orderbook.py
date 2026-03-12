@@ -273,3 +273,55 @@ class TestQueryMethods:
     def test_tickers_after_remove(self, manager: OrderBookManager) -> None:
         manager.remove("MKT-1")
         assert manager.tickers == set()
+
+
+class TestStaleTickers:
+    def test_no_stale_books(self) -> None:
+        mgr = OrderBookManager()
+        mgr.apply_snapshot(
+            "MKT-1",
+            OrderBookSnapshot(market_ticker="MKT-1", market_id="m1", yes=[], no=[[50, 10]]),
+        )
+        assert mgr.stale_tickers() == []
+
+    def test_stale_after_seq_gap(self) -> None:
+        mgr = OrderBookManager()
+        mgr.apply_snapshot(
+            "MKT-1",
+            OrderBookSnapshot(market_ticker="MKT-1", market_id="m1", yes=[], no=[[50, 10]]),
+        )
+        # Apply delta with seq=1 (good)
+        mgr.apply_delta(
+            "MKT-1",
+            OrderBookDelta(
+                market_ticker="MKT-1", market_id="m1", price=50, delta=5, side="no", ts="0"
+            ),
+            seq=1,
+        )
+        assert mgr.stale_tickers() == []
+
+        # Skip seq=2, apply seq=3 (gap)
+        mgr.apply_delta(
+            "MKT-1",
+            OrderBookDelta(
+                market_ticker="MKT-1", market_id="m1", price=50, delta=3, side="no", ts="0"
+            ),
+            seq=3,
+        )
+        assert mgr.stale_tickers() == ["MKT-1"]
+
+    def test_snapshot_clears_stale(self) -> None:
+        mgr = OrderBookManager()
+        mgr.apply_snapshot(
+            "MKT-1",
+            OrderBookSnapshot(market_ticker="MKT-1", market_id="m1", yes=[], no=[[50, 10]]),
+        )
+        mgr.get_book("MKT-1").stale = True
+        assert mgr.stale_tickers() == ["MKT-1"]
+
+        # Fresh snapshot clears stale
+        mgr.apply_snapshot(
+            "MKT-1",
+            OrderBookSnapshot(market_ticker="MKT-1", market_id="m1", yes=[], no=[[50, 20]]),
+        )
+        assert mgr.stale_tickers() == []

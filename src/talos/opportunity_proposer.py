@@ -27,6 +27,24 @@ class OpportunityProposer:
         self._stable_since: dict[str, datetime] = {}  # event_ticker -> first seen
         self._rejected_at: dict[str, datetime] = {}  # event_ticker -> rejection time
 
+    def stability_elapsed(self, event_ticker: str, now: datetime | None = None) -> float | None:
+        """Seconds since edge was first seen, or None if not tracking."""
+        first_seen = self._stable_since.get(event_ticker)
+        if first_seen is None:
+            return None
+        if now is None:
+            now = datetime.now(UTC)
+        return (now - first_seen).total_seconds()
+
+    def cooldown_elapsed(self, event_ticker: str, now: datetime | None = None) -> float | None:
+        """Seconds since last rejection, or None if not in cooldown."""
+        rejected_at = self._rejected_at.get(event_ticker)
+        if rejected_at is None:
+            return None
+        if now is None:
+            now = datetime.now(UTC)
+        return (now - rejected_at).total_seconds()
+
     def evaluate(
         self,
         pair: ArbPair,
@@ -34,6 +52,7 @@ class OpportunityProposer:
         ledger: PositionLedger,
         pending_keys: set[ProposalKey],
         now: datetime | None = None,
+        display_name: str = "",
     ) -> Proposal | None:
         """Return a bid proposal if all gates pass, None otherwise."""
         if now is None:
@@ -103,7 +122,7 @@ class OpportunityProposer:
             key=bid_key,
             kind="bid",
             summary=(
-                f"Bid {event} @ {opportunity.no_a}/{opportunity.no_b} NO"
+                f"Bid {display_name or event} @ {opportunity.no_a}/{opportunity.no_b} NO"
                 f" ({opportunity.fee_edge:.1f}c edge)"
             ),
             detail=(

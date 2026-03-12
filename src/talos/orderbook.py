@@ -134,6 +134,10 @@ class OrderBookManager:
         """All currently tracked tickers."""
         return set(self._books.keys())
 
+    def stale_tickers(self) -> list[str]:
+        """Return tickers whose books are marked stale (sequence gap)."""
+        return [t for t, book in self._books.items() if book.stale]
+
     def get_book(self, ticker: str) -> LocalOrderBook | None:
         """Get current book state, or None if not tracked."""
         return self._books.get(ticker)

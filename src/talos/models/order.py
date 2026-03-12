@@ -2,13 +2,33 @@
 
 from __future__ import annotations
 
-from pydantic import BaseModel, Field
+from typing import Any
+
+from pydantic import BaseModel, Field, model_validator
 
 ACTIVE_STATUSES = frozenset({"resting", "executed"})
 
 
+def _dollars_to_cents(val: Any) -> int:
+    """Convert a _dollars string/float to integer cents."""
+    if val is None:
+        return 0
+    return round(float(val) * 100)
+
+
+def _fp_to_int(val: Any) -> int:
+    """Convert an _fp string to integer."""
+    if val is None:
+        return 0
+    return int(float(val))
+
+
 class Order(BaseModel, extra="ignore"):
-    """A Kalshi order — matches Kalshi REST API response schema."""
+    """A Kalshi order — matches Kalshi REST API response schema.
+
+    Post March 12, 2026: integer fields removed. The validator converts
+    _dollars/_fp string fields to int cents/int counts for internal use.
+    """
 
     order_id: str
     ticker: str
@@ -28,9 +48,36 @@ class Order(BaseModel, extra="ignore"):
     maker_fees: int = 0
     queue_position: int | None = None
 
+    @model_validator(mode="before")
+    @classmethod
+    def _migrate_fp(cls, data: Any) -> Any:
+        if not isinstance(data, dict):
+            return data
+        # Dollars → cents
+        for old, new in [
+            ("yes_price", "yes_price_dollars"),
+            ("no_price", "no_price_dollars"),
+            ("taker_fees", "taker_fees_dollars"),
+            ("maker_fees", "maker_fees_dollars"),
+        ]:
+            if new in data and data[new] is not None:
+                data[old] = _dollars_to_cents(data[new])
+        # FP → int
+        for old, new in [
+            ("fill_count", "fill_count_fp"),
+            ("remaining_count", "remaining_count_fp"),
+            ("initial_count", "initial_count_fp"),
+        ]:
+            if new in data and data[new] is not None:
+                data[old] = _fp_to_int(data[new])
+        return data
+
 
 class Fill(BaseModel, extra="ignore"):
-    """A single fill (partial or full order execution)."""
+    """A single fill (partial or full order execution).
+
+    Post March 12, 2026: _dollars/_fp fields replace integer fields.
+    """
 
     trade_id: str
     order_id: str
@@ -40,6 +87,21 @@ class Fill(BaseModel, extra="ignore"):
     no_price: int = 0
     count: int = 0
     created_time: str = ""
+
+    @model_validator(mode="before")
+    @classmethod
+    def _migrate_fp(cls, data: Any) -> Any:
+        if not isinstance(data, dict):
+            return data
+        for old, new in [
+            ("yes_price", "yes_price_dollars"),
+            ("no_price", "no_price_dollars"),
+        ]:
+            if new in data and data[new] is not None:
+                data[old] = _dollars_to_cents(data[new])
+        if "count_fp" in data and data["count_fp"] is not None:
+            data["count"] = _fp_to_int(data["count_fp"])
+        return data
 
 
 class BatchOrderResult(BaseModel, extra="ignore"):

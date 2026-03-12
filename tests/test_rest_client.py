@@ -240,7 +240,7 @@ class TestOrderEndpoints:
         # Verify POST body
         call_kwargs = client._http.request.call_args
         assert call_kwargs.kwargs["json"]["ticker"] == "KXBTC-26MAR-T50000"
-        assert call_kwargs.kwargs["json"]["yes_price"] == 65
+        assert call_kwargs.kwargs["json"]["yes_price_dollars"] == "0.65"
         assert call_kwargs.kwargs["json"]["action"] == "buy"
 
     async def test_cancel_order(self, client: KalshiRESTClient) -> None:
@@ -338,8 +338,8 @@ class TestOrderEndpoints:
         assert body["ticker"] == "KXBTC-26MAR-T50000"
         assert body["side"] == "no"
         assert body["action"] == "buy"
-        assert body["no_price"] == 75
-        assert body["count"] == 10
+        assert body["no_price_dollars"] == "0.75"
+        assert body["count_fp"] == "10"
 
     async def test_amend_order_partial_fields(self, client: KalshiRESTClient) -> None:
         """Only optional fields are sent when specified; required fields always present."""
@@ -384,8 +384,8 @@ class TestOrderEndpoints:
         assert body["side"] == "no"
         assert body["action"] == "buy"
         # Optional: only no_price sent, count omitted
-        assert body["no_price"] == 65
-        assert "count" not in body
+        assert body["no_price_dollars"] == "0.65"
+        assert "count_fp" not in body
 
     async def test_get_order(self, client: KalshiRESTClient) -> None:
         mock_data = {

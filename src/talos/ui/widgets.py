@@ -55,12 +55,7 @@ def _fmt_odds(no_price: int) -> str:
     return f"+{r}" if r > 0 else str(r)
 
 
-def _dim(value: str) -> RichText:
-    """Wrap a placeholder value in dim styling."""
-    return RichText(value, style="dim")
-
-
-DIM_DASH = _dim("—")
+DIM_DASH = RichText("—", style="dim", justify="right")
 
 
 def _fmt_status(status: str) -> RichText:

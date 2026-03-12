@@ -119,7 +119,9 @@ class KalshiRESTClient:
         if depth > 0:
             params["depth"] = depth
         data = await self._request("GET", f"/markets/{ticker}/orderbook", params=params)
-        return OrderBook.model_validate(data["orderbook"])
+        # Post March 12: response may use "orderbook_fp" key instead of "orderbook"
+        book_data = data.get("orderbook") or data.get("orderbook_fp", {})
+        return OrderBook.model_validate(book_data)
 
     async def get_trades(
         self,
@@ -152,13 +154,13 @@ class KalshiRESTClient:
             "action": action,
             "side": side,
             "type": order_type,
-            "count": count,
+            "count_fp": str(count),
             "client_order_id": str(uuid.uuid4()),
         }
         if no_price is not None:
-            body["no_price"] = no_price
+            body["no_price_dollars"] = f"{no_price / 100:.2f}"
         if yes_price is not None:
-            body["yes_price"] = yes_price
+            body["yes_price_dollars"] = f"{yes_price / 100:.2f}"
         logger.info(
             "create_order",
             ticker=ticker,
@@ -198,9 +200,9 @@ class KalshiRESTClient:
             "action": action,
         }
         if no_price is not None:
-            body["no_price"] = no_price
+            body["no_price_dollars"] = f"{no_price / 100:.2f}"
         if count is not None:
-            body["count"] = count
+            body["count_fp"] = str(count)
         data = await self._request("POST", f"/portfolio/orders/{order_id}/amend", json=body)
         return (
             Order.model_validate(data["old_order"]),

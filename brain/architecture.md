@@ -37,7 +37,7 @@ Single source of truth for both UI display and bid adjustment safety gates. `com
 1. **API Client** (Layer 1) — **COMPLETE**
    Auth, REST, WebSocket, Pydantic models, error hierarchy.
 2. **Market Data** (Layer 2) — **COMPLETE**
-   Pure `OrderBookManager` + async `MarketFeed` orchestrator.
+   Pure `OrderBookManager` + async `MarketFeed` orchestrator. Stale book auto-recovery: `_recover_stale_books()` runs at top of each `refresh_account` cycle, unsubscribes/resubscribes stale tickers to get a fresh snapshot.
 3. **Strategy Engine** (Layer 3) — **COMPLETE**
    Pure `ArbitrageScanner` + async `GameManager` orchestrator. Scanner computes both raw and fee-adjusted edges via `fees.py`.
 4. **Execution** (Layer 4) — **COMPLETE**

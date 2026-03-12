@@ -7,6 +7,20 @@ from typing import Any
 from pydantic import BaseModel, model_validator
 
 
+def _dollars_to_cents(val: Any) -> int | None:
+    """Convert a _dollars string/float to integer cents. '0.52' → 52."""
+    if val is None:
+        return None
+    return round(float(val) * 100)
+
+
+def _fp_to_int(val: Any) -> int | None:
+    """Convert an _fp string to integer. '10.00' → 10."""
+    if val is None:
+        return None
+    return int(float(val))
+
+
 class OrderBookLevel(BaseModel):
     """A single price level in the orderbook."""
 
@@ -15,7 +29,11 @@ class OrderBookLevel(BaseModel):
 
 
 class Market(BaseModel):
-    """A Kalshi market (contract)."""
+    """A Kalshi market (contract).
+
+    Post March 12, 2026: integer cents fields removed from API responses.
+    The validator converts _dollars/_fp string fields to int cents/int counts.
+    """
 
     ticker: str
     event_ticker: str
@@ -28,6 +46,30 @@ class Market(BaseModel):
     volume: int | None = None
     open_interest: int | None = None
     last_price: int | None = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def _migrate_fp(cls, data: Any) -> Any:
+        if not isinstance(data, dict):
+            return data
+        # Dollars → cents
+        for old, new in [
+            ("yes_bid", "yes_bid_dollars"),
+            ("yes_ask", "yes_ask_dollars"),
+            ("no_bid", "no_bid_dollars"),
+            ("no_ask", "no_ask_dollars"),
+            ("last_price", "last_price_dollars"),
+        ]:
+            if new in data and data[new] is not None:
+                data[old] = _dollars_to_cents(data[new])
+        # FP → int
+        for old, new in [
+            ("volume", "volume_fp"),
+            ("open_interest", "open_interest_fp"),
+        ]:
+            if new in data and data[new] is not None:
+                data[old] = _fp_to_int(data[new])
+        return data
 
 
 class Event(BaseModel):
@@ -56,6 +98,7 @@ class OrderBook(BaseModel):
     """Orderbook snapshot for a market.
 
     Raw API returns [[price, qty], ...] arrays — we parse into OrderBookLevel.
+    Post March 12: levels may be [["dollars_str", "fp_str"], ...] strings.
     """
 
     market_ticker: str
@@ -70,10 +113,25 @@ class OrderBook(BaseModel):
     @classmethod
     def _coerce_levels(cls, data: Any) -> Any:
         if isinstance(data, dict):
+            # Handle orderbook_fp wrapper (new API may nest under this key)
+            if "orderbook_fp" in data and "yes" not in data:
+                inner = data["orderbook_fp"]
+                if isinstance(inner, dict):
+                    data.update(inner)
             for side in ("yes", "no"):
                 levels = data.get(side)
                 if levels and isinstance(levels, list) and levels and isinstance(levels[0], list):
-                    data[side] = [{"price": p[0], "quantity": p[1]} for p in levels]
+                    coerced = []
+                    for pair in levels:
+                        # New format: ["0.52", "10.00"] (dollars str, fp str)
+                        # Old format: [52, 10] (cents int, qty int)
+                        p, q = pair[0], pair[1]
+                        if isinstance(p, str):
+                            p = round(float(p) * 100)
+                        if isinstance(q, str):
+                            q = int(float(q))
+                        coerced.append({"price": p, "quantity": q})
+                    data[side] = coerced
         return data
 
 
@@ -83,6 +141,8 @@ class Trade(BaseModel):
     The Kalshi API returns ``taker_side`` (not ``side``) and ``price`` as a
     dollar float (not cents int).  The validator normalizes both so downstream
     code always sees ``side`` as a string and ``price`` as cents.
+
+    Post March 12: _dollars/_fp fields replace integer fields.
     """
 
     ticker: str
@@ -101,12 +161,21 @@ class Trade(BaseModel):
             # API returns taker_side, normalize to side
             if "taker_side" in data and "side" not in data:
                 data["side"] = data["taker_side"]
+            # FP migration: _dollars → cents, _fp → int
+            for old, new in [
+                ("yes_price", "yes_price_dollars"),
+                ("no_price", "no_price_dollars"),
+            ]:
+                if new in data and data[new] is not None:
+                    data[old] = _dollars_to_cents(data[new])
+            if "count_fp" in data and data["count_fp"] is not None:
+                data["count"] = _fp_to_int(data["count_fp"])
             # API returns price as float (dollars), normalize to cents
             if "price" in data:
                 p = data["price"]
                 if isinstance(p, float) and p <= 1.0:
                     data["price"] = round(p * 100)
             # If price missing but yes_price present, derive it
-            elif "yes_price" in data:
+            if "price" not in data and "yes_price" in data:
                 data["price"] = data["yes_price"]
         return data

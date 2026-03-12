@@ -54,6 +54,11 @@ class BidAdjuster:
         # Deferred jumps: event_ticker → set of deferred sides
         self._deferred: dict[str, set[Side]] = {}
 
+    @property
+    def ledgers(self) -> dict[str, PositionLedger]:
+        """Read-only access to all per-event ledgers."""
+        return self._ledgers
+
     def get_ledger(self, event_ticker: str) -> PositionLedger:
         """Get the position ledger for an event."""
         return self._ledgers[event_ticker]

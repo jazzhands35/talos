@@ -1380,3 +1380,108 @@ class TestComputeEventStatus:
 
         status = engine._compute_event_status("EVT-1")
         assert status == "Discrepancy"
+
+
+# ── Stale book recovery ────────────────────────────────────────────
+
+
+def _engine_with_real_feed() -> tuple[TradingEngine, AsyncMock, OrderBookManager]:
+    """Build an engine with a real OrderBookManager and mock MarketFeed."""
+    books = OrderBookManager()
+    scanner = ArbitrageScanner(books)
+    scanner.add_pair("EVT-1", "TK-A", "TK-B")
+    pair = ArbPair(event_ticker="EVT-1", ticker_a="TK-A", ticker_b="TK-B")
+    adjuster = BidAdjuster(books, [pair], unit_size=10)
+
+    # Apply initial snapshots so books exist
+    books.apply_snapshot(
+        "TK-A",
+        OrderBookSnapshot(market_ticker="TK-A", market_id="m1", yes=[], no=[[45, 100]]),
+    )
+    books.apply_snapshot(
+        "TK-B",
+        OrderBookSnapshot(market_ticker="TK-B", market_id="m2", yes=[], no=[[48, 100]]),
+    )
+
+    feed = AsyncMock(spec=MarketFeed)
+    feed.book_manager = books
+    rest = AsyncMock(spec=KalshiRESTClient)
+    engine = _make_engine(
+        scanner=scanner,
+        adjuster=adjuster,
+        rest_client=rest,
+        market_feed=feed,
+    )
+    return engine, rest, books
+
+
+class TestStaleBookRecovery:
+    @pytest.mark.asyncio
+    async def test_no_stale_books_does_nothing(self):
+        engine, _, books = _engine_with_real_feed()
+        # No books are stale — subscribe/unsubscribe should not be called
+        await engine._recover_stale_books()
+        engine._feed.unsubscribe.assert_not_called()
+        engine._feed.subscribe.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_stale_book_triggers_resubscribe(self):
+        engine, _, books = _engine_with_real_feed()
+        # Mark TK-A as stale
+        books.get_book("TK-A").stale = True
+
+        await engine._recover_stale_books()
+
+        engine._feed.unsubscribe.assert_called_once_with("TK-A")
+        engine._feed.subscribe.assert_called_once_with("TK-A")
+
+    @pytest.mark.asyncio
+    async def test_multiple_stale_books_all_recovered(self):
+        engine, _, books = _engine_with_real_feed()
+        books.get_book("TK-A").stale = True
+        books.get_book("TK-B").stale = True
+
+        await engine._recover_stale_books()
+
+        assert engine._feed.unsubscribe.call_count == 2
+        assert engine._feed.subscribe.call_count == 2
+
+    @pytest.mark.asyncio
+    async def test_stale_non_active_ticker_ignored(self):
+        engine, _, books = _engine_with_real_feed()
+        # Add a stale book for a ticker not in any active pair
+        books.apply_snapshot(
+            "TK-ORPHAN",
+            OrderBookSnapshot(market_ticker="TK-ORPHAN", market_id="m3", yes=[], no=[[50, 10]]),
+        )
+        books.get_book("TK-ORPHAN").stale = True
+
+        await engine._recover_stale_books()
+
+        engine._feed.unsubscribe.assert_not_called()
+        engine._feed.subscribe.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_resubscribe_failure_does_not_crash(self):
+        engine, _, books = _engine_with_real_feed()
+        books.get_book("TK-A").stale = True
+        engine._feed.unsubscribe.side_effect = RuntimeError("WS disconnected")
+
+        # Should not raise
+        await engine._recover_stale_books()
+
+    @pytest.mark.asyncio
+    async def test_refresh_account_calls_recovery(self):
+        """refresh_account triggers stale book recovery before main logic."""
+        engine, rest, books = _engine_with_real_feed()
+        books.get_book("TK-A").stale = True
+
+        rest.get_balance.return_value = Balance(balance=1000, portfolio_value=1000)
+        rest.get_orders.return_value = []
+        rest.get_queue_positions.return_value = {}
+
+        await engine.refresh_account()
+
+        # Recovery should have been called (unsubscribe + subscribe for TK-A)
+        engine._feed.unsubscribe.assert_called_once_with("TK-A")
+        engine._feed.subscribe.assert_called_once_with("TK-A")

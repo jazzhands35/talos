@@ -89,6 +89,11 @@ class MarketFeed:
         logger.info("market_feed_stop")
 
     @property
+    def book_manager(self) -> OrderBookManager:
+        """The underlying orderbook manager."""
+        return self._books
+
+    @property
     def subscriptions(self) -> set[str]:
         """Currently subscribed tickers."""
         return set(self._subscribed_tickers)

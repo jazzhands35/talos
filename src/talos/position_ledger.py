@@ -345,6 +345,11 @@ class PositionLedger:
         return ", ".join(parts) if parts else "empty"
 
 
+def _prorate(total: int, portion: int, denominator: int) -> int:
+    """Proportionally allocate *total* based on portion/denominator (integer math)."""
+    return total * portion // denominator if denominator > 0 else 0
+
+
 def compute_display_positions(
     ledgers: dict[str, PositionLedger],
     pairs: list[ArbPair],
@@ -380,19 +385,17 @@ def compute_display_positions(
         fees_b = ledger.filled_fees(Side.B)
 
         if matched > 0:
-            cost_a_matched = cost_a * matched // filled_a if filled_a > 0 else 0
-            cost_b_matched = cost_b * matched // filled_b if filled_b > 0 else 0
-            fees_a_matched = fees_a * matched // filled_a if filled_a > 0 else 0
-            fees_b_matched = fees_b * matched // filled_b if filled_b > 0 else 0
+            cost_a_matched = _prorate(cost_a, matched, filled_a)
+            cost_b_matched = _prorate(cost_b, matched, filled_b)
+            fees_a_matched = _prorate(fees_a, matched, filled_a)
+            fees_b_matched = _prorate(fees_b, matched, filled_b)
             locked_profit = fee_adjusted_profit_matched(
                 matched, cost_a_matched, cost_b_matched, fees_a_matched, fees_b_matched
             )
         else:
             locked_profit = 0.0
 
-        exposure = (cost_a * unmatched_a // filled_a if filled_a > 0 else 0) + (
-            cost_b * unmatched_b // filled_b if filled_b > 0 else 0
-        )
+        exposure = _prorate(cost_a, unmatched_a, filled_a) + _prorate(cost_b, unmatched_b, filled_b)
 
         avg_a = cost_a // filled_a if filled_a > 0 else ledger.resting_price(Side.A)
         avg_b = cost_b // filled_b if filled_b > 0 else ledger.resting_price(Side.B)
