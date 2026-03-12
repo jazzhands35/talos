@@ -20,17 +20,17 @@ This document explains how to track positions on Kalshi, compute net exposure, c
 GET /trade-api/v2/portfolio/positions
 ```
 
-Returns one entry per market you have exposure in. Key fields (names vary across API versions):
+Returns one entry per market you have exposure in. Key fields (post March 12, 2026 — legacy integer fields removed):
 
-| Field | Fallback Names | Description |
-|-------|---------------|-------------|
-| Ticker | `ticker`, `market_ticker` | Market contract identifier |
-| Position | `position` | **Signed integer**: positive = net YES, negative = net NO |
-| Side | `side`, `yesno`, `position_side` | Explicit YES/NO if provided |
-| Avg Price | `avg_price_fp`, `avg_price`, `entry_price`, `position_price`, `price` | Average entry price (cents, 0–100) |
-| YES Price | `yes_price_fp`, `yes_price` | YES-side entry price |
-| NO Price | `no_price_fp`, `no_price` | NO-side entry price |
-| Exposure | `market_exposure_dollars` | Total dollars at risk |
+| Field | API Field Name | Format | Description |
+|-------|---------------|--------|-------------|
+| Ticker | `ticker` | string | Market contract identifier |
+| Position | `position_fp` | string (e.g., `"10"`) | **Signed**: positive = net YES, negative = net NO |
+| Total Traded | `total_traded_dollars` | string (e.g., `"0.25"`) | Total dollars traded |
+| Market Exposure | `market_exposure_dollars` | string (e.g., `"6.50"`) | Total dollars at risk |
+| Resting Count | `resting_orders_count_fp` | string (e.g., `"3"`) | Number of resting orders |
+
+> **Note:** Legacy integer fields (`position`, `total_traded`, `market_exposure`, `resting_orders_count`) were removed March 12, 2026. Talos's `Position` model converts `_fp`/`_dollars` strings to int cents/int counts via `_migrate_fp` validator.
 
 **Position sign convention**: `+100` means you hold 100 YES contracts. `-50` means you hold 50 NO contracts.
 
@@ -43,6 +43,8 @@ GET /trade-api/v2/portfolio/orders
 ```
 
 Returns all orders (open + filled). Filled orders are used to reconstruct **price buckets** — the specific prices at which you accumulated your position. This gives you accurate cost basis when you've bought at multiple price levels.
+
+Post March 12, 2026: order fields use `_dollars`/`_fp` strings — e.g., `yes_price_dollars` (string, `"0.65"`), `no_price_dollars`, `fill_count_fp` (string, `"10"`), `remaining_count_fp`, `maker_fees_dollars`. Legacy integer fields (`yes_price`, `no_price`, `fill_count`, etc.) have been removed.
 
 ### Price Reconstruction
 

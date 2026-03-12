@@ -25,22 +25,22 @@ GET /trade-api/v2/markets/{market_ticker}/trades?limit=120
 
 **Response** contains an array of trade objects. The response key may be `trades`, `fills`, `data`, or `results` — check all four.
 
-Each trade object has (field names vary across API versions):
+Each trade object has (post March 12, 2026 — legacy integer fields removed):
 
-| Field | Fallback Names | Description |
-|-------|---------------|-------------|
-| Timestamp | `ts`, `timestamp`, `time_ms`, `created_ts`, `created_time`, `created_at` | When the trade happened |
-| Side | `taker_side`, `side`, `yesno`, `position`, `outcome` | Which outcome was taken (YES or NO) |
-| Action | `action`, `taker_action`, `trade_action` | Buy or sell |
-| Quantity | `count`, `quantity`, `qty`, `size` | Number of contracts traded |
-| YES price | `yes_price`, `yes_price_cents`, `yes_price_fixed` | Price in cents for the YES side |
-| NO price | `no_price`, `no_price_cents`, `no_price_fixed` | Price in cents for the NO side |
-| Price | `price`, `price_cents`, `avg_price`, `avg_price_cents` | Generic price field |
-| Trade ID | `trade_id`, `fill_id`, `id` | Unique trade identifier (for deduplication) |
+| Field | API Field Name | Format | Description |
+|-------|---------------|--------|-------------|
+| Timestamp | `created_time` | ISO 8601 string | When the trade happened |
+| Side | `taker_side` | string | Which outcome was taken (YES or NO) |
+| Quantity | `count_fp` | string (e.g., `"10"`) | Number of contracts traded |
+| YES price | `yes_price_dollars` | string (e.g., `"0.65"`) | Price in dollars for the YES side |
+| NO price | `no_price_dollars` | string (e.g., `"0.35"`) | Price in dollars for the NO side |
+| Trade ID | `trade_id` | string | Unique trade identifier (for deduplication) |
+
+> **Note:** Legacy integer fields (`count`, `yes_price`, `no_price`, `price`) were removed March 12, 2026. Talos's `Trade` model converts `_dollars`/`_fp` strings to int cents/int counts via `_migrate_fp` validator.
 
 **Timestamp normalization**: If the timestamp is > 10^12, it's in milliseconds — divide by 1000 to get seconds. If it's a string (ISO 8601), parse it. If nothing is available, use current time as fallback.
 
-**Price normalization**: Prices may come as cents (0–100) or dollars (0.00–1.00). If the value is <= 1.0, multiply by 100 to get cents.
+**Price normalization**: Post March 12, prices come as dollar strings (e.g., `"0.65"`) via `_dollars` fields. Multiply by 100 to get cents. The Pydantic model handles this conversion automatically.
 
 ### 2. Queue Position (for ETA)
 
