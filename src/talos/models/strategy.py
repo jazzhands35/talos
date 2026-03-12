@@ -11,6 +11,8 @@ class ArbPair(BaseModel):
     event_ticker: str
     ticker_a: str
     ticker_b: str
+    fee_type: str = "quadratic_with_maker_fees"
+    fee_rate: float = 0.0175
 
 
 class Opportunity(BaseModel):

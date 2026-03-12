@@ -18,6 +18,7 @@ from talos.bid_adjuster import BidAdjuster
 from talos.cpm import CPMTracker
 from talos.errors import KalshiAPIError
 from talos.game_manager import GameManager
+from talos.lifecycle_feed import LifecycleFeed
 from talos.market_feed import MarketFeed
 from talos.models.order import Order
 from talos.models.portfolio import EventPosition
@@ -80,6 +81,7 @@ class TradingEngine:
         automation_config: AutomationConfig | None = None,
         portfolio_feed: PortfolioFeed | None = None,
         ticker_feed: TickerFeed | None = None,
+        lifecycle_feed: LifecycleFeed | None = None,
     ) -> None:
         self._scanner = scanner
         self._game_manager = game_manager
@@ -92,6 +94,7 @@ class TradingEngine:
         self._auto_config = automation_config or AutomationConfig()
         self._portfolio_feed = portfolio_feed
         self._ticker_feed = ticker_feed
+        self._lifecycle_feed = lifecycle_feed
         self._proposer = OpportunityProposer(self._auto_config)
 
         # Mutable caches
@@ -103,11 +106,18 @@ class TradingEngine:
         self._position_summaries: list[EventPositionSummary] = []
         self._order_data: list[dict[str, object]] = []
         self._event_positions: dict[str, EventPosition] = {}
+        self._paused_markets: set[str] = set()
 
         # Wire portfolio feed callbacks
         if self._portfolio_feed is not None:
             self._portfolio_feed.on_order_update = self._on_order_update
             self._portfolio_feed.on_fill = self._on_fill
+
+        # Wire lifecycle feed callbacks
+        if self._lifecycle_feed is not None:
+            self._lifecycle_feed.on_determined = self._on_market_determined
+            self._lifecycle_feed.on_settled = self._on_market_settled
+            self._lifecycle_feed.on_paused = self._on_market_paused
 
         # Callbacks for UI communication
         self.on_notification: Callable[[str, str], None] | None = None
@@ -202,6 +212,10 @@ class TradingEngine:
             # Subscribe to portfolio events globally (all markets)
             if self._portfolio_feed is not None:
                 await self._portfolio_feed.subscribe()
+
+            # Subscribe to lifecycle events globally
+            if self._lifecycle_feed is not None:
+                await self._lifecycle_feed.subscribe()
 
             # Subscribe to ticker updates for all active markets
             if self._ticker_feed is not None:
@@ -439,6 +453,43 @@ class TradingEngine:
             is_taker=msg.is_taker,
             post_position=msg.post_position,
         )
+
+    # ── Lifecycle event handlers ────────────────────────────────
+
+    def _on_market_determined(self, ticker: str, result: str, settlement_value: int) -> None:
+        """Handle market determination (result known, not yet settled)."""
+        logger.info(
+            "lifecycle_determined",
+            ticker=ticker,
+            result=result,
+            settlement_value=settlement_value,
+        )
+        self._notify(f"Market determined: {ticker} → {result}")
+
+    def _on_market_settled(self, ticker: str) -> None:
+        """Handle market settlement (cash distributed)."""
+        logger.info("lifecycle_settled", ticker=ticker)
+        self._notify(f"Market settled: {ticker}")
+
+    def _on_market_paused(self, ticker: str, is_deactivated: bool) -> None:
+        """Handle market pause/unpause."""
+        if is_deactivated:
+            self._paused_markets.add(ticker)
+            self._notify(f"Market paused: {ticker}", "warning")
+        else:
+            self._paused_markets.discard(ticker)
+            self._notify(f"Market unpaused: {ticker}")
+        logger.info(
+            "lifecycle_paused",
+            ticker=ticker,
+            is_deactivated=is_deactivated,
+            paused_count=len(self._paused_markets),
+        )
+
+    @property
+    def paused_markets(self) -> set[str]:
+        """Currently paused markets."""
+        return set(self._paused_markets)
 
     # ── Event handlers ───────────────────────────────────────────
 
@@ -721,6 +772,13 @@ class TradingEngine:
         and sync_from_orders reconciles on the next polling cycle. The stability
         reset (fix #3) provides the time buffer to prevent duplicate proposals.
         """
+        # Block on paused markets
+        for ticker in (bid.ticker_a, bid.ticker_b):
+            if ticker in self._paused_markets:
+                self._notify(f"Bid BLOCKED: {ticker} is paused", "error")
+                logger.error("bid_blocked_market_paused", ticker=ticker)
+                return
+
         # Look up ledger for safety gate
         ledger = self._find_ledger_for_bid(bid)
 
@@ -875,37 +933,29 @@ class TradingEngine:
                         f" resting on {rebalance.side} ({rebalance.ticker})",
                     )
                 else:
-                    # P15: Fetch fresh order state before amending. The proposal's
-                    # filled_count is the ledger aggregate (all orders + positions),
-                    # but amend count must be THIS order's fill_count + target resting.
+                    # Use decrease_order for quantity-only reductions (preserves
+                    # queue position, simpler semantics than amend).
                     fresh_order = await self._rest.get_order(rebalance.order_id)
                     if fresh_order.remaining_count <= rebalance.target_resting:
-                        # Order already at or below target (fills arrived between
-                        # proposal and execution, or order was amended/cancelled).
                         self._notify(
                             f"Rebalance step 1: already at target"
                             f" (remaining={fresh_order.remaining_count})",
                         )
                     else:
-                        new_total = fresh_order.fill_count + rebalance.target_resting
                         logger.info(
-                            "rebalance_amend_computed",
+                            "rebalance_decrease",
                             order_id=rebalance.order_id,
-                            order_fill_count=fresh_order.fill_count,
                             order_remaining=fresh_order.remaining_count,
                             target_resting=rebalance.target_resting,
-                            new_total=new_total,
                         )
-                        await self._rest.amend_order(
+                        await self._rest.decrease_order(
                             rebalance.order_id,
-                            ticker=rebalance.ticker,
-                            no_price=rebalance.resting_price,
-                            count=new_total,
+                            reduce_to=rebalance.target_resting,
                         )
                         self._notify(
                             f"Rebalance step 1: {rebalance.side} resting"
                             f" {fresh_order.remaining_count}"
-                            f" → {rebalance.target_resting}",
+                            f" \u2192 {rebalance.target_resting}",
                         )
             except KalshiAPIError as e:
                 if _is_no_op(e):

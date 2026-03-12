@@ -48,6 +48,7 @@ class Order(BaseModel, extra="ignore"):
     maker_fees: int = 0
     maker_fill_cost: int = 0
     taker_fill_cost: int = 0
+    order_group_id: str | None = None
     queue_position: int | None = None
 
     @model_validator(mode="before")

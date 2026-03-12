@@ -297,3 +297,39 @@ class TestAllSnapshots:
         assert "EVT-1" in snaps
         assert snaps["EVT-1"].no_a == 0
         assert snaps["EVT-1"].no_b == 0
+
+
+class TestDynamicFeeRate:
+    """Phase 9: scanner uses pair-specific fee rate for edge calculation."""
+
+    def test_fee_edge_uses_custom_rate(self) -> None:
+        from talos.fees import fee_adjusted_edge
+
+        manager = OrderBookManager()
+        scanner = ArbitrageScanner(manager)
+        scanner.add_pair("GAME-1", "GAME-STAN", "GAME-MIA", fee_rate=0.03)
+        _setup_books(manager, no_a=38, qty_a=100, no_b=55, qty_b=100)
+        scanner.scan("GAME-STAN")
+
+        opp = scanner.opportunities[0]
+        expected = fee_adjusted_edge(38, 55, rate=0.03)
+        assert opp.fee_edge == pytest.approx(expected)
+
+    def test_default_fee_rate(self) -> None:
+        from talos.fees import fee_adjusted_edge
+
+        manager = OrderBookManager()
+        scanner = ArbitrageScanner(manager)
+        scanner.add_pair("GAME-1", "GAME-STAN", "GAME-MIA")  # default rate
+        _setup_books(manager, no_a=38, qty_a=100, no_b=55, qty_b=100)
+        scanner.scan("GAME-STAN")
+
+        opp = scanner.opportunities[0]
+        expected = fee_adjusted_edge(38, 55)  # default rate
+        assert opp.fee_edge == pytest.approx(expected)
+
+    def test_pair_stores_fee_rate(self) -> None:
+        scanner = ArbitrageScanner(OrderBookManager())
+        scanner.add_pair("EVT-1", "A", "B", fee_type="flat", fee_rate=0.05)
+        assert scanner.pairs[0].fee_type == "flat"
+        assert scanner.pairs[0].fee_rate == 0.05

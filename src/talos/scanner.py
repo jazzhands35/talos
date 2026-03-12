@@ -29,11 +29,25 @@ class ArbitrageScanner:
         self._all_snapshots: dict[str, Opportunity] = {}
         self._sorted_cache: list[Opportunity] | None = None
 
-    def add_pair(self, event_ticker: str, ticker_a: str, ticker_b: str) -> None:
+    def add_pair(
+        self,
+        event_ticker: str,
+        ticker_a: str,
+        ticker_b: str,
+        *,
+        fee_type: str = "quadratic_with_maker_fees",
+        fee_rate: float = 0.0175,
+    ) -> None:
         """Register a pair of markets to monitor."""
         if any(p.event_ticker == event_ticker for p in self._pairs):
             return
-        pair = ArbPair(event_ticker=event_ticker, ticker_a=ticker_a, ticker_b=ticker_b)
+        pair = ArbPair(
+            event_ticker=event_ticker,
+            ticker_a=ticker_a,
+            ticker_b=ticker_b,
+            fee_type=fee_type,
+            fee_rate=fee_rate,
+        )
         self._pairs.append(pair)
         self._pairs_by_ticker.setdefault(ticker_a, []).append(pair)
         self._pairs_by_ticker.setdefault(ticker_b, []).append(pair)
@@ -111,7 +125,7 @@ class ArbitrageScanner:
             qty_a=no_a.quantity,
             qty_b=no_b.quantity,
             raw_edge=raw_edge,
-            fee_edge=fee_adjusted_edge(no_a.price, no_b.price),
+            fee_edge=fee_adjusted_edge(no_a.price, no_b.price, rate=pair.fee_rate),
             tradeable_qty=min(no_a.quantity, no_b.quantity),
             timestamp=datetime.now(UTC).isoformat(),
         )

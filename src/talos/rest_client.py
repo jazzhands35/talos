@@ -117,6 +117,16 @@ class KalshiRESTClient:
         data = await self._request("GET", f"/series/{series_ticker}")
         return Series.model_validate(data["series"])
 
+    async def get_fee_schedule(
+        self, series_ticker: str, *, show_historical: bool = False
+    ) -> list[dict[str, Any]]:
+        """Fetch fee change schedule for a series."""
+        params: dict[str, Any] = {"series_ticker": series_ticker}
+        if show_historical:
+            params["show_historical"] = "true"
+        data = await self._request("GET", "/series/fee_changes", params=params)
+        return data.get("fee_changes", [])
+
     async def get_orderbook(self, ticker: str, *, depth: int = 0) -> OrderBook:
         params: dict[str, Any] = {}
         if depth > 0:
@@ -152,6 +162,7 @@ class KalshiRESTClient:
         yes_price: int | None = None,
         count: int,
         post_only: bool = True,
+        order_group_id: str | None = None,
     ) -> Order:
         body: dict[str, Any] = {
             "ticker": ticker,
@@ -162,6 +173,8 @@ class KalshiRESTClient:
             "client_order_id": str(uuid.uuid4()),
             "post_only": post_only,
         }
+        if order_group_id is not None:
+            body["order_group_id"] = order_group_id
         if no_price is not None:
             body["no_price_dollars"] = f"{no_price / 100:.2f}"
         if yes_price is not None:
@@ -175,6 +188,25 @@ class KalshiRESTClient:
             count=count,
         )
         data = await self._request("POST", "/portfolio/orders", json=body)
+        return Order.model_validate(data["order"])
+
+    async def decrease_order(
+        self,
+        order_id: str,
+        *,
+        reduce_by: int | None = None,
+        reduce_to: int | None = None,
+    ) -> Order:
+        """Reduce an order's quantity without losing queue position.
+
+        Exactly one of ``reduce_by`` or ``reduce_to`` must be provided.
+        """
+        body: dict[str, Any] = {}
+        if reduce_by is not None:
+            body["reduce_by_fp"] = str(reduce_by)
+        if reduce_to is not None:
+            body["reduce_to_fp"] = str(reduce_to)
+        data = await self._request("POST", f"/portfolio/orders/{order_id}/decrease", json=body)
         return Order.model_validate(data["order"])
 
     async def cancel_order(self, order_id: str) -> Order:
@@ -284,6 +316,34 @@ class KalshiRESTClient:
             sample=dict(list(result.items())[:3]),
         )
         return result
+
+    # --- Order Groups ---
+
+    async def create_order_group(self, name: str, contracts_limit: int) -> str:
+        """Create an order group with a fill limit. Returns the order_group_id."""
+        data = await self._request(
+            "POST",
+            "/portfolio/order_groups",
+            json={"name": name, "contracts_limit_fp": str(contracts_limit)},
+        )
+        return data["order_group"]["order_group_id"]
+
+    async def get_order_groups(self) -> list[dict[str, Any]]:
+        """List active order groups."""
+        data = await self._request("GET", "/portfolio/order_groups")
+        return data.get("order_groups", [])
+
+    async def delete_order_group(self, order_group_id: str) -> None:
+        """Delete an order group."""
+        await self._request("DELETE", f"/portfolio/order_groups/{order_group_id}")
+
+    async def reset_order_group(self, order_group_id: str) -> None:
+        """Reset an order group's matched contracts counter."""
+        await self._request("POST", f"/portfolio/order_groups/{order_group_id}/reset")
+
+    async def trigger_order_group(self, order_group_id: str) -> None:
+        """Trigger an order group — cancels all orders in the group."""
+        await self._request("POST", f"/portfolio/order_groups/{order_group_id}/trigger")
 
     # --- Portfolio ---
 

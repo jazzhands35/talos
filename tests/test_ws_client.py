@@ -55,6 +55,19 @@ class TestSubscribeMessage:
         msg2 = client._build_subscribe("ticker", "MKT-2")
         assert msg2["id"] == msg1["id"] + 1
 
+    def test_builds_bulk_subscribe(self, client: KalshiWSClient) -> None:
+        """Phase 11: bulk subscribe uses market_tickers (plural)."""
+        msg = client._build_subscribe("orderbook_delta", market_tickers=["MKT-1", "MKT-2"])
+        assert msg["cmd"] == "subscribe"
+        assert msg["params"]["market_tickers"] == ["MKT-1", "MKT-2"]
+        assert "market_ticker" not in msg["params"]
+
+    def test_bulk_subscribe_takes_precedence(self, client: KalshiWSClient) -> None:
+        """market_tickers takes precedence over market_ticker."""
+        msg = client._build_subscribe("orderbook_delta", "SINGLE", market_tickers=["A", "B"])
+        assert msg["params"]["market_tickers"] == ["A", "B"]
+        assert "market_ticker" not in msg["params"]
+
 
 class TestUnsubscribeMessage:
     def test_builds_unsubscribe_command(self, client: KalshiWSClient) -> None:

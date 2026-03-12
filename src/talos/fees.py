@@ -10,21 +10,42 @@ from __future__ import annotations
 MAKER_FEE_RATE = 0.0175
 
 
-def quadratic_fee(no_price: int) -> float:
+def quadratic_fee(no_price: int, *, rate: float = MAKER_FEE_RATE) -> float:
     """Per-contract fee in cents using Kalshi's quadratic model."""
-    return no_price * (100 - no_price) * MAKER_FEE_RATE / 100
+    return no_price * (100 - no_price) * rate / 100
 
 
-def fee_adjusted_cost(no_price: int) -> float:
+def flat_fee(no_price: int, *, rate: float) -> float:
+    """Per-contract fee in cents using a flat percentage model."""
+    return no_price * rate
+
+
+def compute_fee(
+    no_price: int,
+    *,
+    fee_type: str = "quadratic_with_maker_fees",
+    rate: float = MAKER_FEE_RATE,
+) -> float:
+    """Dispatch fee calculation by type. Returns per-contract fee in cents."""
+    if fee_type in ("quadratic", "quadratic_with_maker_fees"):
+        return quadratic_fee(no_price, rate=rate)
+    if fee_type == "flat":
+        return flat_fee(no_price, rate=rate)
+    if fee_type in ("fee_free", "no_fee"):
+        return 0.0
+    return quadratic_fee(no_price, rate=rate)
+
+
+def fee_adjusted_cost(no_price: int, *, rate: float = MAKER_FEE_RATE) -> float:
     """Effective cost per contract including quadratic fill fee.
 
-    Fee is ``no_price × (100 - no_price) × 0.0175 / 100`` per contract,
+    Fee is ``no_price × (100 - no_price) × rate / 100`` per contract,
     charged at fill time.
     """
-    return no_price + quadratic_fee(no_price)
+    return no_price + quadratic_fee(no_price, rate=rate)
 
 
-def american_odds(no_price: int) -> float | None:
+def american_odds(no_price: int, *, rate: float = MAKER_FEE_RATE) -> float | None:
     """Fee-adjusted American odds for a NO contract.
 
     Uses fee-adjusted effective cost to compute risk/reward odds.
@@ -32,7 +53,7 @@ def american_odds(no_price: int) -> float | None:
     """
     if no_price <= 0 or no_price >= 100:
         return None
-    eff = fee_adjusted_cost(no_price)
+    eff = fee_adjusted_cost(no_price, rate=rate)
     win = 100 - eff
     if win <= 0:
         return None
@@ -41,14 +62,14 @@ def american_odds(no_price: int) -> float | None:
     return (win / eff) * 100  # underdog
 
 
-def fee_adjusted_edge(no_a: int, no_b: int) -> float:
+def fee_adjusted_edge(no_a: int, no_b: int, *, rate: float = MAKER_FEE_RATE) -> float:
     """Fee-adjusted edge for a NO+NO pair.
 
     Prices in cents.  Returns edge in cents (can be fractional).
     Fees are quadratic and charged at fill time on both legs,
     so edge = 100 - cost_a - fee_a - cost_b - fee_b.
     """
-    return 100 - fee_adjusted_cost(no_a) - fee_adjusted_cost(no_b)
+    return 100 - fee_adjusted_cost(no_a, rate=rate) - fee_adjusted_cost(no_b, rate=rate)
 
 
 def american_from_win_risk(win: float, risk: float) -> float | None:

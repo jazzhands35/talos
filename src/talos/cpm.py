@@ -49,10 +49,7 @@ def format_eta(minutes: float | None, partial: bool = False) -> str:
         text = "∞"
     elif m >= 60:
         hours = m / 60.0
-        if hours > 5.0:
-            text = f"{int(round(hours))}h"
-        else:
-            text = f"{hours:.1f}h"
+        text = f"{int(round(hours))}h" if hours > 5.0 else f"{hours:.1f}h"
     else:
         text = f"{max(1, int(round(m)))}m"
     if partial:

@@ -44,6 +44,7 @@ def main() -> None:
     from talos.bid_adjuster import BidAdjuster
     from talos.engine import TradingEngine
     from talos.game_manager import GameManager
+    from talos.lifecycle_feed import LifecycleFeed
     from talos.market_feed import MarketFeed
     from talos.orderbook import OrderBookManager
     from talos.persistence import load_saved_games, save_games
@@ -66,6 +67,7 @@ def main() -> None:
     adjuster = BidAdjuster(books, [], unit_size=10)
     portfolio_feed = PortfolioFeed(ws_client=ws)
     ticker_feed = TickerFeed(ws_client=ws)
+    lifecycle_feed = LifecycleFeed(ws_client=ws)
     game_mgr = GameManager(rest, feed, scanner)
 
     # Wire scanner + tracker to book updates
@@ -89,6 +91,7 @@ def main() -> None:
         initial_games=saved_games,
         portfolio_feed=portfolio_feed,
         ticker_feed=ticker_feed,
+        lifecycle_feed=lifecycle_feed,
     )
 
     # Wire suggestion audit log

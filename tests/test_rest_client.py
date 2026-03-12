@@ -646,3 +646,114 @@ class TestGetSettlements:
 
         _, kwargs = client._http.request.call_args
         assert kwargs["params"]["event_ticker"] == "EVT-1"
+
+
+class TestFeeSchedule:
+    async def test_get_fee_schedule(self, client: KalshiRESTClient):
+        mock_data = {
+            "fee_changes": [
+                {
+                    "effective_ts": "2026-01-01T00:00:00Z",
+                    "fee_type": "quadratic",
+                    "maker_fee_rate": 0.02,
+                }
+            ]
+        }
+        client._http = AsyncMock(spec=httpx.AsyncClient)
+        client._http.request = AsyncMock(return_value=_mock_response(200, mock_data))
+
+        result = await client.get_fee_schedule("SER-1")
+        assert len(result) == 1
+        assert result[0]["maker_fee_rate"] == 0.02
+
+
+class TestDecreaseOrder:
+    async def test_decrease_order_reduce_to(self, client: KalshiRESTClient):
+        mock_data = {
+            "order": {
+                "order_id": "ord-1",
+                "ticker": "MKT-A",
+                "side": "no",
+                "remaining_count_fp": "5",
+                "fill_count_fp": "5",
+                "initial_count_fp": "10",
+            }
+        }
+        client._http = AsyncMock(spec=httpx.AsyncClient)
+        client._http.request = AsyncMock(return_value=_mock_response(200, mock_data))
+
+        order = await client.decrease_order("ord-1", reduce_to=5)
+        assert order.remaining_count == 5
+
+        _, kwargs = client._http.request.call_args
+        assert kwargs["json"]["reduce_to_fp"] == "5"
+
+    async def test_decrease_order_reduce_by(self, client: KalshiRESTClient):
+        mock_data = {
+            "order": {
+                "order_id": "ord-1",
+                "ticker": "MKT-A",
+                "side": "no",
+                "remaining_count_fp": "7",
+                "fill_count_fp": "0",
+                "initial_count_fp": "10",
+            }
+        }
+        client._http = AsyncMock(spec=httpx.AsyncClient)
+        client._http.request = AsyncMock(return_value=_mock_response(200, mock_data))
+
+        order = await client.decrease_order("ord-1", reduce_by=3)
+        assert order.remaining_count == 7
+
+        _, kwargs = client._http.request.call_args
+        assert kwargs["json"]["reduce_by_fp"] == "3"
+
+
+class TestOrderGroups:
+    async def test_create_order_group(self, client: KalshiRESTClient):
+        mock_data = {"order_group": {"order_group_id": "og-123", "name": "test-group"}}
+        client._http = AsyncMock(spec=httpx.AsyncClient)
+        client._http.request = AsyncMock(return_value=_mock_response(200, mock_data))
+
+        group_id = await client.create_order_group("test-group", 10)
+        assert group_id == "og-123"
+
+        _, kwargs = client._http.request.call_args
+        assert kwargs["json"]["name"] == "test-group"
+        assert kwargs["json"]["contracts_limit_fp"] == "10"
+
+    async def test_create_order_with_group_id(self, client: KalshiRESTClient):
+        mock_data = {
+            "order": {
+                "order_id": "ord-1",
+                "ticker": "MKT-A",
+                "side": "no",
+                "order_group_id": "og-123",
+            }
+        }
+        client._http = AsyncMock(spec=httpx.AsyncClient)
+        client._http.request = AsyncMock(return_value=_mock_response(200, mock_data))
+
+        order = await client.create_order(
+            ticker="MKT-A", side="no", no_price=45, count=10, order_group_id="og-123"
+        )
+        assert order.order_group_id == "og-123"
+
+        _, kwargs = client._http.request.call_args
+        assert kwargs["json"]["order_group_id"] == "og-123"
+
+    async def test_create_order_without_group_id(self, client: KalshiRESTClient):
+        mock_data = {
+            "order": {
+                "order_id": "ord-1",
+                "ticker": "MKT-A",
+                "side": "no",
+            }
+        }
+        client._http = AsyncMock(spec=httpx.AsyncClient)
+        client._http.request = AsyncMock(return_value=_mock_response(200, mock_data))
+
+        await client.create_order(ticker="MKT-A", side="no", no_price=45, count=10)
+
+        _, kwargs = client._http.request.call_args
+        assert "order_group_id" not in kwargs["json"]

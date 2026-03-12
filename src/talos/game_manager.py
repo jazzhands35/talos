@@ -80,8 +80,36 @@ class GameManager:
         ticker_a = event.markets[0].ticker
         ticker_b = event.markets[1].ticker
 
-        pair = ArbPair(event_ticker=event.event_ticker, ticker_a=ticker_a, ticker_b=ticker_b)
-        self._scanner.add_pair(event.event_ticker, ticker_a, ticker_b)
+        # Fetch series for fee metadata (non-critical — default if it fails)
+        fee_type = "quadratic_with_maker_fees"
+        fee_rate = 0.0175
+        try:
+            series = await self._rest.get_series(event.series_ticker)
+            fee_type = series.fee_type
+            fee_rate = series.fee_multiplier
+            logger.info(
+                "series_fee_info",
+                series=event.series_ticker,
+                fee_type=fee_type,
+                fee_rate=fee_rate,
+            )
+        except Exception:
+            logger.warning(
+                "series_fee_fetch_failed",
+                series=event.series_ticker,
+                exc_info=True,
+            )
+
+        pair = ArbPair(
+            event_ticker=event.event_ticker,
+            ticker_a=ticker_a,
+            ticker_b=ticker_b,
+            fee_type=fee_type,
+            fee_rate=fee_rate,
+        )
+        self._scanner.add_pair(
+            event.event_ticker, ticker_a, ticker_b, fee_type=fee_type, fee_rate=fee_rate
+        )
         await self._feed.subscribe(ticker_a)
         await self._feed.subscribe(ticker_b)
         self._games[event.event_ticker] = pair

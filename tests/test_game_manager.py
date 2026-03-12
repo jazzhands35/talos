@@ -8,7 +8,7 @@ import pytest
 
 from talos.game_manager import GameManager, parse_kalshi_url
 from talos.market_feed import MarketFeed
-from talos.models.market import Event, Market
+from talos.models.market import Event, Market, Series
 from talos.rest_client import KalshiRESTClient
 from talos.scanner import ArbitrageScanner
 
@@ -42,6 +42,15 @@ class TestGameManager:
     def mock_rest(self) -> KalshiRESTClient:
         rest = MagicMock(spec=KalshiRESTClient)
         rest.get_event = AsyncMock()
+        rest.get_series = AsyncMock(
+            return_value=Series(
+                series_ticker="SER-1",
+                title="Test Series",
+                category="sports",
+                fee_type="quadratic_with_maker_fees",
+                fee_multiplier=0.0175,
+            )
+        )
         return rest
 
     @pytest.fixture()
@@ -98,7 +107,13 @@ class TestGameManager:
         event = self._make_event("EVT-1", ["TICK-A", "TICK-B"])
         mock_rest.get_event.return_value = event  # type: ignore[union-attr]
         await manager.add_game("EVT-1")
-        mock_scanner.add_pair.assert_called_once_with("EVT-1", "TICK-A", "TICK-B")  # type: ignore[union-attr]
+        mock_scanner.add_pair.assert_called_once_with(  # type: ignore[union-attr]
+            "EVT-1",
+            "TICK-A",
+            "TICK-B",
+            fee_type="quadratic_with_maker_fees",
+            fee_rate=0.0175,
+        )
 
     async def test_add_game_subscribes_both_tickers(
         self,

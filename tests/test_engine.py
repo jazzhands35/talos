@@ -953,8 +953,8 @@ class TestCheckImbalances:
         )
 
     @pytest.mark.asyncio
-    async def test_execute_rebalance_amend_passes_price(self):
-        """Partial reduce uses amend_order with the resting price."""
+    async def test_execute_rebalance_decrease_reduces_resting(self):
+        """Partial reduce uses decrease_order (preserves queue position)."""
         engine, rest = _engine_with_pair_and_books()
         ledger = engine.adjuster.get_ledger("EVT-1")
         # A: 30f + 20r @ 45c = 50, B: 40f = 40, delta = 10 → reduce A to 10 resting
@@ -971,31 +971,23 @@ class TestCheckImbalances:
                 "TK-A", order_id="ord-a", fill_count=30, remaining_count=20, no_price=45
             )
         )
-        rest.amend_order = AsyncMock(
-            return_value=(
-                _make_order("TK-A", order_id="ord-a"),
-                _make_order("TK-A", order_id="ord-a-amended"),
-            )
+        rest.decrease_order = AsyncMock(
+            return_value=_make_order("TK-A", order_id="ord-a", remaining_count=10)
         )
         await engine.approve_proposal(key)
 
         rest.get_order.assert_called_once_with("ord-a")
-        rest.amend_order.assert_called_once_with(
+        rest.decrease_order.assert_called_once_with(
             "ord-a",
-            ticker="TK-A",
-            no_price=45,
-            count=40,  # 30 filled + 10 target resting
+            reduce_to=10,
         )
 
     @pytest.mark.asyncio
-    async def test_execute_rebalance_amend_no_op_is_not_error(self):
-        """AMEND_ORDER_NO_OP is treated as success, not error."""
-        from talos.errors import KalshiAPIError
-
+    async def test_execute_rebalance_already_at_target(self):
+        """If remaining_count already at or below target, skip the decrease call."""
         engine, rest = _engine_with_pair_and_books()
         ledger = engine.adjuster.get_ledger("EVT-1")
         # A: 20f + 30r @ 45c = 50, B: 25f = 25, delta = 25
-        # target = max(20, 25) = 25, target_over_resting = 5 → partial amend
         ledger.record_fill(Side.A, 20, 45)
         ledger.record_resting(Side.A, "ord-a", 30, 45)
         ledger.record_fill(Side.B, 25, 48)
@@ -1003,46 +995,34 @@ class TestCheckImbalances:
         engine.check_imbalances()
         key = engine.proposal_queue.pending()[0].key
 
-        # Mock get_order to return fresh order state (still has remaining > target)
+        # Fresh order shows remaining already at target (fills arrived between
+        # proposal and execution)
         rest.get_order = AsyncMock(
             return_value=_make_order(
-                "TK-A", order_id="ord-a", fill_count=20, remaining_count=30, no_price=45
+                "TK-A", order_id="ord-a", fill_count=25, remaining_count=5, no_price=45
             )
         )
-        # Amend returns AMEND_ORDER_NO_OP (order already at target)
-        rest.amend_order = AsyncMock(
-            side_effect=KalshiAPIError(
-                400,
-                {
-                    "error": {
-                        "code": "AMEND_ORDER_NO_OP",
-                        "message": "AMEND_ORDER_NO_OP",
-                    }
-                },
-            )
-        )
+        rest.decrease_order = AsyncMock()
         notifications: list[tuple[str, str]] = []
         engine.on_notification = lambda msg, sev: notifications.append((msg, sev))
 
         await engine.approve_proposal(key)
 
-        # No-op treated as success — info notification, not error
-        assert any("no-op" in msg.lower() for msg, _ in notifications)
+        # Already at target — no decrease call, info notification
+        rest.decrease_order.assert_not_called()
+        assert any("already at target" in msg.lower() for msg, _ in notifications)
         assert not any(sev == "error" for _, sev in notifications)
 
     @pytest.mark.asyncio
-    async def test_execute_rebalance_uses_order_fill_count_not_aggregate(self):
-        """Bug fix: amend must use the specific order's fill_count, not the
-        ledger's aggregate (which includes fills from archived orders).
+    async def test_execute_rebalance_decrease_uses_target_resting(self):
+        """decrease_order uses target_resting directly (not order fill count).
 
-        Scenario: old orders filled 30, new order has 0 fills + 20 resting.
-        Ledger shows filled=30, resting=20, committed=50.
-        The amend should use the order's fill_count (0), not the aggregate (30).
+        With decrease_order, we pass reduce_to=target_resting. The old amend
+        path needed order.fill_count + target_resting, but decrease is simpler.
         """
         engine, rest = _engine_with_pair_and_books()
         ledger = engine.adjuster.get_ledger("EVT-1")
-        # Simulate: A has 30 fills (from old archived order) + 20 resting (new order)
-        # B has 40 fills. Delta = 50 - 40 = 10.
+        # A: 30f + 20r @ 45c = 50, B: 40f = 40, delta = 10 → target_resting = 10
         ledger.record_fill(Side.A, 30, 45)
         ledger.record_resting(Side.A, "ord-a-new", 20, 45)
         ledger.record_fill(Side.B, 40, 48)
@@ -1050,28 +1030,19 @@ class TestCheckImbalances:
         engine.check_imbalances()
         key = engine.proposal_queue.pending()[0].key
 
-        # Fresh order: the NEW order has fill_count=0, remaining=20
-        # (the 30 fills are from a different, now-archived order)
         rest.get_order = AsyncMock(
             return_value=_make_order(
                 "TK-A", order_id="ord-a-new", fill_count=0, remaining_count=20, no_price=45
             )
         )
-        rest.amend_order = AsyncMock(
-            return_value=(
-                _make_order("TK-A", order_id="ord-a-new"),
-                _make_order("TK-A", order_id="ord-a-new-amended"),
-            )
+        rest.decrease_order = AsyncMock(
+            return_value=_make_order("TK-A", order_id="ord-a-new", remaining_count=10)
         )
         await engine.approve_proposal(key)
 
-        # Should use order's fill_count (0) + target_resting (10) = 10
-        # NOT aggregate filled (30) + target_resting (10) = 40
-        rest.amend_order.assert_called_once_with(
+        rest.decrease_order.assert_called_once_with(
             "ord-a-new",
-            ticker="TK-A",
-            no_price=45,
-            count=10,  # 0 (order fills) + 10 (target resting)
+            reduce_to=10,
         )
 
     @pytest.mark.asyncio

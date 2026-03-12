@@ -46,6 +46,11 @@ class Market(BaseModel):
     volume: int | None = None
     open_interest: int | None = None
     last_price: int | None = None
+    settlement_ts: str | None = None
+    close_time: str | None = None
+    open_time: str | None = None
+    result: str = ""
+    market_type: str = "binary"
 
     @model_validator(mode="before")
     @classmethod
@@ -92,6 +97,10 @@ class Series(BaseModel):
     title: str
     category: str
     tags: list[str] = []
+    fee_type: str = "quadratic_with_maker_fees"
+    fee_multiplier: float = 0.0175
+    frequency: str = ""
+    settlement_sources: list[dict[str, Any]] = []
 
 
 class OrderBook(BaseModel):

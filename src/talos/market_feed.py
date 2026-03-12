@@ -90,6 +90,15 @@ class MarketFeed:
         self._subscribed_tickers.add(ticker)
         logger.info("market_feed_subscribe", ticker=ticker)
 
+    async def subscribe_bulk(self, tickers: list[str]) -> None:
+        """Subscribe to orderbook updates for multiple tickers in one command."""
+        new_tickers = [t for t in tickers if t not in self._subscribed_tickers]
+        if not new_tickers:
+            return
+        await self._ws.subscribe(_ORDERBOOK_CHANNEL, market_tickers=new_tickers)
+        self._subscribed_tickers.update(new_tickers)
+        logger.info("market_feed_subscribe_bulk", count=len(new_tickers), tickers=new_tickers)
+
     async def unsubscribe(self, ticker: str) -> None:
         """Unsubscribe and remove from book manager."""
         sid = self._ticker_to_sid.pop(ticker, None)

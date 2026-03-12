@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import structlog
 
-from talos.fees import fee_adjusted_cost
+from talos.fees import MAKER_FEE_RATE, fee_adjusted_cost
 from talos.models.adjustment import ProposedAdjustment
 from talos.models.strategy import ArbPair
 from talos.orderbook import OrderBookManager
@@ -130,19 +130,22 @@ class BidAdjuster:
             )
 
         # Profitability check (Principle 18)
+        rate = pair.fee_rate
         other_side = side.other
         if ledger.filled_count(other_side) > 0:
-            other_effective = fee_adjusted_cost(int(round(ledger.avg_filled_price(other_side))))
+            other_effective = fee_adjusted_cost(
+                int(round(ledger.avg_filled_price(other_side))), rate=rate
+            )
         elif ledger.resting_count(other_side) > 0:
             # Use top-of-market for other side (worst case / most conservative)
             other_ticker = pair.ticker_a if other_side is Side.A else pair.ticker_b
             other_best = self._books.best_ask(other_ticker)
             other_book_price = other_best.price if other_best else ledger.resting_price(other_side)
-            other_effective = fee_adjusted_cost(other_book_price)
+            other_effective = fee_adjusted_cost(other_book_price, rate=rate)
         else:
             other_effective = 0.0
 
-        this_effective = fee_adjusted_cost(new_price)
+        this_effective = fee_adjusted_cost(new_price, rate=rate)
         if other_effective > 0 and this_effective + other_effective >= 100:
             logger.info(
                 "jump_not_profitable",
@@ -369,6 +372,13 @@ class BidAdjuster:
 
     # ── Internal helpers ────────────────────────────────────────────
 
+    def _fee_rate_for(self, event_ticker: str) -> float:
+        """Look up the fee rate for a pair by event ticker."""
+        for pair, _ in self._ticker_map.values():
+            if pair.event_ticker == event_ticker:
+                return pair.fee_rate
+        return MAKER_FEE_RATE
+
     def _is_jumped(self, ticker: str, ledger: PositionLedger, side: Side) -> bool:
         """Check if a side has been jumped (book price > resting price)."""
         if ledger.resting_order_id(side) is None:
@@ -407,8 +417,9 @@ class BidAdjuster:
         else:
             return True, ""
 
-        effective_this = fee_adjusted_cost(new_price)
-        effective_other = fee_adjusted_cost(int(round(other_price)))
+        rate = self._fee_rate_for(ledger.event_ticker)
+        effective_this = fee_adjusted_cost(new_price, rate=rate)
+        effective_other = fee_adjusted_cost(int(round(other_price)), rate=rate)
         if effective_this + effective_other >= 100:
             return (
                 False,

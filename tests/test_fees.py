@@ -7,9 +7,11 @@ import pytest
 from talos.fees import (
     MAKER_FEE_RATE,
     american_odds,
+    compute_fee,
     fee_adjusted_cost,
     fee_adjusted_edge,
     fee_adjusted_profit_matched,
+    flat_fee,
     quadratic_fee,
     scenario_pnl,
 )
@@ -239,3 +241,50 @@ class TestFeeAdjustedProfitMatched:
         """100 matched, cost 1750+8050, fees 26+28 → net 146¢."""
         profit = fee_adjusted_profit_matched(100, 1750, 8050, 26, 28)
         assert profit == pytest.approx(146)
+
+
+class TestDynamicFeeRate:
+    """Phase 9: fee functions accept a custom rate parameter."""
+
+    def test_quadratic_fee_with_custom_rate(self) -> None:
+        default = quadratic_fee(50)
+        custom = quadratic_fee(50, rate=0.02)
+        assert custom > default  # higher rate → higher fee
+        assert custom == pytest.approx(50 * 50 * 0.02 / 100)
+
+    def test_fee_adjusted_cost_with_custom_rate(self) -> None:
+        default = fee_adjusted_cost(45)
+        custom = fee_adjusted_cost(45, rate=0.03)
+        assert custom > default
+
+    def test_fee_adjusted_edge_with_custom_rate(self) -> None:
+        default_edge = fee_adjusted_edge(45, 48)
+        custom_edge = fee_adjusted_edge(45, 48, rate=0.03)
+        assert custom_edge < default_edge  # higher fees → less edge
+
+    def test_american_odds_with_custom_rate(self) -> None:
+        default = american_odds(50)
+        custom = american_odds(50, rate=0.03)
+        assert default is not None and custom is not None
+        assert custom < default  # higher fee → worse odds
+
+    def test_default_rate_is_backward_compatible(self) -> None:
+        """All functions produce same results when rate is omitted."""
+        assert quadratic_fee(45) == quadratic_fee(45, rate=MAKER_FEE_RATE)
+        assert fee_adjusted_cost(45) == fee_adjusted_cost(45, rate=MAKER_FEE_RATE)
+        assert fee_adjusted_edge(45, 48) == fee_adjusted_edge(45, 48, rate=MAKER_FEE_RATE)
+
+    def test_flat_fee(self) -> None:
+        assert flat_fee(50, rate=0.02) == pytest.approx(50 * 0.02)
+
+    def test_compute_fee_dispatches_quadratic(self) -> None:
+        assert compute_fee(50, fee_type="quadratic_with_maker_fees") == pytest.approx(
+            quadratic_fee(50)
+        )
+
+    def test_compute_fee_dispatches_flat(self) -> None:
+        assert compute_fee(50, fee_type="flat", rate=0.02) == pytest.approx(flat_fee(50, rate=0.02))
+
+    def test_compute_fee_dispatches_fee_free(self) -> None:
+        assert compute_fee(50, fee_type="fee_free") == 0.0
+        assert compute_fee(50, fee_type="no_fee") == 0.0

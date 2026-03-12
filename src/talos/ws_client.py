@@ -66,10 +66,13 @@ class KalshiWSClient:
         self,
         channel: str,
         market_ticker: str | None = None,
+        market_tickers: list[str] | None = None,
         **extra_params: Any,
     ) -> dict[str, Any]:
         params: dict[str, Any] = {"channels": [channel]}
-        if market_ticker is not None:
+        if market_tickers is not None:
+            params["market_tickers"] = market_tickers
+        elif market_ticker is not None:
             params["market_ticker"] = market_ticker
         params.update(extra_params)
         return {
@@ -141,6 +144,7 @@ class KalshiWSClient:
         self,
         channel: str,
         market_ticker: str | None = None,
+        market_tickers: list[str] | None = None,
         **extra_params: Any,
     ) -> None:
         """Subscribe to a channel, optionally for a specific market.
@@ -148,14 +152,22 @@ class KalshiWSClient:
         Args:
             channel: WS channel name (e.g. "orderbook_delta", "user_orders").
             market_ticker: Specific market. None for global subscription.
+            market_tickers: Multiple markets in one command (bulk subscribe).
             **extra_params: Additional subscribe params (e.g. skip_ticker_ack).
         """
         if not self._ws:
             msg = "WebSocket not connected"
             raise RuntimeError(msg)
-        message = self._build_subscribe(channel, market_ticker, **extra_params)
+        message = self._build_subscribe(
+            channel, market_ticker, market_tickers=market_tickers, **extra_params
+        )
         await self._ws.send(json.dumps(message))
-        logger.debug("ws_subscribe_sent", channel=channel, market_ticker=market_ticker)
+        logger.debug(
+            "ws_subscribe_sent",
+            channel=channel,
+            market_ticker=market_ticker,
+            market_tickers=market_tickers,
+        )
 
     async def unsubscribe(self, sids: list[int]) -> None:
         """Unsubscribe from subscriptions by sid."""

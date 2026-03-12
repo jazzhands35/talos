@@ -94,6 +94,43 @@ class TestEvent:
         assert e.markets[0].ticker == "KXBTC-26MAR-T50000"
 
 
+class TestMarketEnrichedFields:
+    """Phase 11: Market model enrichment."""
+
+    def test_settlement_ts_captured(self) -> None:
+        data = {
+            "ticker": "MKT-1",
+            "event_ticker": "EVT-1",
+            "title": "Test",
+            "status": "open",
+            "settlement_ts": "2026-03-15T12:00:00Z",
+            "close_time": "2026-03-15T11:00:00Z",
+        }
+        m = Market.model_validate(data)
+        assert m.settlement_ts == "2026-03-15T12:00:00Z"
+        assert m.close_time == "2026-03-15T11:00:00Z"
+
+    def test_result_and_market_type(self) -> None:
+        data = {
+            "ticker": "MKT-1",
+            "event_ticker": "EVT-1",
+            "title": "Test",
+            "status": "determined",
+            "result": "yes",
+            "market_type": "binary",
+        }
+        m = Market.model_validate(data)
+        assert m.result == "yes"
+        assert m.market_type == "binary"
+
+    def test_defaults(self) -> None:
+        data = {"ticker": "MKT-1", "event_ticker": "EVT-1", "title": "T", "status": "open"}
+        m = Market.model_validate(data)
+        assert m.settlement_ts is None
+        assert m.result == ""
+        assert m.market_type == "binary"
+
+
 class TestSeries:
     def test_parse_series_json(self) -> None:
         data = {
@@ -105,6 +142,24 @@ class TestSeries:
         s = Series.model_validate(data)
         assert s.series_ticker == "KXBTC"
         assert "bitcoin" in s.tags
+
+    def test_fee_type_and_multiplier(self) -> None:
+        data = {
+            "series_ticker": "KXMLB",
+            "title": "MLB Games",
+            "category": "Sports",
+            "fee_type": "flat",
+            "fee_multiplier": 0.02,
+        }
+        s = Series.model_validate(data)
+        assert s.fee_type == "flat"
+        assert s.fee_multiplier == 0.02
+
+    def test_fee_defaults(self) -> None:
+        data = {"series_ticker": "SER-1", "title": "Test", "category": "sports"}
+        s = Series.model_validate(data)
+        assert s.fee_type == "quadratic_with_maker_fees"
+        assert s.fee_multiplier == 0.0175
 
 
 class TestOrderBook:
