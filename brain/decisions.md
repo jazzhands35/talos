@@ -56,19 +56,9 @@ Split into pure state machine + async orchestrator. See [[patterns#Pure state + 
 
 ## 2026-03-07 — Position-aware bid adjustment: safety model
 
-**Context:** Planning automated bid adjustment when resting orders get "jumped" (outbid). A previous attempt at similar automation failed because the system lost track of both resting orders and fills, leading to cascading over-placement on one side — the exact failure mode that delta-neutral arbitrage cannot tolerate.
+**Context:** Planning automated bid adjustment when resting orders get "jumped" (outbid). A previous system failed due to cascading over-placement from lost position tracking.
 
-**Decision:** Established a set of structural safety rules that must be enforced before any bid adjustment automation is implemented. These are captured as Principles 15–19.
-
-Key design choices and why:
-- **Unit-based atomic bidding** (Principle 16): Orders are placed in fixed units (10 contracts). A "pair" is one unit per side. No new pair until both sides fully fill. This prevents the "just place a few more" drift that caused the previous failure.
-- **Amend over cancel-and-replace** (Principle 17): Use the Kalshi amend API (`POST /portfolio/orders/{id}/amend`) to change price in a single atomic call. The previous system used cancel-then-place as two separate operations, creating timing windows where the position check saw inconsistent state and triggered further placements. Amend eliminates this class of bug entirely — there's never a moment with zero or two orders on the same side. For partial fills, amend moves only the unfilled portion to the new price queue.
-- **Fee-adjusted profitability gate** (Principle 18): Every bid placement or amendment must pass a fee-adjusted arb check. This prevents chasing a jumped price into unprofitable territory.
-- **Most-behind-first tiebreaker** (Principle 19): When both sides have partial fills and both get jumped, the side needing more fills adjusts first. This minimizes worst-case delta.
-- **Semi-auto first, then full-auto** (Principle 2): The system will propose actions for human approval before executing. Graduation to full-auto only after trust is established through observation.
-- **Fractional completion bids**: Partial fills may be topped up with a fractional bid at the new price, provided total resting + filled ≤ 1 unit and the arb remains profitable.
-
-**Rationale:** Every rule traces back to a specific failure mode from the previous system or a worst-case scenario analysis. The goal is to make unsafe states structurally impossible rather than relying on runtime checks that can be bypassed by timing issues. See [[principles#15. Position Accuracy Is Non-Negotiable]] through [[principles#19. Most-Behind-First on Dual Jumps]].
+**Decision:** Established structural safety rules captured as [[principles#15. Position Accuracy Is Non-Negotiable]] through [[principles#19. Most-Behind-First on Dual Jumps]]: unit-based atomic bidding (P16), amend over cancel-and-replace (P17), fee-adjusted profitability gate (P18), most-behind-first tiebreaker (P19), semi-auto first (P2). Plus fractional completion bids (resting + filled ≤ 1 unit). Every rule traces to a specific prior failure mode.
 
 ## 2026-03-08 — TradingEngine extraction and position unification
 
@@ -104,13 +94,9 @@ Key changes:
 
 ## 2026-03-10 — Position imbalance detection and two-step rebalance
 
-**Context:** User had 129 contracts committed on side A vs 107 on side B — a 22-contract imbalance exceeding the 10-contract unit size. Delta neutrality is critical for arb safety. Initially shipped detection-only (approving dismissed without acting). Extended with a two-step executable rebalance after fill imbalances from runaway bidding showed "manual action needed" on every approval.
-**Decision:** Two-step rebalance maintaining delta neutrality at every intermediate state:
-1. **Reduce over-side resting** (cancel or amend) — shrinks the larger side first
-2. **Catch-up bid on under-side** — grows the smaller side (capped at one unit, requires book price > 0 and no existing resting on under-side)
+**Context:** 129 vs 107 contract imbalance (22 contracts, exceeding unit size). Initially detection-only; extended to executable rebalance.
 
-Equalization target: `max(over_filled, under_committed)` — the minimum both sides can converge to (can't unfill, can't cancel under-side orders). If step 1 fails, step 2 is skipped (fail-safe). Step 2 passes through `is_placement_safe()` before placing. Multi-cycle convergence for gaps > unit_size.
-**Rationale:** Executing reduce-first/catch-up-second means the imbalance either stays the same (step 2 skipped) or decreases — never temporarily increases. The equalization formula naturally handles all five scenarios: cancel+catchup, catchup-only, cancel-only, partial-reduce, and multi-cycle convergence. See [[principles#16. Delta Neutral by Construction]] and [[principles#22. End-to-End Before Done]].
+**Decision:** Two-step rebalance: (1) reduce over-side resting, (2) catch-up bid on under-side. Equalization target: `max(over_filled, under_committed)`. Multi-cycle convergence for gaps > unit_size. See [[patterns#Multi-step execution with fail-safe ordering]] for ordering rationale and [[principles#16. Delta Neutral by Construction]].
 
 ## 2026-03-10 — Status column for engine decision transparency (P20)
 
@@ -120,28 +106,21 @@ Equalization target: `max(over_filled, under_committed)` — the minimum both si
 
 ## 2026-03-10 — Runaway bidding: safety gate wiring and Kalshi-as-truth
 
-**Context:** Live runaway bidding — positions showed 10/20 and 10/30 (2-3x the intended unit of resting orders per side). Three compounding gaps: (1) `is_placement_safe()` existed and was well-tested but was never called from any bid placement path; (2) after placing orders, the ledger wasn't updated until the next API sync (~10s), so the proposer saw stale state (resting=0) and created duplicate proposals; (3) after approving a proposal, the stability timer wasn't reset, allowing immediate re-proposal.
+**Context:** Live runaway — positions at 10/20 and 10/30. Three gaps: (1) `is_placement_safe()` never called from `place_bids()`; (2) stale ledger after placement → duplicate proposals; (3) no stability reset after approval.
 
-**Decision:** Applied two fixes (not three — the third was tried and reverted):
-- **Fix 1: Hard safety gate in `place_bids()`** — calls `is_placement_safe()` on both sides before sending any orders. Also updated `is_placement_safe()` to use modular arithmetic (`filled_count % unit_size`) so re-entry is allowed after a complete unit while still blocking duplicates.
-- **Fix 2: Stability reset on approval** — `record_approval()` on `OpportunityProposer` resets the stability timer after a bid is approved, forcing the proposer to re-observe stable edge for `stability_seconds` before re-proposing. This covers the sync gap between placement and the next `sync_from_orders`.
-- **Reverted: Optimistic ledger update** — initially added `record_resting()` calls after each `create_order`, but this caused false discrepancies when Kalshi's API hadn't reflected the new order yet ("ledger has resting order X, kalshi shows none"). Removed in favor of trusting Kalshi as source of truth (P7/P21). The hard gate + stability reset are sufficient without it.
-
-**Rationale:** The runaway happened because `is_placement_safe()` was built during Phase 3 (PositionLedger) but the bid placement path (`place_bids`) predated it and was never wired. The optimistic update was a tempting defense-in-depth layer but violated P7 (Trust Kalshi) — it created a temporary mismatch between ledger and API that triggered `sync_from_orders` discrepancy detection, generating confusing HOLD proposals. Two defenses (hard gate + stability reset) are sufficient: the gate catches structural violations, and the stability reset provides the time buffer for `sync_from_orders` to catch up. See [[principles#1. Safety Above All]], [[principles#16. Delta Neutral by Construction]], [[principles#7. Kalshi Is the Source of Truth — Always]].
+**Decision:** Two fixes: (1) hard safety gate in `place_bids()` calling `is_placement_safe()` with modular arithmetic for re-entry; (2) stability reset on approval via `record_approval()`. Reverted optimistic ledger update — violated P7, caused false discrepancies. See [[patterns#Stability reset as sync-gap buffer]] and [[principles#7. Kalshi Is the Source of Truth — Always]].
 
 ## 2026-03-10 — Positions API as second authoritative source for fills
 
-**Context:** DEDGAL event had 30+10 fills and 2 resting orders on Kalshi, but Talos showed all dashes. Root cause: `GET /portfolio/orders` archives old executed/cancelled orders. When filled orders are archived (no longer returned), `sync_from_orders` computes 0 fills → ledger empty → UI shows dashes. This is the worst failure mode for P7/P15 — the operator is completely blind to real positions.
-**Decision:** Added `GET /portfolio/positions` as a second data source in `refresh_account`. The positions endpoint returns `position` (signed contract count, negative = NO contracts) and `total_traded` — and crucially, **never archives**. `sync_from_positions()` patches fill counts when they exceed what orders reported. Runs after `sync_from_orders` in every refresh cycle.
-**Rationale:** Two complementary data sources cover each other's gaps: orders API gives per-order detail (prices, IDs, resting status) but archives; positions API gives aggregate counts (total fills) and never archives. Running orders-first then positions-second gives the best of both. The `sync_from_positions` method only ratchets fills upward (never decreases), so it can't introduce false data. See [[principles#7. Kalshi Is the Source of Truth — Always]] and [[principles#15. Position Accuracy Is Non-Negotiable]].
+**Context:** DEDGAL event: Kalshi had 30+10 fills but Talos showed dashes — `GET /portfolio/orders` archived old orders, so `sync_from_orders` computed 0 fills.
 
-**Addendum (same day):** The initial implementation still had two bugs: (1) `sync_from_orders` flagged a "fill decrease" discrepancy when orders-API fills (0, due to archival) were less than positions-augmented fills (10) — a false positive every cycle. (2) Two resting orders on the same side (valid on Kalshi) were flagged as a discrepancy. Fix: rewrote `sync_from_orders` to use **monotonic fills** (never decrease, take max of orders vs current ledger) and **sum multiple resting orders** instead of flagging. Removed all discrepancy-setting from `sync_from_orders` — the two-source pattern is self-healing. See [[patterns#Monotonic state updates across data sources]].
+**Decision:** Added `GET /portfolio/positions` as second data source (never archives). `sync_from_positions()` patches fill counts when they exceed orders-reported values. Runs after `sync_from_orders` each cycle. Addendum: rewrote to use monotonic fills and sum multiple resting orders (see [[patterns#Monotonic state updates across data sources]]). See [[principles#7. Kalshi Is the Source of Truth — Always]].
 
 ## 2026-03-10 — Verify after every order action
 
-**Context:** Rebalance step 1 (amend) returned `AMEND_ORDER_NO_OP` — the order was already at the target count due to fills between proposal and execution. The old code treated this as a hard error, showed a failure toast, and returned early. The next `check_imbalances` cycle saw delta < unit_size and skipped — never confirming the action's outcome. The user's insight: the review must verify reality, not trust the model.
-**Decision:** Added `_verify_after_action()` — a full two-source sync (orders + positions) that runs immediately after every order action (rebalance, adjustment, bid). Also handle `AMEND_ORDER_NO_OP` as success via `_is_no_op()` helper. Wired into `approve_proposal` for all three action types.
-**Rationale:** The 10s polling cycle is too slow to confirm action outcomes. The system was assuming success/failure based on the API response alone, without verifying the resulting state. Immediate verification means the ledger reflects reality within milliseconds of acting, not 10 seconds later. See [[patterns#Verify after every order action]] and [[principles#7. Kalshi Is the Source of Truth — Always]].
+**Context:** Rebalance returned `AMEND_ORDER_NO_OP` (fills resolved the imbalance between proposal and execution). Old code treated this as error and never confirmed the outcome.
+
+**Decision:** Added `_verify_after_action()` — immediate two-source sync after every order action. `AMEND_ORDER_NO_OP` treated as success via `_is_no_op()`. See [[patterns#Verify after every order action]].
 
 ## 2026-03-12 — Rebalance step 1: decrease_order replaces amend_order
 
