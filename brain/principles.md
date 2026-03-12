@@ -82,6 +82,24 @@ A missed opportunity is acceptable. A bad trade is not. Never skip validation or
 
 Talos does one thing: cross-event NO+NO arbitrage. Build for this specific strategy, not a generic framework. If scope expands later, refactor then.
 
+## 13. Test Purity Drives Architecture
+
+When designing a module, split it until the core logic can be tested with zero mocks.
+
+- Separate pure state machines from async orchestrators at the I/O boundary
+- The pure side receives data, updates state, answers queries — no imports of httpx, websockets, or asyncio
+- The orchestrator side owns I/O lifecycle and routes data to the pure side
+- See [[patterns#Pure state + async orchestrator split]] for implementation details
+
+## 14. Parse at the Boundary
+
+Raw data is converted to domain types at the system boundary (API response parsing, WS message dispatch). Interior code never handles raw formats.
+
+- Model validators convert API quirks (raw arrays, string enums) at parse time
+- REST methods return Pydantic models, never raw dicts
+- If business logic needs to interpret a raw format, the boundary is in the wrong place
+- Verify model schemas against actual API responses, not documentation alone — mock-based tests can't catch schema drift
+
 ## 15. Position Accuracy Is Non-Negotiable
 
 **Talos must have a 100% accurate picture of positions and resting orders at all times. Without this, every suggestion, safety gate, and action is based on a lie.**
@@ -146,6 +164,15 @@ When the system evaluates a market change and decides not to act, that decision 
 
 **Why:** A jumped order with no proposal looks identical to a system that crashed, lost its WebSocket, or has a bug. The operator can't trust the system unless non-action is as transparent as action. Evidence: the `sync_from_orders` discrepancy bug silently blocked all proposals — indistinguishable from "working correctly, nothing to do."
 
+## 21. Authoritative Data Over Computed Data
+
+When an authoritative source provides exact values (e.g., Kalshi's `maker_fees` on orders, `fee_cost` on fills), prefer those over computing them from formulas — even if the formula is correct.
+
+- Computed values are susceptible to rounding, formula drift, and parameter staleness
+- API-provided actuals reflect edge cases the formula may not model (rounding modes, fee rebates, accumulator adjustments)
+- Use formulas for projections and estimates; use actuals for P&L and settled amounts
+- Applied in: `sync_from_orders` uses `order.maker_fees` for fee tracking, not `quadratic_fee(price)`. See [[decisions#2026-03-09 — Quadratic fee model and fill-time charging]]
+
 ## 22. End-to-End Before Done
 
 A feature is not complete until the operator can trigger it, see it, and act on it — from input to execution. Every feature must ship with its full interaction chain: activation path → visible output → actionable response → execution.
@@ -164,30 +191,3 @@ Each required a follow-up fix to wire the missing segment. The pattern is always
 - [ ] Does the response execute? (API call, state change, order mutation)
 
 If any box is unchecked, the feature is not done.
-
-## 13. Test Purity Drives Architecture
-
-When designing a module, split it until the core logic can be tested with zero mocks.
-
-- Separate pure state machines from async orchestrators at the I/O boundary
-- The pure side receives data, updates state, answers queries — no imports of httpx, websockets, or asyncio
-- The orchestrator side owns I/O lifecycle and routes data to the pure side
-- See [[patterns#Pure state + async orchestrator split]] for implementation details
-
-## 14. Parse at the Boundary
-
-Raw data is converted to domain types at the system boundary (API response parsing, WS message dispatch). Interior code never handles raw formats.
-
-- Model validators convert API quirks (raw arrays, string enums) at parse time
-- REST methods return Pydantic models, never raw dicts
-- If business logic needs to interpret a raw format, the boundary is in the wrong place
-- Verify model schemas against actual API responses, not documentation alone — mock-based tests can't catch schema drift
-
-## 21. Authoritative Data Over Computed Data
-
-When an authoritative source provides exact values (e.g., Kalshi's `maker_fees` on orders, `fee_cost` on fills), prefer those over computing them from formulas — even if the formula is correct.
-
-- Computed values are susceptible to rounding, formula drift, and parameter staleness
-- API-provided actuals reflect edge cases the formula may not model (rounding modes, fee rebates, accumulator adjustments)
-- Use formulas for projections and estimates; use actuals for P&L and settled amounts
-- Applied in: `sync_from_orders` uses `order.maker_fees` for fee tracking, not `quadratic_fee(price)`. See [[decisions#2026-03-09 — Quadratic fee model and fill-time charging]]

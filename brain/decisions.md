@@ -143,14 +143,6 @@ Equalization target: `max(over_filled, under_committed)` — the minimum both si
 **Decision:** Added `_verify_after_action()` — a full two-source sync (orders + positions) that runs immediately after every order action (rebalance, adjustment, bid). Also handle `AMEND_ORDER_NO_OP` as success via `_is_no_op()` helper. Wired into `approve_proposal` for all three action types.
 **Rationale:** The 10s polling cycle is too slow to confirm action outcomes. The system was assuming success/failure based on the API response alone, without verifying the resulting state. Immediate verification means the ledger reflects reality within milliseconds of acting, not 10 seconds later. See [[patterns#Verify after every order action]] and [[principles#7. Kalshi Is the Source of Truth — Always]].
 
-## 2026-03-12 — Fresh order fetch before amend (aggregate vs instance fills)
-
-**Context:** Rebalance proposed "reduce B resting 50 → 10" — correct analysis of a 40-contract imbalance. Upon approval, `_execute_rebalance` computed `new_total = rebalance.filled_count + target_resting`. But `rebalance.filled_count` came from the ledger's aggregate fill count (populated by `sync_from_orders` + `sync_from_positions`), which included fills from archived orders. The *current* order had `fill_count=0` (freshly placed after old orders were archived), so `new_total` equaled the order's existing total → Kalshi returned `AMEND_ORDER_NO_OP` → system reported "already at target".
-
-**Decision:** Before step 1 of `_execute_rebalance`, fetch fresh order state via `get_order(order_id)`. Use `fresh_order.fill_count` (the specific order's fills) instead of `rebalance.filled_count` (aggregate). Also skip the amend entirely if `fresh_order.remaining_count <= target_resting` — the market may have already resolved the imbalance via fills.
-
-**Rationale:** The Kalshi amend API's `count` parameter means "new total = fill_count + desired_remaining" for the *specific order being amended*. Aggregate fill data is correct for position display and safety gates, but wrong for order-specific API calls. This is a more specific instance of P7/P15 — the aggregate is truth about the position, but the order's own state is truth for the amend. See [[patterns#Order-specific APIs need order-specific data]] and [[principles#7. Kalshi Is the Source of Truth — Always]].
-
 ## 2026-03-12 — Rebalance step 1: decrease_order replaces amend_order
 
 **Context:** Rebalance step 1 used `amend_order` to reduce resting quantity, requiring computation of `fill_count + target_resting` for the specific order. This was fragile — aggregate vs instance fill counts caused `AMEND_ORDER_NO_OP` bugs (see above). The Kalshi `decrease_order` API (`POST /portfolio/orders/{id}/decrease`) is purpose-built for quantity-only reductions: just pass `reduce_to=target` or `reduce_by=N`.
