@@ -43,7 +43,7 @@ Single source of truth for both UI display and bid adjustment safety gates. `com
 4. **Execution** (Layer 4) — **COMPLETE**
    `TopOfMarketTracker`: detects penny jumps on resting NO bids in real-time via WS deltas. TUI shows toast alerts and `!!` prefix in Q columns.
    `PositionLedger`: per-event single source of truth for filled counts, resting orders, avg prices, and safety gates. Pure state machine (no I/O). Also hosts `compute_display_positions()` for UI display.
-   `BidAdjuster`: pure decision logic that responds to jumps — queries ledger, checks profitability gate (P18), enforces most-behind-first tiebreaker (P19), proposes amend adjustments. Uses `rest_client.amend_order()` for atomic price changes (P17).
+   `BidAdjuster`: mixed pure/async — pure decision logic (`evaluate_jump`) that queries ledger, checks profitability gate (P18), enforces most-behind-first tiebreaker (P19), and proposes amend adjustments; async execution (`execute`) that calls `rest_client.amend_order()` for atomic price changes (P17).
    `TradingEngine`: central orchestrator owning all subsystem references, mutable caches (queue, orders, CPM), and polling/action methods. Communicates with the UI via `on_notification` callback. Proposals flow through `ProposalQueue` for operator approval. Extracted from `TalosApp` to enable headless testing and future API-driven control.
    Bid modal uses `all_snapshots` fallback so any monitored pair is always selectable.
 5. **UI (Textual TUI)** (Layer 5) — **COMPLETE**
