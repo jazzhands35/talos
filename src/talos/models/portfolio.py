@@ -78,28 +78,83 @@ class Position(BaseModel, extra="ignore"):
 
 
 class EventPosition(BaseModel, extra="ignore"):
-    """An aggregate position across an event (from Kalshi event_positions)."""
+    """An aggregate position across an event (from Kalshi event_positions).
+
+    Rich fields give Kalshi's live P&L per event — authoritative data (P21).
+    """
 
     event_ticker: str
-
-
-class Settlement(BaseModel):
-    """A settled market position."""
-
-    ticker: str
-    settlement_price: int
-    payout: int
-    settled_time: str
+    total_cost: int = 0
+    total_cost_shares: int = 0
+    event_exposure: int = 0
+    realized_pnl: int = 0
+    resting_orders_count: int = 0
+    fees_paid: int = 0
 
     @model_validator(mode="before")
     @classmethod
     def _migrate_fp(cls, data: Any) -> Any:
         if not isinstance(data, dict):
             return data
-        if "settlement_value_dollars" in data and data["settlement_value_dollars"] is not None:
-            data["settlement_price"] = _dollars_to_cents(data["settlement_value_dollars"])
-        if "payout_dollars" in data and data["payout_dollars"] is not None:
-            data["payout"] = _dollars_to_cents(data["payout_dollars"])
+        for old, new in [
+            ("total_cost", "total_cost_dollars"),
+            ("event_exposure", "event_exposure_dollars"),
+            ("realized_pnl", "realized_pnl_dollars"),
+            ("fees_paid", "fees_paid_dollars"),
+        ]:
+            if new in data and data[new] is not None:
+                data[old] = _dollars_to_cents(data[new])
+        if "total_cost_shares_fp" in data and data["total_cost_shares_fp"] is not None:
+            data["total_cost_shares"] = _fp_to_int(data["total_cost_shares_fp"])
+        if "resting_orders_count_fp" in data and data["resting_orders_count_fp"] is not None:
+            data["resting_orders_count"] = _fp_to_int(data["resting_orders_count_fp"])
+        return data
+
+
+class Settlement(BaseModel, extra="ignore"):
+    """A settled market from GET /portfolio/settlements.
+
+    CAUTION: Mixed units in the same response!
+    - ``revenue`` is an integer in cents (NOT a dollars string)
+    - ``fee_cost`` is a dollars string (NOT a cents integer)
+    """
+
+    ticker: str
+    event_ticker: str = ""
+    market_result: str = ""
+    revenue: int = 0
+    fee_cost: int = 0
+    yes_count: int = 0
+    no_count: int = 0
+    yes_total_cost: int = 0
+    no_total_cost: int = 0
+    settled_time: str = ""
+    value: int | None = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def _migrate_fp(cls, data: Any) -> Any:
+        if not isinstance(data, dict):
+            return data
+        # revenue is already cents integer — leave it
+        # fee_cost is a dollars string — convert to cents
+        if "fee_cost" in data and isinstance(data["fee_cost"], str):
+            data["fee_cost"] = _dollars_to_cents(data["fee_cost"])
+        for old, new in [
+            ("yes_total_cost", "yes_total_cost_dollars"),
+            ("no_total_cost", "no_total_cost_dollars"),
+        ]:
+            if new in data and data[new] is not None:
+                data[old] = _dollars_to_cents(data[new])
+        for old, new in [
+            ("yes_count", "yes_count_fp"),
+            ("no_count", "no_count_fp"),
+        ]:
+            if new in data and data[new] is not None:
+                data[old] = _fp_to_int(data[new])
+        # value (per-contract payout) — may be dollars string
+        if "value_dollars" in data and data["value_dollars"] is not None:
+            data["value"] = _dollars_to_cents(data["value_dollars"])
         return data
 
 

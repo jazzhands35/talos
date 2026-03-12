@@ -32,6 +32,7 @@ class MarketFeed:
         self._subscribed_tickers: set[str] = set()
         self._ticker_to_sid: dict[str, int] = {}
         self._ws.on_message(_ORDERBOOK_CHANNEL, self._on_message)
+        self._ws.on_seq_gap(self._on_seq_gap)
         self.on_book_update: Callable[[str], None] | None = None
 
     async def _on_message(
@@ -56,6 +57,28 @@ class MarketFeed:
 
         if self.on_book_update:
             self.on_book_update(ticker)
+
+    async def _on_seq_gap(self, sid: int, channel: str) -> None:
+        """Recover from a sequence gap by resubscribing.
+
+        Unsubscribes the stale sid and re-subscribes to the same channel+ticker.
+        Kalshi sends a fresh snapshot on subscribe, resetting state cleanly.
+        """
+        # Find the ticker for this sid
+        ticker = None
+        for t, s in self._ticker_to_sid.items():
+            if s == sid:
+                ticker = t
+                break
+        if ticker is None:
+            logger.warning("ws_seq_gap_unknown_sid", sid=sid, channel=channel)
+            return
+
+        logger.info("ws_seq_gap_recovery", ticker=ticker, sid=sid, channel=channel)
+        # Remove stale mapping and resubscribe — fresh snapshot will arrive
+        self._ticker_to_sid.pop(ticker, None)
+        await self._ws.unsubscribe([sid])
+        await self._ws.subscribe(channel, ticker)
 
     async def connect(self) -> None:
         """Connect the underlying WebSocket."""

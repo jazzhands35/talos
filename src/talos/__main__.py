@@ -47,9 +47,11 @@ def main() -> None:
     from talos.market_feed import MarketFeed
     from talos.orderbook import OrderBookManager
     from talos.persistence import load_saved_games, save_games
+    from talos.portfolio_feed import PortfolioFeed
     from talos.rest_client import KalshiRESTClient
     from talos.scanner import ArbitrageScanner
     from talos.suggestion_log import SuggestionLog
+    from talos.ticker_feed import TickerFeed
     from talos.top_of_market import TopOfMarketTracker
     from talos.ui.app import TalosApp
     from talos.ws_client import KalshiWSClient
@@ -62,6 +64,8 @@ def main() -> None:
     scanner = ArbitrageScanner(books)
     tracker = TopOfMarketTracker(books)
     adjuster = BidAdjuster(books, [], unit_size=10)
+    portfolio_feed = PortfolioFeed(ws_client=ws)
+    ticker_feed = TickerFeed(ws_client=ws)
     game_mgr = GameManager(rest, feed, scanner)
 
     # Wire scanner + tracker to book updates
@@ -83,6 +87,8 @@ def main() -> None:
         tracker=tracker,
         adjuster=adjuster,
         initial_games=saved_games,
+        portfolio_feed=portfolio_feed,
+        ticker_feed=ticker_feed,
     )
 
     # Wire suggestion audit log

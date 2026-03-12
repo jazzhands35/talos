@@ -13,7 +13,7 @@ from talos.config import KalshiConfig
 from talos.errors import KalshiAPIError, KalshiRateLimitError
 from talos.models.market import Event, Market, OrderBook, Series, Trade
 from talos.models.order import BatchOrderResult, Fill, Order
-from talos.models.portfolio import Balance, EventPosition, ExchangeStatus, Position
+from talos.models.portfolio import Balance, EventPosition, ExchangeStatus, Position, Settlement
 
 logger = structlog.get_logger()
 
@@ -88,6 +88,7 @@ class KalshiRESTClient:
         status: str | None = None,
         series_ticker: str | None = None,
         with_nested_markets: bool = False,
+        min_close_ts: int | None = None,
         limit: int = 100,
         cursor: str | None = None,
     ) -> list[Event]:
@@ -98,6 +99,8 @@ class KalshiRESTClient:
             params["series_ticker"] = series_ticker
         if with_nested_markets:
             params["with_nested_markets"] = "true"
+        if min_close_ts is not None:
+            params["min_close_ts"] = min_close_ts
         if cursor:
             params["cursor"] = cursor
         data = await self._request("GET", "/events", params=params)
@@ -148,6 +151,7 @@ class KalshiRESTClient:
         no_price: int | None = None,
         yes_price: int | None = None,
         count: int,
+        post_only: bool = True,
     ) -> Order:
         body: dict[str, Any] = {
             "ticker": ticker,
@@ -156,6 +160,7 @@ class KalshiRESTClient:
             "type": order_type,
             "count_fp": str(count),
             "client_order_id": str(uuid.uuid4()),
+            "post_only": post_only,
         }
         if no_price is not None:
             body["no_price_dollars"] = f"{no_price / 100:.2f}"
@@ -223,6 +228,7 @@ class KalshiRESTClient:
         self,
         *,
         ticker: str | None = None,
+        event_ticker: str | None = None,
         status: str | None = None,
         limit: int = 100,
         cursor: str | None = None,
@@ -230,6 +236,8 @@ class KalshiRESTClient:
         params: dict[str, Any] = {"limit": limit}
         if ticker:
             params["ticker"] = ticker
+        if event_ticker:
+            params["event_ticker"] = event_ticker
         if status:
             params["status"] = status
         if cursor:
@@ -323,3 +331,26 @@ class KalshiRESTClient:
             params["cursor"] = cursor
         data = await self._request("GET", "/portfolio/fills", params=params)
         return [Fill.model_validate(f) for f in data["fills"]]
+
+    async def get_settlements(
+        self,
+        *,
+        ticker: str | None = None,
+        event_ticker: str | None = None,
+        limit: int = 100,
+        cursor: str | None = None,
+    ) -> list[Settlement]:
+        """Fetch settlement history.
+
+        Settlements provide Kalshi's authoritative P&L (P7/P21).
+        Note: ``revenue`` is cents int, ``fee_cost`` is dollars string in the response.
+        """
+        params: dict[str, Any] = {"limit": limit}
+        if ticker:
+            params["ticker"] = ticker
+        if event_ticker:
+            params["event_ticker"] = event_ticker
+        if cursor:
+            params["cursor"] = cursor
+        data = await self._request("GET", "/portfolio/settlements", params=params)
+        return [Settlement.model_validate(s) for s in data["settlements"]]

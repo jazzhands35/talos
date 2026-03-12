@@ -206,7 +206,12 @@ def _make_order(
     no_price: int = 50,
     order_id: str = "ord-1",
     status: str = "resting",
+    maker_fill_cost: int | None = None,
+    taker_fill_cost: int = 0,
 ) -> Order:
+    # Default maker_fill_cost = no_price * fill_count (simple case)
+    if maker_fill_cost is None:
+        maker_fill_cost = no_price * fill_count
     return Order(
         order_id=order_id,
         ticker=ticker,
@@ -217,6 +222,8 @@ def _make_order(
         remaining_count=remaining_count,
         initial_count=fill_count + remaining_count,
         status=status,
+        maker_fill_cost=maker_fill_cost,
+        taker_fill_cost=taker_fill_cost,
     )
 
 
@@ -497,3 +504,43 @@ class TestComputeDisplayPositions:
         """Pairs with no corresponding ledger are silently skipped."""
         result = compute_display_positions({}, [_pair()], {}, CPMTracker())
         assert result == []
+
+
+class TestFillCostFromMakerTaker:
+    """Verify sync_from_orders uses maker_fill_cost + taker_fill_cost, not price * count."""
+
+    def test_fill_cost_uses_actual_cost_fields(self):
+        """Amended prices — actual fill cost used, not price * count."""
+        ledger = PositionLedger(event_ticker="EVT-1", unit_size=10)
+        # Order filled 10 at various prices; average cost was 448 cents total
+        # but current no_price is 50 (which would give 10 * 50 = 500 if using old formula)
+        orders = [
+            _make_order(
+                "TK-A",
+                fill_count=10,
+                remaining_count=0,
+                no_price=50,
+                maker_fill_cost=448,
+                taker_fill_cost=0,
+                status="executed",
+            ),
+        ]
+        ledger.sync_from_orders(orders, ticker_a="TK-A", ticker_b="TK-B")
+        assert ledger.filled_total_cost(Side.A) == 448  # not 500
+
+    def test_fill_cost_sums_maker_and_taker(self):
+        """Both maker and taker fill costs should be summed."""
+        ledger = PositionLedger(event_ticker="EVT-1", unit_size=10)
+        orders = [
+            _make_order(
+                "TK-A",
+                fill_count=10,
+                remaining_count=0,
+                no_price=45,
+                maker_fill_cost=300,
+                taker_fill_cost=150,
+                status="executed",
+            ),
+        ]
+        ledger.sync_from_orders(orders, ticker_a="TK-A", ticker_b="TK-B")
+        assert ledger.filled_total_cost(Side.A) == 450  # 300 + 150

@@ -140,3 +140,19 @@ When an action has multiple steps with different risk profiles, order them so ea
 Applied in: `_execute_rebalance` — step 1 (reduce over-side resting) runs before step 2 (catch-up bid on under-side). If step 1 fails, step 2 is skipped. If step 2 fails, step 1 already reduced the imbalance. The delta never temporarily increases. See [[decisions#2026-03-10 — Position imbalance detection and two-step rebalance]].
 
 **Why not atomic:** A single API call can't reduce one side and add to another. Sequential steps are inevitable. Fail-safe ordering means we never need rollback — each step is independently valuable.
+
+## Defensive WS dispatch (never crash the listen loop)
+
+The WS listen loop (`async for raw_msg in self._ws`) is the single point of failure for ALL real-time data — orderbooks, ticker, portfolio events. Wrap both `model_validate()` and callback execution in try/except inside `_dispatch()` so a single bad message or callback bug can't kill the loop.
+
+Applied in: `ws_client.py` `_dispatch()` — catches parse errors and callback exceptions independently, logs with `ws_message_parse_error` / `ws_callback_error`, continues processing. Added after a production bug where newly-subscribed channels (user_orders, fill, ticker) could have crashed the entire WS pipeline on schema mismatch.
+
+**Why not fail-fast:** Unlike REST (where one bad response means one failed operation), a crashed WS loop means ALL channels die — orderbook deltas stop, ticker updates freeze, portfolio notifications halt. The blast radius of one bad message type is disproportionate. Log and skip is correct here.
+
+## Order-specific APIs need order-specific data
+
+When calling an API that acts on a single order (amend, cancel, get), use data from that specific order — not aggregates from the position ledger. The ledger aggregates fills across all orders (including archived ones augmented by the positions API), but the amend API needs `count = order.fill_count + desired_remaining` for *that* order.
+
+Applied in: `_execute_rebalance` — fetches `get_order(order_id)` and uses `fresh_order.fill_count` instead of `rebalance.filled_count` (aggregate). See [[decisions#2026-03-12 — Fresh order fetch before amend (aggregate vs instance fills)]].
+
+**Why not use aggregate:** If old orders were archived and a new one was placed, the aggregate might show 40 fills while the current order has 0. Using aggregate fills in the amend `count` makes `new_total` equal the order's existing total → `AMEND_ORDER_NO_OP`. The aggregate is correct for position display; the order's own state is correct for order-specific actions.

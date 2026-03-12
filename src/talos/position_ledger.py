@@ -252,7 +252,7 @@ class PositionLedger:
             # regardless of whether the order was later cancelled or amended
             if order.fill_count > 0:
                 kalshi_filled[side] += order.fill_count
-                kalshi_fill_cost[side] += order.no_price * order.fill_count
+                kalshi_fill_cost[side] += order.maker_fill_cost + order.taker_fill_cost
                 kalshi_fees[side] += order.maker_fees
             # Only track resting from active orders
             if order.remaining_count > 0 and order.status in ("resting", "executed"):

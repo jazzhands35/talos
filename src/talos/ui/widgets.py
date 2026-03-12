@@ -228,12 +228,8 @@ class OpportunitiesTable(DataTable):
                     q_b = RichText(str(pos.leg_b.queue_position), justify="right")
                 else:
                     q_b = DIM_DASH
-                cpm_a = RichText(
-                    format_cpm(pos.leg_a.cpm, pos.leg_a.cpm_partial), justify="right"
-                )
-                cpm_b = RichText(
-                    format_cpm(pos.leg_b.cpm, pos.leg_b.cpm_partial), justify="right"
-                )
+                cpm_a = RichText(format_cpm(pos.leg_a.cpm, pos.leg_a.cpm_partial), justify="right")
+                cpm_b = RichText(format_cpm(pos.leg_b.cpm, pos.leg_b.cpm_partial), justify="right")
                 eta_a = RichText(
                     format_eta(pos.leg_a.eta_minutes, pos.leg_a.cpm_partial), justify="right"
                 )

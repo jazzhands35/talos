@@ -12,22 +12,32 @@ import websockets
 from talos.auth import KalshiAuth
 from talos.config import KalshiConfig
 from talos.models.ws import (
+    FillMessage,
+    MarketLifecycleMessage,
+    MarketPositionMessage,
     OrderBookDelta,
     OrderBookSnapshot,
     TickerMessage,
     TradeMessage,
+    UserOrderMessage,
     WSError,
     WSSubscribed,
 )
 
 logger = structlog.get_logger()
 
-# Maps WS message type strings to their Pydantic model
+# Maps WS message type strings to their Pydantic model.
+# Keys are message TYPE strings (from the "type" field), NOT channel names.
+# e.g. channel "user_orders" sends type "user_order" (plural vs singular).
 _MESSAGE_MODELS: dict[str, type] = {
     "orderbook_snapshot": OrderBookSnapshot,
     "orderbook_delta": OrderBookDelta,
     "ticker": TickerMessage,
     "trade": TradeMessage,
+    "user_order": UserOrderMessage,
+    "fill": FillMessage,
+    "market_position": MarketPositionMessage,
+    "market_lifecycle_v2": MarketLifecycleMessage,
 }
 
 
@@ -45,20 +55,27 @@ class KalshiWSClient:
         self._callbacks: dict[str, Callable[..., Coroutine[Any, Any, None]]] = {}
         self._sid_to_channel: dict[int, str] = {}
         self._sid_to_seq: dict[int, int] = {}
+        self._on_seq_gap: Callable[[int, str], Coroutine[Any, Any, None]] | None = None
 
     def _next_message_id(self) -> int:
         msg_id = self._next_id
         self._next_id += 1
         return msg_id
 
-    def _build_subscribe(self, channel: str, market_ticker: str) -> dict[str, Any]:
+    def _build_subscribe(
+        self,
+        channel: str,
+        market_ticker: str | None = None,
+        **extra_params: Any,
+    ) -> dict[str, Any]:
+        params: dict[str, Any] = {"channels": [channel]}
+        if market_ticker is not None:
+            params["market_ticker"] = market_ticker
+        params.update(extra_params)
         return {
             "id": self._next_message_id(),
             "cmd": "subscribe",
-            "params": {
-                "channels": [channel],
-                "market_ticker": market_ticker,
-            },
+            "params": params,
         }
 
     def _build_unsubscribe(self, sids: list[int]) -> dict[str, Any]:
@@ -68,9 +85,44 @@ class KalshiWSClient:
             "params": {"sids": sids},
         }
 
+    def _build_update_subscription(
+        self, sid: int, market_tickers: list[str], action: str
+    ) -> dict[str, Any]:
+        """Build an update_subscription command.
+
+        Args:
+            sid: Subscription ID to update.
+            market_tickers: Tickers to add or remove.
+            action: "add_markets" or "delete_markets".
+        """
+        return {
+            "id": self._next_message_id(),
+            "cmd": "update_subscription",
+            "params": {
+                "sids": [sid],
+                "market_tickers": market_tickers,
+                "action": action,
+            },
+        }
+
+    def _build_list_subscriptions(self) -> dict[str, Any]:
+        return {
+            "id": self._next_message_id(),
+            "cmd": "list_subscriptions",
+            "params": {},
+        }
+
     def on_message(self, channel: str, callback: Callable[..., Coroutine[Any, Any, None]]) -> None:
         """Register a callback for messages on a specific channel."""
         self._callbacks[channel] = callback
+
+    def on_seq_gap(self, callback: Callable[[int, str], Coroutine[Any, Any, None]]) -> None:
+        """Register a callback for sequence gap events.
+
+        Callback receives (sid, channel) so the caller can trigger recovery
+        (e.g., resubscribe to refresh state for the affected channel).
+        """
+        self._on_seq_gap = callback
 
     async def connect(self) -> None:
         """Open the WebSocket connection with auth headers."""
@@ -85,12 +137,23 @@ class KalshiWSClient:
             self._ws = None
             logger.info("ws_disconnected")
 
-    async def subscribe(self, channel: str, market_ticker: str) -> None:
-        """Subscribe to a channel for a specific market."""
+    async def subscribe(
+        self,
+        channel: str,
+        market_ticker: str | None = None,
+        **extra_params: Any,
+    ) -> None:
+        """Subscribe to a channel, optionally for a specific market.
+
+        Args:
+            channel: WS channel name (e.g. "orderbook_delta", "user_orders").
+            market_ticker: Specific market. None for global subscription.
+            **extra_params: Additional subscribe params (e.g. skip_ticker_ack).
+        """
         if not self._ws:
             msg = "WebSocket not connected"
             raise RuntimeError(msg)
-        message = self._build_subscribe(channel, market_ticker)
+        message = self._build_subscribe(channel, market_ticker, **extra_params)
         await self._ws.send(json.dumps(message))
         logger.debug("ws_subscribe_sent", channel=channel, market_ticker=market_ticker)
 
@@ -102,6 +165,40 @@ class KalshiWSClient:
         message = self._build_unsubscribe(sids)
         await self._ws.send(json.dumps(message))
         logger.debug("ws_unsubscribe_sent", sids=sids)
+
+    async def update_subscription(
+        self, sid: int, market_tickers: list[str], action: str = "add_markets"
+    ) -> None:
+        """Add or remove markets from an existing subscription.
+
+        Args:
+            sid: Subscription ID to update.
+            market_tickers: Tickers to add or remove.
+            action: "add_markets" or "delete_markets".
+        """
+        if not self._ws:
+            msg = "WebSocket not connected"
+            raise RuntimeError(msg)
+        message = self._build_update_subscription(sid, market_tickers, action)
+        await self._ws.send(json.dumps(message))
+        logger.debug(
+            "ws_update_subscription_sent",
+            sid=sid,
+            action=action,
+            tickers=market_tickers,
+        )
+
+    async def list_subscriptions(self) -> None:
+        """Send list_subscriptions command for debugging.
+
+        Response arrives as a regular message through the listen loop.
+        """
+        if not self._ws:
+            msg = "WebSocket not connected"
+            raise RuntimeError(msg)
+        message = self._build_list_subscriptions()
+        await self._ws.send(json.dumps(message))
+        logger.debug("ws_list_subscriptions_sent")
 
     async def _dispatch(self, raw: dict[str, Any]) -> None:
         """Parse and route a WebSocket message to the appropriate callback."""
@@ -140,20 +237,41 @@ class KalshiWSClient:
                     expected=expected,
                     got=seq,
                 )
+                if self._on_seq_gap is not None:
+                    await self._on_seq_gap(sid, channel)
             self._sid_to_seq[sid] = seq
 
-        # Parse message into model
+        # Parse message into model and dispatch to callback
         msg_data = raw.get("msg", {})
         model_cls = _MESSAGE_MODELS.get(msg_type)
         if model_cls is None:
             logger.debug("ws_unknown_type", msg_type=msg_type, sid=sid)
             return
-        parsed = model_cls.model_validate(msg_data)
+        try:
+            parsed = model_cls.model_validate(msg_data)
+        except Exception:
+            logger.warning(
+                "ws_message_parse_error",
+                msg_type=msg_type,
+                channel=channel,
+                sid=sid,
+                exc_info=True,
+            )
+            return
 
         # Dispatch to callback
         callback = self._callbacks.get(channel)
         if callback:
-            await callback(parsed, sid=sid, seq=seq or 0)
+            try:
+                await callback(parsed, sid=sid, seq=seq or 0)
+            except Exception:
+                logger.warning(
+                    "ws_callback_error",
+                    msg_type=msg_type,
+                    channel=channel,
+                    sid=sid,
+                    exc_info=True,
+                )
 
     async def listen(self) -> None:
         """Listen for messages and dispatch them. Blocks until disconnect."""

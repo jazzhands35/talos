@@ -139,6 +139,16 @@ class TestMarketEndpoints:
         assert len(events) == 1
         assert events[0].event_ticker == "KXBTC-26MAR"
 
+    async def test_get_events_with_min_close_ts(self, client: KalshiRESTClient) -> None:
+        mock_data = {"events": [], "cursor": None}
+        client._http = AsyncMock(spec=httpx.AsyncClient)
+        client._http.request = AsyncMock(return_value=_mock_response(200, mock_data))
+
+        await client.get_events(min_close_ts=1741800000)
+
+        _, kwargs = client._http.request.call_args
+        assert kwargs["params"]["min_close_ts"] == 1741800000
+
     async def test_get_event(self, client: KalshiRESTClient) -> None:
         mock_data = {
             "event": {
@@ -242,6 +252,35 @@ class TestOrderEndpoints:
         assert call_kwargs.kwargs["json"]["ticker"] == "KXBTC-26MAR-T50000"
         assert call_kwargs.kwargs["json"]["yes_price_dollars"] == "0.65"
         assert call_kwargs.kwargs["json"]["action"] == "buy"
+        assert call_kwargs.kwargs["json"]["post_only"] is True  # default
+
+    async def test_create_order_post_only_false(self, client: KalshiRESTClient) -> None:
+        mock_data = {
+            "order": {
+                "order_id": "ord-taker",
+                "ticker": "MKT-1",
+                "action": "buy",
+                "side": "no",
+                "type": "limit",
+                "no_price": 40,
+                "initial_count": 10,
+                "remaining_count": 0,
+                "fill_count": 10,
+                "status": "executed",
+            }
+        }
+        client._http = AsyncMock(spec=httpx.AsyncClient)
+        client._http.request = AsyncMock(return_value=_mock_response(200, mock_data))
+
+        await client.create_order(
+            ticker="MKT-1",
+            side="no",
+            no_price=40,
+            count=10,
+            post_only=False,
+        )
+        call_kwargs = client._http.request.call_args
+        assert call_kwargs.kwargs["json"]["post_only"] is False
 
     async def test_cancel_order(self, client: KalshiRESTClient) -> None:
         mock_data = {
@@ -291,6 +330,16 @@ class TestOrderEndpoints:
 
         orders = await client.get_orders()
         assert len(orders) == 1
+
+    async def test_get_orders_with_event_ticker_filter(self, client: KalshiRESTClient) -> None:
+        mock_data = {"orders": [], "cursor": None}
+        client._http = AsyncMock(spec=httpx.AsyncClient)
+        client._http.request = AsyncMock(return_value=_mock_response(200, mock_data))
+
+        await client.get_orders(event_ticker="EVT-A,EVT-B")
+
+        _, kwargs = client._http.request.call_args
+        assert kwargs["params"]["event_ticker"] == "EVT-A,EVT-B"
 
     async def test_amend_order(self, client: KalshiRESTClient) -> None:
         mock_data = {
@@ -551,3 +600,49 @@ class TestPortfolioEndpoints:
         fills = await client.get_fills()
         assert len(fills) == 1
         assert fills[0].count == 5
+
+
+class TestGetSettlements:
+    async def test_get_settlements_parses_response(self, client: KalshiRESTClient):
+        mock_data = {
+            "settlements": [
+                {
+                    "ticker": "MKT-YES",
+                    "event_ticker": "EVT-1",
+                    "market_result": "yes",
+                    "revenue": 500,
+                    "fee_cost": "0.0770",
+                    "yes_count_fp": "10",
+                    "no_count_fp": "0",
+                    "yes_total_cost_dollars": "4.50",
+                    "no_total_cost_dollars": "0.00",
+                    "settled_time": "2026-03-12T00:00:00Z",
+                }
+            ],
+            "cursor": None,
+        }
+        client._http = AsyncMock(spec=httpx.AsyncClient)
+        client._http.request = AsyncMock(return_value=_mock_response(200, mock_data))
+
+        settlements = await client.get_settlements()
+        assert len(settlements) == 1
+        s = settlements[0]
+        assert s.ticker == "MKT-YES"
+        assert s.event_ticker == "EVT-1"
+        assert s.market_result == "yes"
+        assert s.revenue == 500  # Already cents int — unchanged
+        assert s.fee_cost == 8  # "0.0770" → round(7.70) = 8 cents
+        assert s.yes_count == 10
+        assert s.no_count == 0
+        assert s.yes_total_cost == 450  # "4.50" → 450 cents
+        assert s.no_total_cost == 0
+
+    async def test_get_settlements_with_event_ticker_filter(self, client: KalshiRESTClient):
+        mock_data = {"settlements": [], "cursor": None}
+        client._http = AsyncMock(spec=httpx.AsyncClient)
+        client._http.request = AsyncMock(return_value=_mock_response(200, mock_data))
+
+        await client.get_settlements(event_ticker="EVT-1")
+
+        _, kwargs = client._http.request.call_args
+        assert kwargs["params"]["event_ticker"] == "EVT-1"

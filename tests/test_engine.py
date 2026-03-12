@@ -16,7 +16,7 @@ from talos.models.order import Order
 from talos.models.portfolio import Balance, Position
 from talos.models.proposal import ProposalKey
 from talos.models.strategy import ArbPair
-from talos.models.ws import OrderBookSnapshot
+from talos.models.ws import FillMessage, OrderBookSnapshot, UserOrderMessage
 from talos.orderbook import OrderBookManager
 from talos.position_ledger import Side
 from talos.rest_client import KalshiRESTClient
@@ -179,6 +179,17 @@ class TestPolling:
 
         assert engine.balance == 50000
         assert engine.portfolio_value == 60000
+
+    @pytest.mark.asyncio
+    async def test_refresh_account_fetches_all_orders(self):
+        engine, rest = _engine_with_pair()
+        rest.get_balance.return_value = Balance(balance=1000, portfolio_value=1000)
+        rest.get_orders.return_value = []
+        rest.get_queue_positions.return_value = {}
+
+        await engine.refresh_account()
+
+        rest.get_orders.assert_called_once_with(limit=200)
 
     @pytest.mark.asyncio
     async def test_refresh_account_stores_orders(self):
@@ -954,6 +965,12 @@ class TestCheckImbalances:
         engine.check_imbalances()
         key = engine.proposal_queue.pending()[0].key
 
+        # Mock get_order to return fresh order state (P15)
+        rest.get_order = AsyncMock(
+            return_value=_make_order(
+                "TK-A", order_id="ord-a", fill_count=30, remaining_count=20, no_price=45
+            )
+        )
         rest.amend_order = AsyncMock(
             return_value=(
                 _make_order("TK-A", order_id="ord-a"),
@@ -962,6 +979,7 @@ class TestCheckImbalances:
         )
         await engine.approve_proposal(key)
 
+        rest.get_order.assert_called_once_with("ord-a")
         rest.amend_order.assert_called_once_with(
             "ord-a",
             ticker="TK-A",
@@ -985,6 +1003,12 @@ class TestCheckImbalances:
         engine.check_imbalances()
         key = engine.proposal_queue.pending()[0].key
 
+        # Mock get_order to return fresh order state (still has remaining > target)
+        rest.get_order = AsyncMock(
+            return_value=_make_order(
+                "TK-A", order_id="ord-a", fill_count=20, remaining_count=30, no_price=45
+            )
+        )
         # Amend returns AMEND_ORDER_NO_OP (order already at target)
         rest.amend_order = AsyncMock(
             side_effect=KalshiAPIError(
@@ -1005,6 +1029,78 @@ class TestCheckImbalances:
         # No-op treated as success — info notification, not error
         assert any("no-op" in msg.lower() for msg, _ in notifications)
         assert not any(sev == "error" for _, sev in notifications)
+
+    @pytest.mark.asyncio
+    async def test_execute_rebalance_uses_order_fill_count_not_aggregate(self):
+        """Bug fix: amend must use the specific order's fill_count, not the
+        ledger's aggregate (which includes fills from archived orders).
+
+        Scenario: old orders filled 30, new order has 0 fills + 20 resting.
+        Ledger shows filled=30, resting=20, committed=50.
+        The amend should use the order's fill_count (0), not the aggregate (30).
+        """
+        engine, rest = _engine_with_pair_and_books()
+        ledger = engine.adjuster.get_ledger("EVT-1")
+        # Simulate: A has 30 fills (from old archived order) + 20 resting (new order)
+        # B has 40 fills. Delta = 50 - 40 = 10.
+        ledger.record_fill(Side.A, 30, 45)
+        ledger.record_resting(Side.A, "ord-a-new", 20, 45)
+        ledger.record_fill(Side.B, 40, 48)
+
+        engine.check_imbalances()
+        key = engine.proposal_queue.pending()[0].key
+
+        # Fresh order: the NEW order has fill_count=0, remaining=20
+        # (the 30 fills are from a different, now-archived order)
+        rest.get_order = AsyncMock(
+            return_value=_make_order(
+                "TK-A", order_id="ord-a-new", fill_count=0, remaining_count=20, no_price=45
+            )
+        )
+        rest.amend_order = AsyncMock(
+            return_value=(
+                _make_order("TK-A", order_id="ord-a-new"),
+                _make_order("TK-A", order_id="ord-a-new-amended"),
+            )
+        )
+        await engine.approve_proposal(key)
+
+        # Should use order's fill_count (0) + target_resting (10) = 10
+        # NOT aggregate filled (30) + target_resting (10) = 40
+        rest.amend_order.assert_called_once_with(
+            "ord-a-new",
+            ticker="TK-A",
+            no_price=45,
+            count=10,  # 0 (order fills) + 10 (target resting)
+        )
+
+    @pytest.mark.asyncio
+    async def test_execute_rebalance_skips_amend_when_already_at_target(self):
+        """If fresh order remaining is already <= target, skip the amend."""
+        engine, rest = _engine_with_pair_and_books()
+        ledger = engine.adjuster.get_ledger("EVT-1")
+        ledger.record_fill(Side.A, 30, 45)
+        ledger.record_resting(Side.A, "ord-a", 20, 45)
+        ledger.record_fill(Side.B, 40, 48)
+
+        engine.check_imbalances()
+        key = engine.proposal_queue.pending()[0].key
+
+        # Fresh order shows fills absorbed the resting (remaining is now 5, below target 10)
+        rest.get_order = AsyncMock(
+            return_value=_make_order(
+                "TK-A", order_id="ord-a", fill_count=45, remaining_count=5, no_price=45
+            )
+        )
+        rest.amend_order = AsyncMock()
+
+        notifications: list[tuple[str, str]] = []
+        engine.on_notification = lambda msg, sev: notifications.append((msg, sev))
+        await engine.approve_proposal(key)
+
+        # Should NOT attempt amend — already at target
+        rest.amend_order.assert_not_called()
+        assert any("already at target" in msg.lower() for msg, _ in notifications)
 
     @pytest.mark.asyncio
     async def test_execute_rebalance_catchup_blocked_by_safety(self):
@@ -1485,3 +1581,142 @@ class TestStaleBookRecovery:
         # Recovery should have been called (unsubscribe + subscribe for TK-A)
         engine._feed.unsubscribe.assert_called_once_with("TK-A")
         engine._feed.subscribe.assert_called_once_with("TK-A")
+
+
+class TestPortfolioFeedWiring:
+    def test_engine_without_portfolio_feed_works(self):
+        engine = _make_engine()
+        assert engine._portfolio_feed is None
+
+    def test_engine_with_portfolio_feed_wires_callbacks(self):
+        from talos.portfolio_feed import PortfolioFeed
+
+        ws = MagicMock()
+        ws.on_message = MagicMock()
+        pf = PortfolioFeed(ws_client=ws)
+        _make_engine(portfolio_feed=pf)
+        assert pf.on_order_update is not None
+        assert pf.on_fill is not None
+
+
+class TestOnOrderUpdate:
+    def test_updates_order_fill_count_monotonically(self):
+        engine, _ = _engine_with_pair()
+        order = _make_order("TK-A", order_id="ord-a", fill_count=5, remaining_count=5)
+        engine._orders_cache = [order]
+
+        msg = UserOrderMessage(
+            order_id="ord-a",
+            ticker="TK-A",
+            side="no",
+            status="resting",
+            fill_count=8,
+            remaining_count=2,
+            no_price=45,
+        )
+        engine._on_order_update(msg)
+        assert order.fill_count == 8
+        assert order.remaining_count == 2
+
+    def test_does_not_decrease_fill_count(self):
+        engine, _ = _engine_with_pair()
+        order = _make_order("TK-A", order_id="ord-a", fill_count=10, remaining_count=0)
+        engine._orders_cache = [order]
+
+        msg = UserOrderMessage(
+            order_id="ord-a",
+            ticker="TK-A",
+            side="no",
+            status="resting",
+            fill_count=5,
+            remaining_count=5,
+            no_price=45,
+        )
+        engine._on_order_update(msg)
+        assert order.fill_count == 10
+
+    def test_notifies_on_new_fills(self):
+        engine, _ = _engine_with_pair()
+        callback = MagicMock()
+        engine.on_notification = callback
+        order = _make_order("TK-A", order_id="ord-a", fill_count=5, remaining_count=5)
+        engine._orders_cache = [order]
+
+        msg = UserOrderMessage(
+            order_id="ord-a",
+            ticker="TK-A",
+            side="no",
+            status="resting",
+            fill_count=8,
+            remaining_count=2,
+            no_price=45,
+        )
+        engine._on_order_update(msg)
+        callback.assert_called_once()
+        assert "WS fill: 3" in callback.call_args[0][0]
+
+    def test_no_notification_when_fill_count_unchanged(self):
+        engine, _ = _engine_with_pair()
+        callback = MagicMock()
+        engine.on_notification = callback
+        order = _make_order("TK-A", order_id="ord-a", fill_count=5, remaining_count=5)
+        engine._orders_cache = [order]
+
+        msg = UserOrderMessage(
+            order_id="ord-a",
+            ticker="TK-A",
+            side="no",
+            status="resting",
+            fill_count=5,
+            remaining_count=5,
+            no_price=45,
+        )
+        engine._on_order_update(msg)
+        callback.assert_not_called()
+
+    def test_unknown_order_is_logged_not_error(self):
+        engine, _ = _engine_with_pair()
+        engine._orders_cache = []
+
+        msg = UserOrderMessage(
+            order_id="unknown-ord",
+            ticker="TK-A",
+            side="no",
+            status="resting",
+            fill_count=1,
+            remaining_count=9,
+        )
+        engine._on_order_update(msg)  # Should not raise
+
+    def test_resyncs_ledger_on_update(self):
+        engine, _ = _engine_with_pair()
+        order_a = _make_order("TK-A", order_id="ord-a", fill_count=0, remaining_count=10)
+        engine._orders_cache = [order_a]
+        ledger = engine._adjuster.get_ledger("EVT-1")
+
+        msg = UserOrderMessage(
+            order_id="ord-a",
+            ticker="TK-A",
+            side="no",
+            status="resting",
+            fill_count=5,
+            remaining_count=5,
+            no_price=45,
+        )
+        engine._on_order_update(msg)
+        assert ledger.filled_count(Side.A) == 5
+
+
+class TestOnFill:
+    def test_fill_handler_does_not_crash(self):
+        engine, _ = _engine_with_pair()
+        msg = FillMessage(
+            trade_id="fill-1",
+            order_id="ord-a",
+            market_ticker="TK-A",
+            side="no",
+            count=3,
+            yes_price=55,
+            post_position=-3,
+        )
+        engine._on_fill(msg)  # Should not raise

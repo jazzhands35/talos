@@ -319,15 +319,24 @@ class TestRichTextCells:
                     EventPositionSummary(
                         event_ticker="EVT-STANMIA",
                         leg_a=LegSummary(
-                            ticker="GAME-STAN", no_price=31,
-                            filled_count=3, resting_count=7, total_fill_cost=93,
+                            ticker="GAME-STAN",
+                            no_price=31,
+                            filled_count=3,
+                            resting_count=7,
+                            total_fill_cost=93,
                         ),
                         leg_b=LegSummary(
-                            ticker="GAME-MIA", no_price=67,
-                            filled_count=5, resting_count=5, total_fill_cost=335,
+                            ticker="GAME-MIA",
+                            no_price=67,
+                            filled_count=5,
+                            resting_count=5,
+                            total_fill_cost=335,
                         ),
-                        matched_pairs=3, locked_profit_cents=0,
-                        unmatched_a=0, unmatched_b=2, exposure_cents=0,
+                        matched_pairs=3,
+                        locked_profit_cents=0,
+                        unmatched_a=0,
+                        unmatched_b=2,
+                        exposure_cents=0,
                     )
                 ]
             )
@@ -341,7 +350,6 @@ class TestRichTextCells:
             assert isinstance(pos_b, RichText)
             # A has fewer fills, so it should be yellow-styled
             assert YELLOW in str(pos_a.style)
-
 
     def test_status_low_edge_is_dim(self) -> None:
         from talos.ui.widgets import _fmt_status

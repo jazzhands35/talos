@@ -19,6 +19,7 @@ def mock_ws() -> KalshiWSClient:
     ws.unsubscribe = AsyncMock()
     ws.disconnect = AsyncMock()
     ws.listen = AsyncMock()
+    ws.on_seq_gap = MagicMock()
     return ws
 
 
@@ -175,3 +176,30 @@ class TestOnBookUpdate:
             no=[[35, 50]],
         )
         await feed._on_message(snapshot, sid=1, seq=1)
+
+
+class TestSeqGapRecovery:
+    def test_registers_seq_gap_callback_on_init(self, mock_ws: KalshiWSClient) -> None:
+        mgr = MagicMock(spec=OrderBookManager)
+        MarketFeed(ws_client=mock_ws, book_manager=mgr)
+        mock_ws.on_seq_gap.assert_called_once()  # type: ignore[union-attr]
+
+    async def test_seq_gap_resubscribes(self, feed: MarketFeed, mock_ws: KalshiWSClient) -> None:
+        """On seq gap, should unsubscribe old sid and resubscribe to same channel+ticker."""
+        # Simulate a known ticker-to-sid mapping
+        feed._ticker_to_sid["MKT-1"] = 5
+
+        await feed._on_seq_gap(5, "orderbook_delta")
+
+        mock_ws.unsubscribe.assert_called_once_with([5])  # type: ignore[union-attr]
+        mock_ws.subscribe.assert_called_once_with("orderbook_delta", "MKT-1")  # type: ignore[union-attr]
+        # Old sid mapping should be cleared
+        assert "MKT-1" not in feed._ticker_to_sid
+
+    async def test_seq_gap_unknown_sid_no_crash(
+        self, feed: MarketFeed, mock_ws: KalshiWSClient
+    ) -> None:
+        """If sid is unknown, should log warning but not crash."""
+        await feed._on_seq_gap(999, "orderbook_delta")
+        mock_ws.unsubscribe.assert_not_called()  # type: ignore[union-attr]
+        mock_ws.subscribe.assert_not_called()  # type: ignore[union-attr]

@@ -20,13 +20,17 @@ from talos.errors import KalshiAPIError
 from talos.game_manager import GameManager
 from talos.market_feed import MarketFeed
 from talos.models.order import Order
+from talos.models.portfolio import EventPosition
 from talos.models.position import EventPositionSummary
 from talos.models.proposal import Proposal, ProposalKey, ProposedRebalance
+from talos.models.ws import FillMessage, TickerMessage, UserOrderMessage
 from talos.opportunity_proposer import OpportunityProposer
+from talos.portfolio_feed import PortfolioFeed
 from talos.position_ledger import PositionLedger, Side, compute_display_positions
 from talos.proposal_queue import ProposalQueue
 from talos.rest_client import KalshiRESTClient
 from talos.scanner import ArbitrageScanner
+from talos.ticker_feed import TickerFeed
 from talos.top_of_market import TopOfMarketTracker
 
 if TYPE_CHECKING:
@@ -74,6 +78,8 @@ class TradingEngine:
         initial_games: list[str] | None = None,
         proposal_queue: ProposalQueue | None = None,
         automation_config: AutomationConfig | None = None,
+        portfolio_feed: PortfolioFeed | None = None,
+        ticker_feed: TickerFeed | None = None,
     ) -> None:
         self._scanner = scanner
         self._game_manager = game_manager
@@ -84,6 +90,8 @@ class TradingEngine:
         self._initial_games = list(initial_games or [])
         self._proposal_queue = proposal_queue or ProposalQueue()
         self._auto_config = automation_config or AutomationConfig()
+        self._portfolio_feed = portfolio_feed
+        self._ticker_feed = ticker_feed
         self._proposer = OpportunityProposer(self._auto_config)
 
         # Mutable caches
@@ -94,6 +102,12 @@ class TradingEngine:
         self._portfolio_value: int = 0
         self._position_summaries: list[EventPositionSummary] = []
         self._order_data: list[dict[str, object]] = []
+        self._event_positions: dict[str, EventPosition] = {}
+
+        # Wire portfolio feed callbacks
+        if self._portfolio_feed is not None:
+            self._portfolio_feed.on_order_update = self._on_order_update
+            self._portfolio_feed.on_fill = self._on_fill
 
         # Callbacks for UI communication
         self.on_notification: Callable[[str, str], None] | None = None
@@ -148,6 +162,17 @@ class TradingEngine:
         """Resolve event ticker to short human-readable label (e.g. 'Gorgodze-Kalinina')."""
         return self._game_manager.labels.get(event_ticker, event_ticker)
 
+    @property
+    def event_positions(self) -> dict[str, EventPosition]:
+        """Rich event-level position data from Kalshi."""
+        return self._event_positions
+
+    def get_ticker_data(self, ticker: str) -> TickerMessage | None:
+        """Return the latest WS ticker data for a market, or None."""
+        if self._ticker_feed is None:
+            return None
+        return self._ticker_feed.get_ticker(ticker)
+
     # ── Polling methods ─────────────────────────────────────────────
 
     async def start_feed(self) -> None:
@@ -174,6 +199,16 @@ class TradingEngine:
                 if restored:
                     self._notify(f"Loaded {restored} game(s)")
                 self._initial_games.clear()
+            # Subscribe to portfolio events globally (all markets)
+            if self._portfolio_feed is not None:
+                await self._portfolio_feed.subscribe()
+
+            # Subscribe to ticker updates for all active markets
+            if self._ticker_feed is not None:
+                market_tickers = self._active_market_tickers()
+                if market_tickers:
+                    await self._ticker_feed.subscribe(market_tickers)
+
             await self._feed.start()
         except Exception as e:
             logger.exception("feed_connection_error")
@@ -327,6 +362,85 @@ class TradingEngine:
                 self._cpm.ingest(ticker, trades)
                 logger.debug("trades_ingested", ticker=ticker, count=len(trades))
         self._cpm.prune()
+
+    # ── WS real-time handlers ──────────────────────────────────────
+
+    def _on_order_update(self, msg: UserOrderMessage) -> None:
+        """Handle a real-time order update from the user_orders WS channel.
+
+        Updates the orders cache with monotonic fills and triggers ledger
+        re-sync for the affected pair. Notifies on new fills.
+        """
+        for order in self._orders_cache:
+            if order.order_id == msg.order_id:
+                old_fill_count = order.fill_count
+
+                # Monotonic update — WS can never decrease fills
+                order.fill_count = max(order.fill_count, msg.fill_count)
+                order.remaining_count = msg.remaining_count
+                order.status = msg.status
+                order.maker_fill_cost = max(order.maker_fill_cost, msg.maker_fill_cost)
+                order.taker_fill_cost = max(order.taker_fill_cost, msg.taker_fill_cost)
+                order.maker_fees = max(order.maker_fees, msg.maker_fees)
+
+                new_fills = order.fill_count - old_fill_count
+                if new_fills > 0:
+                    price = msg.no_price if msg.side == "no" else msg.yes_price
+                    self._notify(
+                        f"WS fill: {new_fills} @ {price}¢ on {msg.ticker}",
+                    )
+                    logger.info(
+                        "ws_order_fill",
+                        order_id=msg.order_id,
+                        ticker=msg.ticker,
+                        new_fills=new_fills,
+                        total_fills=order.fill_count,
+                    )
+
+                # Re-sync the affected pair's ledger
+                for pair in self._scanner.pairs:
+                    if msg.ticker in (pair.ticker_a, pair.ticker_b):
+                        try:
+                            ledger = self._adjuster.get_ledger(pair.event_ticker)
+                            ledger.sync_from_orders(
+                                self._orders_cache,
+                                ticker_a=pair.ticker_a,
+                                ticker_b=pair.ticker_b,
+                            )
+                        except KeyError:
+                            pass
+
+                self._tracker.update_orders(self._orders_cache, self._scanner.pairs)
+                self._recompute_positions()
+                return
+
+        # Order not in cache — will be picked up by next REST poll
+        logger.debug(
+            "ws_order_update_unknown",
+            order_id=msg.order_id,
+            ticker=msg.ticker,
+            status=msg.status,
+        )
+
+    def _on_fill(self, msg: FillMessage) -> None:
+        """Handle a real-time fill from the fill WS channel.
+
+        Supplementary to _on_order_update — provides per-trade detail and
+        Kalshi's authoritative post_position for cross-checking.
+        """
+        logger.info(
+            "ws_fill_detail",
+            trade_id=msg.trade_id,
+            order_id=msg.order_id,
+            ticker=msg.market_ticker,
+            side=msg.side,
+            count=msg.count,
+            price=msg.yes_price,
+            is_taker=msg.is_taker,
+            post_position=msg.post_position,
+        )
+
+    # ── Event handlers ───────────────────────────────────────────
 
     def on_top_of_market_change(self, ticker: str, at_top: bool) -> None:
         """Handle top-of-market state transition — evaluate adjustment."""
@@ -761,17 +875,38 @@ class TradingEngine:
                         f" resting on {rebalance.side} ({rebalance.ticker})",
                     )
                 else:
-                    new_total = rebalance.filled_count + rebalance.target_resting
-                    await self._rest.amend_order(
-                        rebalance.order_id,
-                        ticker=rebalance.ticker,
-                        no_price=rebalance.resting_price,
-                        count=new_total,
-                    )
-                    self._notify(
-                        f"Rebalance step 1: {rebalance.side} resting"
-                        f" {rebalance.current_resting} → {rebalance.target_resting}",
-                    )
+                    # P15: Fetch fresh order state before amending. The proposal's
+                    # filled_count is the ledger aggregate (all orders + positions),
+                    # but amend count must be THIS order's fill_count + target resting.
+                    fresh_order = await self._rest.get_order(rebalance.order_id)
+                    if fresh_order.remaining_count <= rebalance.target_resting:
+                        # Order already at or below target (fills arrived between
+                        # proposal and execution, or order was amended/cancelled).
+                        self._notify(
+                            f"Rebalance step 1: already at target"
+                            f" (remaining={fresh_order.remaining_count})",
+                        )
+                    else:
+                        new_total = fresh_order.fill_count + rebalance.target_resting
+                        logger.info(
+                            "rebalance_amend_computed",
+                            order_id=rebalance.order_id,
+                            order_fill_count=fresh_order.fill_count,
+                            order_remaining=fresh_order.remaining_count,
+                            target_resting=rebalance.target_resting,
+                            new_total=new_total,
+                        )
+                        await self._rest.amend_order(
+                            rebalance.order_id,
+                            ticker=rebalance.ticker,
+                            no_price=rebalance.resting_price,
+                            count=new_total,
+                        )
+                        self._notify(
+                            f"Rebalance step 1: {rebalance.side} resting"
+                            f" {fresh_order.remaining_count}"
+                            f" → {rebalance.target_resting}",
+                        )
             except KalshiAPIError as e:
                 if _is_no_op(e):
                     # Order already at desired state (fills happened between
@@ -939,9 +1074,13 @@ class TradingEngine:
     # ── Internal helpers ─────────────────────────────────────────────
 
     async def _discover_active_events(self) -> list[str]:
-        """Query Kalshi for events with positions or resting orders."""
+        """Query Kalshi for events with positions or resting orders.
+
+        Also stores rich EventPosition data for UI access (realized_pnl, etc.).
+        """
         try:
             event_positions = await self._rest.get_event_positions()
+            self._event_positions = {ep.event_ticker: ep for ep in event_positions}
             tickers = [ep.event_ticker for ep in event_positions]
             if tickers:
                 logger.info("discovered_active_events", count=len(tickers), tickers=tickers)

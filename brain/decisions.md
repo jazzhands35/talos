@@ -143,6 +143,30 @@ Equalization target: `max(over_filled, under_committed)` — the minimum both si
 **Decision:** Added `_verify_after_action()` — a full two-source sync (orders + positions) that runs immediately after every order action (rebalance, adjustment, bid). Also handle `AMEND_ORDER_NO_OP` as success via `_is_no_op()` helper. Wired into `approve_proposal` for all three action types.
 **Rationale:** The 10s polling cycle is too slow to confirm action outcomes. The system was assuming success/failure based on the API response alone, without verifying the resulting state. Immediate verification means the ledger reflects reality within milliseconds of acting, not 10 seconds later. See [[patterns#Verify after every order action]] and [[principles#7. Kalshi Is the Source of Truth — Always]].
 
+## 2026-03-12 — Fresh order fetch before amend (aggregate vs instance fills)
+
+**Context:** Rebalance proposed "reduce B resting 50 → 10" — correct analysis of a 40-contract imbalance. Upon approval, `_execute_rebalance` computed `new_total = rebalance.filled_count + target_resting`. But `rebalance.filled_count` came from the ledger's aggregate fill count (populated by `sync_from_orders` + `sync_from_positions`), which included fills from archived orders. The *current* order had `fill_count=0` (freshly placed after old orders were archived), so `new_total` equaled the order's existing total → Kalshi returned `AMEND_ORDER_NO_OP` → system reported "already at target".
+
+**Decision:** Before step 1 of `_execute_rebalance`, fetch fresh order state via `get_order(order_id)`. Use `fresh_order.fill_count` (the specific order's fills) instead of `rebalance.filled_count` (aggregate). Also skip the amend entirely if `fresh_order.remaining_count <= target_resting` — the market may have already resolved the imbalance via fills.
+
+**Rationale:** The Kalshi amend API's `count` parameter means "new total = fill_count + desired_remaining" for the *specific order being amended*. Aggregate fill data is correct for position display and safety gates, but wrong for order-specific API calls. This is a more specific instance of P7/P15 — the aggregate is truth about the position, but the order's own state is truth for the amend. See [[patterns#Order-specific APIs need order-specific data]] and [[principles#7. Kalshi Is the Source of Truth — Always]].
+
+## 2026-03-12 — Fill cost from API fields, not computed
+
+**Context:** `sync_from_orders` computed fill cost as `order.no_price * order.fill_count`. This is inaccurate for orders that were amended at different prices — the original price doesn't reflect the actual cost of fills at the new price.
+
+**Decision:** Changed to `order.maker_fill_cost + order.taker_fill_cost`, which are exact values from the Kalshi API that account for all fills at their actual prices. Added `maker_fill_cost` and `taker_fill_cost` fields to `Order` model with FP migration from `maker_fill_cost_dollars`/`taker_fill_cost_dollars`.
+
+**Rationale:** Direct application of [[principles#21. Authoritative Data Over Computed Data]]. The API tracks exact costs across all fills at potentially different prices. Our computed approximation was wrong whenever an order was amended. See also [[patterns#Financial calculation precision]].
+
+## 2026-03-12 — Leaner polling reverted (event_ticker filter removed)
+
+**Context:** Phase 8 of the API integration plan added an `event_ticker` filter to `get_orders()` in `refresh_account()` — comma-joining scanner pair event tickers to fetch only monitored events. Kalshi's `GET /portfolio/orders` supports `event_ticker` as a comma-separated list (max 10). After deploying, the UI showed "No orders yet" and position columns showed dashes, while scanner Edge/Net values still worked (WS orderbook path was unaffected).
+
+**Decision:** Reverted the event_ticker filter. `get_orders()` now fetches all orders without filtering (`limit=200`). Also added defensive try/except wrappers in `ws_client._dispatch()` around `model_validate()` and callback execution to prevent WS loop crashes.
+
+**Rationale:** The filter was a premature optimization. The exact root cause was ambiguous — potentially the filter, a WS parse error crashing the listen loop, or a model validation issue in the newly-subscribed portfolio/ticker channels. Rather than debugging blind (no access to runtime logs), the safest fix was reverting the most suspicious change and adding WS safety wrappers to prevent the most dangerous failure mode (listen loop crash). The filter can be re-added later with proper runtime validation. See [[patterns#Defensive WS dispatch (never crash the listen loop)]].
+
 ## 2026-03-07 — Bid modal falls back to all_snapshots
 
 **Context:** After placing orders, users couldn't reopen the bid modal on the same game. `on_data_table_row_selected` called `scanner.get_opportunity()` which only returns pairs with positive raw edge. After fills move the market, edge drops to 0 or negative — the row stays visible (from `all_snapshots`) but clicking it silently did nothing.

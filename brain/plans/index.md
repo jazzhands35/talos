@@ -2,7 +2,7 @@
 
 ## Active
 
-(none)
+- [[plans/03-api-integration/overview]] — Expand Kalshi API integration: new WS channels (user_orders, fill, ticker, lifecycle), model enrichment, settlements, dynamic fees, order safety flags
 
 ## Completed
 

@@ -48,6 +48,24 @@ class TestOrder:
         assert o.taker_fees == 2
         assert o.maker_fees == 1
 
+    def test_parse_order_fill_cost_dollars(self) -> None:
+        """maker_fill_cost_dollars and taker_fill_cost_dollars → cents."""
+        data = {
+            "order_id": "ord-fill-cost",
+            "ticker": "MKT-1",
+            "side": "no",
+            "type": "limit",
+            "maker_fill_cost_dollars": "4.48",
+            "taker_fill_cost_dollars": "0.00",
+            "fill_count_fp": "10",
+            "remaining_count_fp": "0",
+            "initial_count_fp": "10",
+            "status": "executed",
+        }
+        o = Order.model_validate(data)
+        assert o.maker_fill_cost == 448
+        assert o.taker_fill_cost == 0
+
     def test_order_optional_fields(self) -> None:
         data = {
             "order_id": "ord-123",
@@ -96,6 +114,46 @@ class TestFill:
         assert f.yes_price == 40
         assert f.no_price == 60
         assert f.count == 5
+
+    def test_fill_fee_cost_string_conversion(self) -> None:
+        """fee_cost arrives as FixedPointDollars string → cents."""
+        data = {
+            "trade_id": "trade-fee",
+            "order_id": "ord-1",
+            "ticker": "MKT-1",
+            "side": "no",
+            "fee_cost": "0.0130",
+        }
+        f = Fill.model_validate(data)
+        assert f.fee_cost == 1  # rounds to 1 cent
+
+    def test_fill_fee_cost_integer_passthrough(self) -> None:
+        """fee_cost as integer should pass through unchanged."""
+        data = {
+            "trade_id": "trade-fee2",
+            "order_id": "ord-2",
+            "ticker": "MKT-2",
+            "side": "yes",
+            "fee_cost": 5,
+        }
+        f = Fill.model_validate(data)
+        assert f.fee_cost == 5
+
+    def test_fill_enriched_fields(self) -> None:
+        """action, is_taker, purchased_side should be captured."""
+        data = {
+            "trade_id": "trade-enrich",
+            "order_id": "ord-3",
+            "ticker": "MKT-3",
+            "side": "no",
+            "action": "buy",
+            "is_taker": True,
+            "purchased_side": "no",
+        }
+        f = Fill.model_validate(data)
+        assert f.action == "buy"
+        assert f.is_taker is True
+        assert f.purchased_side == "no"
 
 
 class TestBatchOrderResult:

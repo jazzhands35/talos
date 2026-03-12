@@ -46,6 +46,8 @@ class Order(BaseModel, extra="ignore"):
     expiration_time: str | None = None
     taker_fees: int = 0
     maker_fees: int = 0
+    maker_fill_cost: int = 0
+    taker_fill_cost: int = 0
     queue_position: int | None = None
 
     @model_validator(mode="before")
@@ -59,6 +61,8 @@ class Order(BaseModel, extra="ignore"):
             ("no_price", "no_price_dollars"),
             ("taker_fees", "taker_fees_dollars"),
             ("maker_fees", "maker_fees_dollars"),
+            ("maker_fill_cost", "maker_fill_cost_dollars"),
+            ("taker_fill_cost", "taker_fill_cost_dollars"),
         ]:
             if new in data and data[new] is not None:
                 data[old] = _dollars_to_cents(data[new])
@@ -86,6 +90,10 @@ class Fill(BaseModel, extra="ignore"):
     yes_price: int = 0
     no_price: int = 0
     count: int = 0
+    fee_cost: int = 0
+    action: str = ""
+    is_taker: bool = False
+    purchased_side: str = ""
     created_time: str = ""
 
     @model_validator(mode="before")
@@ -99,6 +107,9 @@ class Fill(BaseModel, extra="ignore"):
         ]:
             if new in data and data[new] is not None:
                 data[old] = _dollars_to_cents(data[new])
+        # fee_cost arrives as a FixedPointDollars string
+        if "fee_cost" in data and isinstance(data["fee_cost"], str):
+            data["fee_cost"] = _dollars_to_cents(data["fee_cost"])
         if "count_fp" in data and data["count_fp"] is not None:
             data["count"] = _fp_to_int(data["count_fp"])
         return data

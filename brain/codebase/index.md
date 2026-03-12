@@ -9,12 +9,14 @@
 | `errors.py` | Typed exception hierarchy | `KalshiError`, `KalshiAPIError`, `KalshiRateLimitError`, `KalshiAuthError`, `KalshiConnectionError` |
 | `models/market.py` | Market data models | `Market`, `Event`, `Series`, `OrderBook`, `OrderBookLevel`, `Trade` |
 | `models/order.py` | Order models | `Order` (incl. `queue_position`), `Fill`, `BatchOrderResult` |
-| `models/portfolio.py` | Portfolio models | `Balance`, `Position`, `Settlement`, `ExchangeStatus` |
-| `models/ws.py` | WebSocket messages | `OrderBookSnapshot`, `OrderBookDelta`, `TickerMessage`, `TradeMessage`, `WSSubscribed`, `WSError` |
+| `models/portfolio.py` | Portfolio models | `Balance`, `Position`, `EventPosition`, `Settlement`, `ExchangeStatus` |
+| `models/ws.py` | WebSocket messages | `OrderBookSnapshot`, `OrderBookDelta`, `TickerMessage`, `TradeMessage`, `UserOrderMessage`, `FillMessage`, `MarketPositionMessage`, `MarketLifecycleMessage`, `WSSubscribed`, `WSError` |
 | `rest_client.py` | Async REST client | `KalshiRESTClient` |
 | `ws_client.py` | WebSocket client | `KalshiWSClient` |
 | `orderbook.py` | Local orderbook state management | `LocalOrderBook`, `OrderBookManager` |
-| `market_feed.py` | WS subscription orchestrator | `MarketFeed` |
+| `market_feed.py` | WS subscription orchestrator (orderbook) | `MarketFeed` |
+| `portfolio_feed.py` | WS orchestrator for user_orders + fill channels | `PortfolioFeed` |
+| `ticker_feed.py` | WS orchestrator for ticker channel (BBA, volume) | `TickerFeed` |
 | `models/strategy.py` | Strategy data models | `ArbPair`, `Opportunity`, `BidConfirmation` |
 | `models/position.py` | Position tracking models | `LegSummary`, `EventPositionSummary` |
 | `models/adjustment.py` | Bid adjustment proposal model | `ProposedAdjustment` |
