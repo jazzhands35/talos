@@ -1,6 +1,8 @@
-# Phase 8 — Leaner Polling with event_ticker Filter
+# Phase 8 — Leaner Polling with event_ticker Filter — REVERTED
 
 Back to [[plans/03-api-integration/overview]]
+
+**Status:** Implemented then reverted. The event_ticker filter caused a production bug where positions and orders disappeared from the UI. See [[decisions#2026-03-12 — Leaner polling reverted (event_ticker filter removed)]].
 
 ## Goal
 

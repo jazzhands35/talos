@@ -153,6 +153,8 @@ Applied in: `ws_client.py` `_dispatch()` — catches parse errors and callback e
 
 When calling an API that acts on a single order (amend, cancel, get), use data from that specific order — not aggregates from the position ledger. The ledger aggregates fills across all orders (including archived ones augmented by the positions API), but the amend API needs `count = order.fill_count + desired_remaining` for *that* order.
 
-Applied in: `_execute_rebalance` — fetches `get_order(order_id)` and uses `fresh_order.fill_count` instead of `rebalance.filled_count` (aggregate). See [[decisions#2026-03-12 — Fresh order fetch before amend (aggregate vs instance fills)]].
+Applied in: `_execute_rebalance` previously fetched `get_order(order_id)` and used `fresh_order.fill_count` for amend. Now uses `decrease_order(reduce_to=target)` which sidesteps the issue entirely — `reduce_to` is absolute, not relative to fill count. See [[decisions#2026-03-12 — Rebalance step 1: decrease_order replaces amend_order]].
+
+**Lesson:** Prefer APIs with absolute targets (`reduce_to=N`) over relative ones (`count = fill_count + desired`) when possible. Absolute targets eliminate the class of bugs where aggregate vs instance data produces wrong inputs. The amend API's relative semantics remain a trap for any future use — always fetch fresh order state first.
 
 **Why not use aggregate:** If old orders were archived and a new one was placed, the aggregate might show 40 fills while the current order has 0. Using aggregate fills in the amend `count` makes `new_total` equal the order's existing total → `AMEND_ORDER_NO_OP`. The aggregate is correct for position display; the order's own state is correct for order-specific actions.

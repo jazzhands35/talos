@@ -53,22 +53,22 @@ Talos currently uses 10 of 40+ REST endpoints and 1 of 10 WebSocket channels. A 
 
 ## Phases
 
-### Tier 1 — Safety, Accuracy, and Core Trading
-- [[plans/03-api-integration/phase-01-ws-infrastructure]] — WS client upgrades (message registry, update_subscription, seq gap recovery)
-- [[plans/03-api-integration/phase-02-order-model-enrichment]] — Add maker_fill_cost, post_only, cancel_order_on_pause to Order model and REST client
-- [[plans/03-api-integration/phase-03-portfolio-feed]] — New PortfolioFeed handler for user_orders + fill WS channels
-- [[plans/03-api-integration/phase-04-portfolio-feed-wiring]] — Wire PortfolioFeed into engine, update ledger from WS events
-- [[plans/03-api-integration/phase-05-ticker-feed]] — New TickerFeed handler for ticker WS channel
-- [[plans/03-api-integration/phase-06-settlements-and-fills]] — GET /portfolio/settlements, GET /portfolio/fills with fee_cost, fix Settlement model
-- [[plans/03-api-integration/phase-07-event-position-enrichment]] — Capture rich EventPosition fields, min_close_ts filter
-- [[plans/03-api-integration/phase-08-leaner-polling]] — event_ticker filter on GET /portfolio/orders
+### Tier 1 — Safety, Accuracy, and Core Trading — COMPLETE
+- [[plans/03-api-integration/phase-01-ws-infrastructure]] — DONE — WS client upgrades (message registry, update_subscription, seq gap recovery)
+- [[plans/03-api-integration/phase-02-order-model-enrichment]] — DONE — Add maker_fill_cost, post_only, cancel_order_on_pause to Order model and REST client
+- [[plans/03-api-integration/phase-03-portfolio-feed]] — DONE — New PortfolioFeed handler for user_orders + fill WS channels
+- [[plans/03-api-integration/phase-04-portfolio-feed-wiring]] — DONE — Wire PortfolioFeed into engine, update ledger from WS events
+- [[plans/03-api-integration/phase-05-ticker-feed]] — DONE — New TickerFeed handler for ticker WS channel
+- [[plans/03-api-integration/phase-06-settlements-and-fills]] — DONE — GET /portfolio/settlements, GET /portfolio/fills with fee_cost, fix Settlement model
+- [[plans/03-api-integration/phase-07-event-position-enrichment]] — DONE — Capture rich EventPosition fields, min_close_ts filter
+- [[plans/03-api-integration/phase-08-leaner-polling]] — DONE then REVERTED — event_ticker filter caused production bug, reverted to unfiltered fetch
 
-### Tier 2 — Strategy and Operational Awareness
-- [[plans/03-api-integration/phase-09-fee-schedule]] — GET /series/fee_changes, Series model fee_type/fee_multiplier, dynamic fee rates
-- [[plans/03-api-integration/phase-10-lifecycle-feed]] — market_lifecycle_v2 WS channel (settlements, pauses, new markets)
-- [[plans/03-api-integration/phase-11-market-model-enrichment]] — settlement_ts, cancel_order_on_pause usage, bulk WS subscribe
-- [[plans/03-api-integration/phase-12-order-groups]] — Server-side unit size enforcement via Order Groups
-- [[plans/03-api-integration/phase-13-decrease-order]] — POST /portfolio/orders/{id}/decrease for cleaner quantity reduction
+### Tier 2 — Strategy and Operational Awareness — COMPLETE
+- [[plans/03-api-integration/phase-09-fee-schedule]] — DONE — GET /series/fee_changes, Series model fee_type/fee_multiplier, dynamic fee rates
+- [[plans/03-api-integration/phase-10-lifecycle-feed]] — DONE — market_lifecycle_v2 WS channel (settlements, pauses, new markets)
+- [[plans/03-api-integration/phase-11-market-model-enrichment]] — DONE — settlement_ts, cancel_order_on_pause usage, bulk WS subscribe
+- [[plans/03-api-integration/phase-12-order-groups]] — DONE — Server-side unit size enforcement via Order Groups (REST CRUD, not yet wired to engine bidding)
+- [[plans/03-api-integration/phase-13-decrease-order]] — DONE — POST /portfolio/orders/{id}/decrease, rebalance step 1 now uses decrease_order
 
 ### Tier 3 — Nice to Have
 - [[plans/03-api-integration/phase-14-tier3-extras]] — market_positions WS, top-of-book sizes, account limits, user_data_timestamp, list_subscriptions

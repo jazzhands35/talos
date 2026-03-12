@@ -151,6 +151,24 @@ Equalization target: `max(over_filled, under_committed)` — the minimum both si
 
 **Rationale:** The Kalshi amend API's `count` parameter means "new total = fill_count + desired_remaining" for the *specific order being amended*. Aggregate fill data is correct for position display and safety gates, but wrong for order-specific API calls. This is a more specific instance of P7/P15 — the aggregate is truth about the position, but the order's own state is truth for the amend. See [[patterns#Order-specific APIs need order-specific data]] and [[principles#7. Kalshi Is the Source of Truth — Always]].
 
+## 2026-03-12 — Rebalance step 1: decrease_order replaces amend_order
+
+**Context:** Rebalance step 1 used `amend_order` to reduce resting quantity, requiring computation of `fill_count + target_resting` for the specific order. This was fragile — aggregate vs instance fill counts caused `AMEND_ORDER_NO_OP` bugs (see above). The Kalshi `decrease_order` API (`POST /portfolio/orders/{id}/decrease`) is purpose-built for quantity-only reductions: just pass `reduce_to=target` or `reduce_by=N`.
+
+**Decision:** Replaced `amend_order` with `decrease_order(reduce_to=target_resting)` in `_execute_rebalance` step 1. No need to fetch the order first — `reduce_to` is absolute, not relative to fill count. Eliminated the aggregate-vs-instance fill count bug entirely.
+
+**Rationale:** `decrease_order` preserves queue position (unlike cancel+replace), takes a direct target (unlike amend which needs `fill_count + desired`), and eliminates the class of bug where aggregate vs instance fill data produces wrong results. Simpler API = fewer failure modes. The `amend_order` path remains available for price changes.
+
+## 2026-03-12 — Dynamic fee rates from Series API
+
+**Context:** Fee calculations hardcoded `MAKER_FEE_RATE = 0.0175`, but Kalshi supports multiple fee types (`quadratic_with_maker_fees`, `flat`, `fee_free`) with different rates per series. The `Series` model has `fee_type` and `fee_multiplier` fields.
+
+**Decision:** All fee functions (`quadratic_fee`, `fee_adjusted_cost`, `fee_adjusted_edge`, `american_odds`) gained an optional `rate` kwarg (default `MAKER_FEE_RATE`). Added `flat_fee()` and `compute_fee()` dispatcher. `ArbPair` model gained `fee_type` and `fee_rate` fields. `GameManager.add_game()` fetches `Series` to populate fee metadata. `ArbitrageScanner.add_pair()` and `BidAdjuster` pass pair-specific rates to fee functions.
+
+**Flow:** Series API → `ArbPair.fee_rate` → scanner's `fee_adjusted_edge(rate=pair.fee_rate)` → adjuster's profitability checks.
+
+**Rationale:** Backward compatible (all existing calls use default rate), correct for non-standard series. Isolating the rate in `ArbPair` means each pair carries its own fee context without global state. See [[principles#21. Authoritative Data Over Computed Data]].
+
 ## 2026-03-12 — Fill cost from API fields, not computed
 
 **Context:** `sync_from_orders` computed fill cost as `order.no_price * order.fill_count`. This is inaccurate for orders that were amended at different prices — the original price doesn't reflect the actual cost of fills at the new price.

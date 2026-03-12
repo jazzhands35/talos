@@ -36,6 +36,10 @@ Single source of truth for both UI display and bid adjustment safety gates. `com
 
 1. **API Client** (Layer 1) — **COMPLETE**
    Auth, REST, WebSocket, Pydantic models, error hierarchy.
+   - REST: order groups CRUD, decrease_order, fee schedule, batch orders
+   - WS: bulk subscribe (`market_tickers` list), `update_subscription`, `list_subscriptions`
+   - Models: Market enrichment (`settlement_ts`, `close_time`, `result`, `market_type`), Series enrichment (`fee_type`, `fee_multiplier`, `frequency`, `settlement_sources`)
+   - `LifecycleFeed`: WS handler for `market_lifecycle_v2` channel — determination, settlement, pause/unpause events with typed callbacks
 2. **Market Data** (Layer 2) — **COMPLETE**
    Pure `OrderBookManager` + async `MarketFeed` orchestrator. Stale book auto-recovery: `_recover_stale_books()` runs at top of each `refresh_account` cycle, unsubscribes/resubscribes stale tickers to get a fresh snapshot.
 3. **Strategy Engine** (Layer 3) — **COMPLETE**
