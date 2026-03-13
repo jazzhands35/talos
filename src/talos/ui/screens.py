@@ -41,6 +41,48 @@ class AddGamesScreen(ModalScreen[list[str] | None]):
             self.dismiss(urls)
 
 
+class UnitSizeScreen(ModalScreen[int | None]):
+    """Modal for setting the unit size."""
+
+    BINDINGS = [("escape", "cancel", "Cancel")]
+
+    def __init__(self, current: int) -> None:
+        super().__init__()
+        self._current = current
+
+    def action_cancel(self) -> None:
+        self.dismiss(None)
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="modal-dialog"):
+            yield Label("Set Unit Size", classes="modal-title")
+            yield Label(f"Current unit size: {self._current}")
+            yield Input(
+                value=str(self._current),
+                id="unit-input",
+                type="integer",
+            )
+            yield Label("", id="modal-error", classes="modal-error")
+            with Vertical(id="modal-buttons"):
+                yield Button("Cancel", id="cancel-btn", variant="default")
+                yield Button("Set", id="set-btn", variant="primary")
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id == "cancel-btn":
+            self.dismiss(None)
+        elif event.button.id == "set-btn":
+            unit_input = self.query_one("#unit-input", Input)
+            try:
+                size = int(unit_input.value)
+            except ValueError:
+                self.query_one("#modal-error", Label).update("Enter a valid number")
+                return
+            if size < 1:
+                self.query_one("#modal-error", Label).update("Unit size must be at least 1")
+                return
+            self.dismiss(size)
+
+
 class BidScreen(ModalScreen[BidConfirmation | None]):
     """Confirmation modal for placing NO bids on both legs."""
 
