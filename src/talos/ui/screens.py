@@ -105,3 +105,43 @@ class BidScreen(ModalScreen[BidConfirmation | None]):
                     qty=qty,
                 )
             )
+
+
+class AutoAcceptScreen(ModalScreen[float | None]):
+    """Modal for entering auto-accept duration in hours."""
+
+    BINDINGS = [("escape", "cancel", "Cancel")]
+
+    def action_cancel(self) -> None:
+        self.dismiss(None)
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="modal-dialog"):
+            yield Label("Auto-Accept Mode", classes="modal-title")
+            yield Label("How many hours to auto-accept proposals?")
+            yield Input(
+                value="2.0",
+                id="hours-input",
+                type="number",
+            )
+            yield Label("", id="modal-error", classes="modal-error")
+            with Vertical(id="modal-buttons"):
+                yield Button("Cancel", id="cancel-btn", variant="default")
+                yield Button("Start", id="start-btn", variant="warning")
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id == "cancel-btn":
+            self.dismiss(None)
+        elif event.button.id == "start-btn":
+            hours_input = self.query_one("#hours-input", Input)
+            try:
+                hours = float(hours_input.value)
+            except ValueError:
+                self.query_one("#modal-error", Label).update("Enter a valid number")
+                return
+            if hours <= 0 or hours > 24:
+                self.query_one("#modal-error", Label).update(
+                    "Duration must be between 0 and 24 hours"
+                )
+                return
+            self.dismiss(hours)
