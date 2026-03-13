@@ -183,7 +183,7 @@ class AutoAcceptScreen(ModalScreen[float | None]):
                 return
             if hours <= 0 or hours > 24:
                 self.query_one("#modal-error", Label).update(
-                    "Duration must be between 0 and 24 hours"
+                    "Duration must be greater than 0 and at most 24 hours"
                 )
                 return
             self.dismiss(hours)

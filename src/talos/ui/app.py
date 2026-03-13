@@ -118,8 +118,8 @@ class TalosApp(App):
             return
 
         proposal = pending[0]
+        snapshot = self._capture_state_snapshot()
         try:
-            snapshot = self._capture_state_snapshot()
             await self._engine.approve_proposal(proposal.key)
             self._auto_accept.accepted_count += 1
             if self._auto_accept_logger:
@@ -127,7 +127,6 @@ class TalosApp(App):
         except Exception as e:
             logger.exception("auto_accept_error", proposal_key=str(proposal.key))
             if self._auto_accept_logger:
-                snapshot = self._capture_state_snapshot()
                 self._auto_accept_logger.log_error(proposal, str(e), snapshot, self._auto_accept)
 
         self.query_one(ProposalPanel).refresh_proposals()
