@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from datetime import UTC
 from unittest.mock import AsyncMock, MagicMock
 
@@ -13,7 +14,7 @@ from talos.engine import TradingEngine
 from talos.game_manager import GameManager
 from talos.market_feed import MarketFeed
 from talos.models.order import Order
-from talos.models.portfolio import Balance, Position
+from talos.models.portfolio import Balance, Position, Settlement
 from talos.models.proposal import ProposalKey
 from talos.models.strategy import ArbPair
 from talos.models.ws import FillMessage, OrderBookSnapshot, UserOrderMessage
@@ -131,6 +132,7 @@ def _engine_with_pair() -> tuple[TradingEngine, AsyncMock]:
     pair = ArbPair(event_ticker="EVT-1", ticker_a="TK-A", ticker_b="TK-B")
     adjuster = BidAdjuster(books, [pair], unit_size=10)
     rest = AsyncMock(spec=KalshiRESTClient)
+    rest.create_order_group = AsyncMock(return_value="grp-test")
     engine = _make_engine(
         scanner=scanner,
         adjuster=adjuster,
@@ -159,6 +161,7 @@ def _engine_with_pair_and_books(
     pair = ArbPair(event_ticker="EVT-1", ticker_a="TK-A", ticker_b="TK-B")
     adjuster = BidAdjuster(books, [pair], unit_size=10)
     rest = AsyncMock(spec=KalshiRESTClient)
+    rest.create_order_group = AsyncMock(return_value="grp-test")
     engine = _make_engine(
         scanner=scanner,
         adjuster=adjuster,
@@ -950,6 +953,7 @@ class TestCheckImbalances:
             side="no",
             no_price=48,
             count=10,
+            order_group_id="grp-test",
         )
 
     @pytest.mark.asyncio
@@ -1255,6 +1259,7 @@ class TestFreshSyncBeforeCatchup:
             side="no",
             no_price=48,
             count=10,
+            order_group_id="grp-test",
         )
 
     @pytest.mark.asyncio
@@ -1691,3 +1696,88 @@ class TestOnFill:
             post_position=-3,
         )
         engine._on_fill(msg)  # Should not raise
+
+
+class TestLifecycleFiltering:
+    """Lifecycle notifications should only fire for tracked markets."""
+
+    @pytest.mark.asyncio
+    async def test_settled_notification_only_for_our_markets(self):
+        engine, rest = _engine_with_pair()
+        rest.get_settlements = AsyncMock(return_value=[])
+        notifications: list[str] = []
+        engine.on_notification = lambda msg, sev="information": notifications.append(msg)
+
+        # Our market → should notify
+        engine._on_market_settled("TK-A")
+        await asyncio.sleep(0)
+        assert any("TK-A" in n for n in notifications)
+
+        # Random market → should NOT notify
+        notifications.clear()
+        engine._on_market_settled("UNRELATED-MKT")
+        await asyncio.sleep(0)
+        assert not notifications
+
+    def test_determined_notification_only_for_our_markets(self):
+        engine, _ = _engine_with_pair()
+        notifications: list[str] = []
+        engine.on_notification = lambda msg, sev="information": notifications.append(msg)
+
+        engine._on_market_determined("TK-B", "yes", 100)
+        assert any("TK-B" in n for n in notifications)
+
+        notifications.clear()
+        engine._on_market_determined("UNRELATED-MKT", "no", 0)
+        assert not notifications
+
+    def test_paused_notification_only_for_our_markets(self):
+        engine, _ = _engine_with_pair()
+        notifications: list[str] = []
+        engine.on_notification = lambda msg, sev="information": notifications.append(msg)
+
+        engine._on_market_paused("TK-A", True)
+        assert any("TK-A" in n for n in notifications)
+
+        notifications.clear()
+        engine._on_market_paused("UNRELATED-MKT", True)
+        assert not notifications
+
+    def test_paused_still_tracks_state_for_unrelated(self):
+        """Even untracked markets get added to paused set (for safety)."""
+        engine, _ = _engine_with_pair()
+        engine._on_market_paused("UNRELATED-MKT", True)
+        assert "UNRELATED-MKT" in engine.paused_markets
+
+    @pytest.mark.asyncio
+    async def test_settled_fetches_settlement_for_our_market(self):
+        engine, rest = _engine_with_pair()
+        settlement = Settlement(
+            ticker="TK-A",
+            event_ticker="EVT-1",
+            market_result="no",
+            revenue=200,
+            fee_cost=10,
+            no_count=5,
+        )
+        rest.get_settlements = AsyncMock(return_value=[settlement])
+        notifications: list[str] = []
+        engine.on_notification = lambda msg, sev="information": notifications.append(msg)
+
+        engine._on_market_settled("TK-A")
+        # Let the fire-and-forget task run
+        await asyncio.sleep(0)
+
+        rest.get_settlements.assert_called_once_with(ticker="TK-A")
+        assert any("Settlement TK-A" in n for n in notifications)
+        assert any("rev $2.00" in n for n in notifications)
+
+    @pytest.mark.asyncio
+    async def test_settled_no_fetch_for_unrelated_market(self):
+        engine, rest = _engine_with_pair()
+        rest.get_settlements = AsyncMock(return_value=[])
+
+        engine._on_market_settled("UNRELATED-MKT")
+        await asyncio.sleep(0)
+
+        rest.get_settlements.assert_not_called()

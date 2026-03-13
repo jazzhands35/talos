@@ -192,19 +192,19 @@ class TestTablePositions:
             row = table.get_row_at(0)
             # Pos-A: 3/5 at fee_adjusted_cost(31) = 31 + 31*69*0.0175/100 = 31.4¢
             # Pos-B: 3/5 at fee_adjusted_cost(67) = 67 + 67*33*0.0175/100 = 67.4¢
-            assert "3/5 31.4" in str(row[4])  # Pos-A with fee-adjusted avg
-            assert "3/5 67.4" in str(row[5])  # Pos-B with fee-adjusted avg
-            assert "8" in str(row[6])  # Q-A column
-            assert "15" in str(row[9])  # Q-B column
-            assert "12.5" in str(row[7])  # CPM-A
-            assert "6.00*" in str(row[10])  # CPM-B (partial)
-            assert "1m" in str(row[8])  # ETA-A (0.64 min rounds to 1m)
-            assert "2m*" in str(row[11])  # ETA-B (2.5 rounds to 2m via banker's rounding, partial)
-            assert "0.02" in str(row[13])  # P&L (locked_profit_cents=2.38, no exposure)
+            assert "3/5 31.4" in str(row[5])  # Pos-A with fee-adjusted avg
+            assert "3/5 67.4" in str(row[6])  # Pos-B with fee-adjusted avg
+            assert "8" in str(row[7])  # Q-A column
+            assert "15" in str(row[10])  # Q-B column
+            assert "12.5" in str(row[8])  # CPM-A
+            assert "6.00*" in str(row[11])  # CPM-B (partial)
+            assert "1m" in str(row[9])  # ETA-A (0.64 min rounds to 1m)
+            assert "2m*" in str(row[12])  # ETA-B (2.5 rounds to 2m via banker's rounding, partial)
+            assert "0.02" in str(row[14])  # P&L (locked_profit_cents=2.38, no exposure)
             # Net/Odds: both scenarios positive → guaranteed profit
             # 3 fills each at 31¢/67¢ (total costs 93/201, fees=0 in test):
             # total_outlay = 294, net = 300 - 294 = 6 → GTD $0.06
-            assert "GTD $0.06" in str(row[14])
+            assert "GTD $0.06" in str(row[15])
 
     async def test_table_shows_odds_without_positions(self) -> None:
         scanner = _make_scanner_with_opportunity()
@@ -214,10 +214,10 @@ class TestTablePositions:
             await pilot.pause()
             table = app.query_one(OpportunitiesTable)
             row = table.get_row_at(0)
-            assert str(row[4]) == "—"  # Pos-A shows dim dash
-            assert str(row[5]) == "—"  # Pos-B shows dim dash
+            assert str(row[5]) == "—"  # Pos-A shows dim dash
+            assert str(row[6]) == "—"  # Pos-B shows dim dash
             # Net/Odds shows per-leg odds only when no positions
-            assert "+160/-124" in str(row[14])
+            assert "+160/-124" in str(row[15])
 
 
 class TestRichTextCells:
@@ -231,7 +231,7 @@ class TestRichTextCells:
             table = app.query_one(OpportunitiesTable)
             row = table.get_row_at(0)
             # Pos-A (index 4) should be a dim Rich Text em-dash (no positions loaded)
-            pos_a = row[4]
+            pos_a = row[5]
             assert isinstance(pos_a, RichText)
             assert str(pos_a) == "—"
 
@@ -302,7 +302,7 @@ class TestRichTextCells:
             table.refresh_from_scanner(scanner, tracker)
             await pilot.pause()
             row = table.get_row_at(0)
-            q_a = row[6]  # Q-A column
+            q_a = row[7]  # Q-A column
             assert isinstance(q_a, RichText)
             assert "!!" in str(q_a)
 
@@ -343,8 +343,8 @@ class TestRichTextCells:
             app.refresh_opportunities()
             await pilot.pause()
             row = table.get_row_at(0)
-            pos_a = row[4]  # Pos-A: 3 filled (behind — fewer fills)
-            pos_b = row[5]  # Pos-B: 5 filled (ahead)
+            pos_a = row[5]  # Pos-A: 3 filled (behind — fewer fills)
+            pos_b = row[6]  # Pos-B: 5 filled (ahead)
             # Behind side (A) should show yellow styling
             assert isinstance(pos_a, RichText)
             assert isinstance(pos_b, RichText)

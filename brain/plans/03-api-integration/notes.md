@@ -34,3 +34,9 @@ Kalshi uses different names for channels vs the message types within them:
 | `communications` | `rfq_created`, `rfq_deleted`, `quote_created`, `quote_accepted`, `quote_executed` | Five types on one channel |
 
 This is critical for the `_MESSAGE_MODELS` registry in `ws_client.py` — the key must be the message **type** string, not the channel name.
+
+## Future UI Surfacing Candidates
+
+Data that is fetched and cached but not yet displayed in the TUI. Wire these up when they become useful:
+
+- **Volume/OI per market** — available via `engine.get_ticker_data(ticker)` (TickerFeed WS cache). Could add Vol-A/Vol-B columns to OpportunitiesTable or show on BidScreen. Useful as a liquidity signal complementing CPM.

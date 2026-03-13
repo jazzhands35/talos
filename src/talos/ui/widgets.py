@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from typing import Any
 
 from rich.text import Text as RichText
@@ -28,12 +29,23 @@ def _fmt_edge(fee_edge: float) -> RichText:
     return RichText(label, style="dim", justify="right")
 
 
-def _fmt_pnl(net_cents: float) -> RichText:
-    """Format P&L in dollars: green positive, red negative."""
+def _fmt_pnl(net_cents: float, kalshi_pnl: int | None = None) -> RichText:
+    """Format P&L in dollars: green positive, red negative.
+
+    When Kalshi's realized_pnl is non-zero, append it as 'k$X.XX' suffix.
+    """
     dollars = net_cents / 100
     if dollars >= 0:
-        return RichText(f"${dollars:.2f}", style=GREEN, justify="right")
-    return RichText(f"-${abs(dollars):.2f}", style=RED, justify="right")
+        label = f"${dollars:.2f}"
+        style = GREEN
+    else:
+        label = f"-${abs(dollars):.2f}"
+        style = RED
+    if kalshi_pnl is not None and kalshi_pnl != 0:
+        k_dollars = kalshi_pnl / 100
+        k_str = f"${k_dollars:.2f}" if k_dollars >= 0 else f"-${abs(k_dollars):.2f}"
+        label = f"{label} k{k_str}"
+    return RichText(label, style=style, justify="right")
 
 
 def _fmt_pos(filled: int, total: int, avg_no_price: int) -> RichText:
@@ -56,6 +68,33 @@ def _fmt_odds(no_price: int) -> str:
 
 
 DIM_DASH = RichText("—", style="dim", justify="right")
+
+
+def _fmt_closes(close_time: str | None) -> RichText:
+    """Format close_time as a human-readable countdown."""
+    if not close_time:
+        return DIM_DASH
+    try:
+        close_dt = datetime.fromisoformat(close_time.replace("Z", "+00:00"))
+        now = datetime.now(UTC)
+        delta = close_dt - now
+        total_seconds = int(delta.total_seconds())
+        if total_seconds <= 0:
+            return RichText("closed", style=RED, justify="right")
+        hours, remainder = divmod(total_seconds, 3600)
+        minutes = remainder // 60
+        if hours >= 24:
+            days = hours // 24
+            label = f"{days}d {hours % 24}h"
+            return RichText(label, justify="right")
+        if hours >= 1:
+            label = f"{hours}h {minutes:02d}m"
+            style = YELLOW if hours < 2 else ""
+            return RichText(label, style=style, justify="right")
+        label = f"{minutes}m"
+        return RichText(label, style=RED, justify="right")
+    except (ValueError, TypeError):
+        return DIM_DASH
 
 
 def _fmt_status(status: str) -> RichText:
@@ -152,6 +191,7 @@ class OpportunitiesTable(DataTable):
         self.add_column("NO-A")
         self.add_column("NO-B")
         self.add_column("Edge")
+        self.add_column("Closes", width=8)
         self.add_column("Pos-A", width=14)
         self.add_column("Pos-B", width=14)
         self.add_column("Q-A", width=10)
@@ -161,7 +201,7 @@ class OpportunitiesTable(DataTable):
         self.add_column("CPM-B", width=8)
         self.add_column("ETA-B", width=7)
         self.add_column("Status", width=16)
-        self.add_column("P&L   ")
+        self.add_column("P&L", width=16)
         self.add_column("Net/Odds", width=20)
 
     def update_positions(self, summaries: list[EventPositionSummary]) -> None:
@@ -237,7 +277,7 @@ class OpportunitiesTable(DataTable):
                     format_eta(pos.leg_b.eta_minutes, pos.leg_b.cpm_partial), justify="right"
                 )
                 net = pos.locked_profit_cents - pos.exposure_cents
-                pnl = _fmt_pnl(net)
+                pnl = _fmt_pnl(net, pos.kalshi_pnl)
                 status = _fmt_status(pos.status)
                 net_odds = _fmt_net_odds(
                     opp.no_a,
@@ -270,11 +310,13 @@ class OpportunitiesTable(DataTable):
                     q_b = RichText(f"!! {q_b}", style=YELLOW, justify="right")
 
             display_name = self._labels.get(opp.event_ticker, opp.event_ticker)
+            closes = _fmt_closes(opp.close_time)
             row_data = (
                 display_name,
                 _fmt_cents(opp.no_a),
                 _fmt_cents(opp.no_b),
                 edge_str,
+                closes,
                 pos_a,
                 pos_b,
                 q_a,

@@ -37,6 +37,7 @@ class ArbitrageScanner:
         *,
         fee_type: str = "quadratic_with_maker_fees",
         fee_rate: float = 0.0175,
+        close_time: str | None = None,
     ) -> None:
         """Register a pair of markets to monitor."""
         if any(p.event_ticker == event_ticker for p in self._pairs):
@@ -47,6 +48,7 @@ class ArbitrageScanner:
             ticker_b=ticker_b,
             fee_type=fee_type,
             fee_rate=fee_rate,
+            close_time=close_time,
         )
         self._pairs.append(pair)
         self._pairs_by_ticker.setdefault(ticker_a, []).append(pair)
@@ -65,6 +67,8 @@ class ArbitrageScanner:
                 raw_edge=0,
                 tradeable_qty=0,
                 timestamp=datetime.now(UTC).isoformat(),
+                close_time=close_time,
+                fee_rate=fee_rate,
             ),
         )
         logger.info("scanner_pair_added", event_ticker=event_ticker, a=ticker_a, b=ticker_b)
@@ -128,6 +132,8 @@ class ArbitrageScanner:
             fee_edge=fee_adjusted_edge(no_a.price, no_b.price, rate=pair.fee_rate),
             tradeable_qty=min(no_a.quantity, no_b.quantity),
             timestamp=datetime.now(UTC).isoformat(),
+            close_time=pair.close_time,
+            fee_rate=pair.fee_rate,
         )
         self._all_snapshots[pair.event_ticker] = opp
 

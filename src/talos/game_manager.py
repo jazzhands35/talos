@@ -57,7 +57,7 @@ class GameManager:
         self._labels: dict[str, str] = {}
         self.on_change: Callable[[], None] | None = None
 
-    async def add_game(self, url_or_ticker: str) -> ArbPair:
+    async def add_game(self, url_or_ticker: str, *, subscribe: bool = True) -> ArbPair:
         """Set up monitoring for a game from a URL or event ticker."""
         ticker = parse_kalshi_url(url_or_ticker)
 
@@ -79,6 +79,10 @@ class GameManager:
 
         ticker_a = event.markets[0].ticker
         ticker_b = event.markets[1].ticker
+
+        # Extract earliest close_time from the two markets
+        close_times = [m.close_time for m in event.markets if m.close_time]
+        close_time = min(close_times) if close_times else None
 
         # Fetch series for fee metadata (non-critical — default if it fails)
         fee_type = "quadratic_with_maker_fees"
@@ -106,12 +110,19 @@ class GameManager:
             ticker_b=ticker_b,
             fee_type=fee_type,
             fee_rate=fee_rate,
+            close_time=close_time,
         )
         self._scanner.add_pair(
-            event.event_ticker, ticker_a, ticker_b, fee_type=fee_type, fee_rate=fee_rate
+            event.event_ticker,
+            ticker_a,
+            ticker_b,
+            fee_type=fee_type,
+            fee_rate=fee_rate,
+            close_time=close_time,
         )
-        await self._feed.subscribe(ticker_a)
-        await self._feed.subscribe(ticker_b)
+        if subscribe:
+            await self._feed.subscribe(ticker_a)
+            await self._feed.subscribe(ticker_b)
         self._games[event.event_ticker] = pair
 
         # Build short display label from sub_title
@@ -137,8 +148,18 @@ class GameManager:
         return pair
 
     async def add_games(self, urls: list[str]) -> list[ArbPair]:
-        """Set up monitoring for multiple games concurrently."""
-        return list(await asyncio.gather(*(self.add_game(url) for url in urls)))
+        """Set up monitoring for multiple games concurrently.
+
+        Defers feed subscriptions and does a single bulk subscribe at the end,
+        reducing WS roundtrips from 2N to 1.
+        """
+        pairs = list(
+            await asyncio.gather(*(self.add_game(url, subscribe=False) for url in urls))
+        )
+        tickers = [t for p in pairs for t in (p.ticker_a, p.ticker_b)]
+        if tickers:
+            await self._feed.subscribe_bulk(tickers)
+        return pairs
 
     async def remove_game(self, event_ticker: str) -> None:
         """Remove a game from monitoring."""

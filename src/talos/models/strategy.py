@@ -13,6 +13,7 @@ class ArbPair(BaseModel):
     ticker_b: str
     fee_type: str = "quadratic_with_maker_fees"
     fee_rate: float = 0.0175
+    close_time: str | None = None
 
 
 class Opportunity(BaseModel):
@@ -29,6 +30,8 @@ class Opportunity(BaseModel):
     fee_edge: float = 0.0
     tradeable_qty: int
     timestamp: str
+    close_time: str | None = None
+    fee_rate: float = 0.0175
 
     @property
     def cost(self) -> int:

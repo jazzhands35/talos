@@ -70,9 +70,10 @@ class BidScreen(ModalScreen[BidConfirmation | None]):
             )
             total_cost = opp.cost * default_qty
             fee_profit = opp.fee_edge * default_qty
+            fee_pct = opp.fee_rate * 100
             yield Label(
                 f"Total: ${total_cost / 100:.2f} → "
-                f"Profit: ${fee_profit / 100:.2f} (after 1.75% fee)",
+                f"Profit: ${fee_profit / 100:.2f} (after {fee_pct:.2g}% fee)",
                 id="cost-label",
             )
             yield Label("", id="modal-error", classes="modal-error")

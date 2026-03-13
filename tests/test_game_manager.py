@@ -57,6 +57,7 @@ class TestGameManager:
     def mock_feed(self) -> MarketFeed:
         feed = MagicMock(spec=MarketFeed)
         feed.subscribe = AsyncMock()
+        feed.subscribe_bulk = AsyncMock()
         feed.unsubscribe = AsyncMock()
         return feed
 
@@ -113,6 +114,7 @@ class TestGameManager:
             "TICK-B",
             fee_type="quadratic_with_maker_fees",
             fee_rate=0.0175,
+            close_time=None,
         )
 
     async def test_add_game_subscribes_both_tickers(
@@ -165,6 +167,7 @@ class TestGameManager:
         self,
         manager: GameManager,
         mock_rest: KalshiRESTClient,
+        mock_feed: MarketFeed,
     ) -> None:
         mock_rest.get_event.side_effect = [  # type: ignore[union-attr]
             self._make_event("EVT-1", ["A1", "B1"]),
@@ -172,6 +175,12 @@ class TestGameManager:
         ]
         pairs = await manager.add_games(["EVT-1", "EVT-2"])
         assert len(pairs) == 2
+        # Individual subscribes should be skipped
+        mock_feed.subscribe.assert_not_called()  # type: ignore[union-attr]
+        # Single bulk subscribe with all 4 tickers
+        mock_feed.subscribe_bulk.assert_called_once()  # type: ignore[union-attr]
+        bulk_tickers = mock_feed.subscribe_bulk.call_args[0][0]  # type: ignore[union-attr]
+        assert set(bulk_tickers) == {"A1", "B1", "A2", "B2"}
 
     async def test_remove_game(
         self,

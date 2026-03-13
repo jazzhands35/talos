@@ -456,6 +456,10 @@ class TradingEngine:
 
     # ── Lifecycle event handlers ────────────────────────────────
 
+    def _is_our_market(self, ticker: str) -> bool:
+        """Check if a ticker belongs to a market we're actively tracking."""
+        return ticker in self._active_market_tickers()
+
     def _on_market_determined(self, ticker: str, result: str, settlement_value: int) -> None:
         """Handle market determination (result known, not yet settled)."""
         logger.info(
@@ -464,21 +468,53 @@ class TradingEngine:
             result=result,
             settlement_value=settlement_value,
         )
-        self._notify(f"Market determined: {ticker} → {result}")
+        if self._is_our_market(ticker):
+            self._notify(f"Market determined: {ticker} → {result}")
 
     def _on_market_settled(self, ticker: str) -> None:
         """Handle market settlement (cash distributed)."""
         logger.info("lifecycle_settled", ticker=ticker)
-        self._notify(f"Market settled: {ticker}")
+        if self._is_our_market(ticker):
+            self._notify(f"Market settled: {ticker}")
+            asyncio.create_task(self._fetch_settlement(ticker))
+
+    async def _fetch_settlement(self, ticker: str) -> None:
+        """Fetch settlement details from Kalshi after a market settles."""
+        try:
+            settlements = await self._rest.get_settlements(ticker=ticker)
+            if not settlements:
+                logger.info("settlement_not_found", ticker=ticker)
+                return
+            s = settlements[0]
+            net = s.revenue - s.fee_cost
+            self._notify(
+                f"Settlement {ticker}: "
+                f"{'won' if s.market_result == 'yes' else 'lost'} "
+                f"rev ${s.revenue / 100:.2f} fee ${s.fee_cost / 100:.2f} "
+                f"net ${net / 100:.2f}"
+            )
+            logger.info(
+                "settlement_fetched",
+                ticker=ticker,
+                result=s.market_result,
+                revenue=s.revenue,
+                fee_cost=s.fee_cost,
+                no_count=s.no_count,
+                yes_count=s.yes_count,
+            )
+        except Exception:
+            logger.warning("settlement_fetch_failed", ticker=ticker, exc_info=True)
 
     def _on_market_paused(self, ticker: str, is_deactivated: bool) -> None:
         """Handle market pause/unpause."""
         if is_deactivated:
             self._paused_markets.add(ticker)
-            self._notify(f"Market paused: {ticker}", "warning")
+            if self._is_our_market(ticker):
+                self._notify(f"Market paused: {ticker}", "warning")
         else:
             self._paused_markets.discard(ticker)
-            self._notify(f"Market unpaused: {ticker}")
+            if self._is_our_market(ticker):
+                self._notify(f"Market unpaused: {ticker}")
         logger.info(
             "lifecycle_paused",
             ticker=ticker,
@@ -798,6 +834,11 @@ class TradingEngine:
                     )
                     return
 
+        # Create server-side order groups (belt-and-suspenders with is_placement_safe)
+        event_ticker = ledger.event_ticker if ledger is not None else bid.ticker_a
+        group_a = await self._create_order_group(event_ticker, "A", bid.qty)
+        group_b = await self._create_order_group(event_ticker, "B", bid.qty)
+
         try:
             order_a = await self._rest.create_order(
                 ticker=bid.ticker_a,
@@ -805,6 +846,7 @@ class TradingEngine:
                 side="no",
                 no_price=bid.no_a,
                 count=bid.qty,
+                order_group_id=group_a,
             )
             logger.info("order_placed", ticker=bid.ticker_a, order_id=order_a.order_id)
             order_b = await self._rest.create_order(
@@ -813,6 +855,7 @@ class TradingEngine:
                 side="no",
                 no_price=bid.no_b,
                 count=bid.qty,
+                order_group_id=group_b,
             )
             logger.info("order_placed", ticker=bid.ticker_b, order_id=order_b.order_id)
             self._notify(
@@ -1051,6 +1094,9 @@ class TradingEngine:
                 )
                 return
 
+            catchup_group = await self._create_order_group(
+                rebalance.event_ticker, under_side.value, rebalance.catchup_qty
+            )
             try:
                 await self._rest.create_order(
                     ticker=rebalance.catchup_ticker,
@@ -1058,6 +1104,7 @@ class TradingEngine:
                     side="no",
                     no_price=rebalance.catchup_price,
                     count=rebalance.catchup_qty,
+                    order_group_id=catchup_group,
                 )
                 self._notify(
                     f"Rebalance step 2: catch-up {rebalance.catchup_ticker}"
@@ -1260,6 +1307,35 @@ class TradingEngine:
                 return pair
         return None
 
+    async def _create_order_group(
+        self, event_ticker: str, side: str, qty: int
+    ) -> str | None:
+        """Create a server-side order group for fill-limit safety.
+
+        Returns the order_group_id, or None if creation fails (non-blocking).
+        Any group-triggered cancellation means client-side safety failed — alert loudly.
+        """
+        ts = datetime.now(UTC).strftime("%H%M%S")
+        name = f"{event_ticker}-{side}-{qty}-{ts}"
+        try:
+            group_id = await self._rest.create_order_group(name, qty)
+            logger.info(
+                "order_group_created",
+                event_ticker=event_ticker,
+                side=side,
+                limit=qty,
+                group_id=group_id,
+            )
+            return group_id
+        except Exception:
+            logger.warning(
+                "order_group_create_failed",
+                event_ticker=event_ticker,
+                side=side,
+                exc_info=True,
+            )
+            return None
+
     def _find_ledger_for_bid(self, bid: BidConfirmation) -> PositionLedger | None:
         """Look up the position ledger for a bid's event."""
         for pair in self._scanner.pairs:
@@ -1280,6 +1356,9 @@ class TradingEngine:
         )
         for summary in self._position_summaries:
             summary.status = self._compute_event_status(summary.event_ticker)
+            ep = self._event_positions.get(summary.event_ticker)
+            if ep is not None:
+                summary.kalshi_pnl = ep.realized_pnl
 
     async def _recover_stale_books(self) -> None:
         """Resubscribe to any tickers with stale orderbooks.
