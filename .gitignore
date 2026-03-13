@@ -32,6 +32,7 @@ Thumbs.db
 # User state
 games.json
 suggestions.log
+auto_accept_sessions/
 
 # Testing
 .coverage

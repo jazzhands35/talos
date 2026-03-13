@@ -13,6 +13,7 @@ from textual.app import App, ComposeResult
 from textual.containers import Horizontal
 from textual.notifications import SeverityLevel
 from textual.widgets import DataTable, Footer, Header
+from textual.widgets._data_table import CellDoesNotExist
 
 from talos.auto_accept import AutoAcceptState
 from talos.auto_accept_log import AutoAcceptLogger
@@ -22,7 +23,7 @@ from talos.models.strategy import BidConfirmation
 from talos.proposal_queue import ProposalQueue
 from talos.scanner import ArbitrageScanner
 from talos.ui.proposal_panel import ProposalPanel
-from talos.ui.screens import AddGamesScreen, AutoAcceptScreen, BidScreen
+from talos.ui.screens import AddGamesScreen, AutoAcceptScreen, BidScreen, UnitSizeScreen
 from talos.ui.theme import APP_CSS
 from talos.ui.widgets import AccountPanel, OpportunitiesTable, OrderLog
 
@@ -38,6 +39,7 @@ class TalosApp(App):
         ("a", "add_games", "Add Games"),
         ("d", "remove_game", "Remove Game"),
         ("x", "clear_games", "Clear All"),
+        ("u", "set_unit_size", "Unit Size"),
         ("s", "toggle_suggestions", "Suggestions"),
         ("y", "approve_proposal", "Approve"),
         ("n", "reject_proposal", "Reject"),
@@ -278,10 +280,10 @@ class TalosApp(App):
         table = self.query_one(OpportunitiesTable)
         if table.cursor_row is not None:
             try:
-                row_key = table.get_row_at(table.cursor_row)
-                event_ticker = str(row_key[0])
+                row_key, _ = table.coordinate_to_cell_key(table.cursor_coordinate)
+                event_ticker = str(row_key.value)
                 self._remove_game(event_ticker)
-            except Exception:
+            except CellDoesNotExist:
                 logger.debug("remove_game_no_selection")
 
     @work(thread=False)
@@ -294,6 +296,18 @@ class TalosApp(App):
 
     def action_reject_proposal(self) -> None:
         self.query_one(ProposalPanel).reject_selected()
+
+    def action_set_unit_size(self) -> None:
+        if self._engine is not None:
+            self._open_unit_size()
+
+    @work(thread=False, exclusive=True, group="unit_size")
+    async def _open_unit_size(self) -> None:
+        current = self._engine.unit_size if self._engine else 10
+        result = await self.push_screen_wait(UnitSizeScreen(current))
+        if result is not None and self._engine is not None:
+            self._engine.set_unit_size(result)
+            self.notify(f"Unit size set to {result}", severity="information", markup=False)
 
     def action_toggle_suggestions(self) -> None:
         if self._engine is None:
@@ -326,19 +340,24 @@ class TalosApp(App):
 
     def _start_auto_accept(self, hours: float) -> None:
         """Activate auto-accept for the given duration."""
+        if self._engine is None:
+            return
+
         from pathlib import Path
 
         self._auto_accept.start(hours=hours)
 
         log_dir = Path(__file__).resolve().parents[3] / "auto_accept_sessions"
-        self._auto_accept_logger = AutoAcceptLogger(log_dir)
+        aa_logger = AutoAcceptLogger(log_dir)
+        self._auto_accept_logger = aa_logger
 
+        cfg = self._engine.automation_config
         config: dict[str, object] = {
-            "edge_threshold_cents": self._engine.automation_config.edge_threshold_cents,
-            "stability_seconds": self._engine.automation_config.stability_seconds,
+            "edge_threshold_cents": cfg.edge_threshold_cents,
+            "stability_seconds": cfg.stability_seconds,
             "unit_size": self._engine.unit_size,
         }
-        self._auto_accept_logger.log_session_start(self._auto_accept, config)
+        aa_logger.log_session_start(self._auto_accept, config)
 
         self.notify(
             f"Auto-accept ON — {hours:.1f}h",
