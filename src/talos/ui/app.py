@@ -14,13 +14,15 @@ from textual.containers import Horizontal
 from textual.notifications import SeverityLevel
 from textual.widgets import DataTable, Footer, Header
 
+from talos.auto_accept import AutoAcceptState
+from talos.auto_accept_log import AutoAcceptLogger
 from talos.engine import TradingEngine
 from talos.models.proposal import ProposalKey
 from talos.models.strategy import BidConfirmation
 from talos.proposal_queue import ProposalQueue
 from talos.scanner import ArbitrageScanner
 from talos.ui.proposal_panel import ProposalPanel
-from talos.ui.screens import AddGamesScreen, BidScreen
+from talos.ui.screens import AddGamesScreen, AutoAcceptScreen, BidScreen
 from talos.ui.theme import APP_CSS
 from talos.ui.widgets import AccountPanel, OpportunitiesTable, OrderLog
 
@@ -39,6 +41,7 @@ class TalosApp(App):
         ("s", "toggle_suggestions", "Suggestions"),
         ("y", "approve_proposal", "Approve"),
         ("n", "reject_proposal", "Reject"),
+        ("f", "toggle_auto_accept", "Auto-Accept"),
         ("q", "quit", "Quit"),
     ]
 
@@ -52,6 +55,8 @@ class TalosApp(App):
         self._engine = engine
         # Test mode: scanner-only for table tests without a full engine
         self._scanner = scanner or (engine.scanner if engine else None)
+        self._auto_accept = AutoAcceptState()
+        self._auto_accept_logger: AutoAcceptLogger | None = None
 
     def compose(self) -> ComposeResult:
         yield Header()
@@ -74,6 +79,7 @@ class TalosApp(App):
             self.set_interval(3.0, self._poll_queue)
             self.set_interval(10.0, self._poll_trades)
             self.set_interval(1.0, self._refresh_proposals)
+            self.set_interval(1.0, self._auto_accept_tick)
             self._engine.on_notification = self._on_engine_notification
             self._engine.tracker.on_change = self._engine.on_top_of_market_change
             self._start_feed()
@@ -87,6 +93,100 @@ class TalosApp(App):
     def _refresh_proposals(self) -> None:
         """Update the proposal panel from queue state."""
         self.query_one(ProposalPanel).refresh_proposals()
+        if self._auto_accept.active:
+            self.sub_title = (
+                f"AUTO-ACCEPT {self._auto_accept.remaining_str()} remaining "
+                f"({self._auto_accept.accepted_count} accepted)"
+            )
+        else:
+            self.sub_title = ""
+
+    @work(thread=False)
+    async def _auto_accept_tick(self) -> None:
+        """Each second: if auto-accept is active, approve the oldest pending proposal."""
+        if not self._auto_accept.active or self._engine is None:
+            return
+
+        if self._auto_accept.is_expired():
+            self._stop_auto_accept()
+            return
+
+        pending = self._engine.proposal_queue.pending()
+        if not pending:
+            return
+
+        proposal = pending[0]
+        try:
+            snapshot = self._capture_state_snapshot()
+            await self._engine.approve_proposal(proposal.key)
+            self._auto_accept.accepted_count += 1
+            if self._auto_accept_logger:
+                self._auto_accept_logger.log_accepted(proposal, snapshot, self._auto_accept)
+        except Exception as e:
+            logger.exception("auto_accept_error", proposal_key=str(proposal.key))
+            if self._auto_accept_logger:
+                snapshot = self._capture_state_snapshot()
+                self._auto_accept_logger.log_error(proposal, str(e), snapshot, self._auto_accept)
+
+        self.query_one(ProposalPanel).refresh_proposals()
+
+    def _capture_state_snapshot(self) -> dict[str, object]:
+        """Capture full trading state for JSONL logging."""
+        if self._engine is None:
+            return {}
+
+        positions: dict[str, dict[str, object]] = {}
+        for summary in self._engine.position_summaries:
+            positions[summary.event_ticker] = {
+                "status": summary.status,
+                "leg_a_filled": summary.leg_a.filled_count,
+                "leg_a_resting": summary.leg_a.resting_count,
+                "leg_b_filled": summary.leg_b.filled_count,
+                "leg_b_resting": summary.leg_b.resting_count,
+                "matched_pairs": summary.matched_pairs,
+                "locked_profit_cents": summary.locked_profit_cents,
+            }
+
+        resting_orders = [
+            {
+                "ticker": o.ticker,
+                "no_price": o.no_price,
+                "remaining": o.remaining_count,
+                "side": o.side,
+                "status": o.status,
+            }
+            for o in self._engine.orders
+            if o.status == "resting"
+        ]
+
+        top_of_market: dict[str, dict[str, int | None]] = {}
+        tracker = self._engine.tracker
+        for ticker in tracker._resting:
+            top_of_market[ticker] = {
+                "resting_price": tracker.resting_price(ticker),
+                "book_top": tracker.book_top_price(ticker),
+            }
+
+        opportunities: list[dict[str, object]] = []
+        if self._scanner:
+            for opp in self._scanner.opportunities:
+                opportunities.append(
+                    {
+                        "event_ticker": opp.event_ticker,
+                        "fee_edge": opp.fee_edge,
+                        "no_a": opp.no_a,
+                        "no_b": opp.no_b,
+                    }
+                )
+
+        return {
+            "positions": positions,
+            "balance_cents": self._engine.balance,
+            "portfolio_value_cents": self._engine.portfolio_value,
+            "resting_orders": resting_orders,
+            "top_of_market": top_of_market,
+            "scanner_opportunities": opportunities,
+        }
 
     def on_proposal_panel_approved(self, event: ProposalPanel.Approved) -> None:
         """Handle operator approving a proposal."""
@@ -209,6 +309,68 @@ class TalosApp(App):
             )
         else:
             self.notify("Suggestions OFF", severity="information", markup=False)
+
+    def action_toggle_auto_accept(self) -> None:
+        if self._engine is None:
+            return
+        if self._auto_accept.active:
+            self._stop_auto_accept()
+        else:
+            self._open_auto_accept()
+
+    @work(thread=False, exclusive=True, group="auto_accept")
+    async def _open_auto_accept(self) -> None:
+        hours = await self.push_screen_wait(AutoAcceptScreen())
+        if hours is not None and self._engine is not None:
+            self._start_auto_accept(hours)
+
+    def _start_auto_accept(self, hours: float) -> None:
+        """Activate auto-accept for the given duration."""
+        from pathlib import Path
+
+        self._auto_accept.start(hours=hours)
+
+        log_dir = Path(__file__).resolve().parents[3] / "auto_accept_sessions"
+        self._auto_accept_logger = AutoAcceptLogger(log_dir)
+
+        config: dict[str, object] = {
+            "edge_threshold_cents": self._engine.automation_config.edge_threshold_cents,
+            "stability_seconds": self._engine.automation_config.stability_seconds,
+            "unit_size": self._engine.unit_size,
+        }
+        self._auto_accept_logger.log_session_start(self._auto_accept, config)
+
+        self.notify(
+            f"Auto-accept ON — {hours:.1f}h",
+            severity="warning",
+            markup=False,
+        )
+        logger.info("auto_accept_started", hours=hours)
+
+    def _stop_auto_accept(self) -> None:
+        """Deactivate auto-accept and log session end."""
+        count = self._auto_accept.accepted_count
+        elapsed = self._auto_accept.elapsed_str()
+
+        if self._auto_accept_logger and self._engine:
+            final_positions: dict[str, object] = {}
+            for s in self._engine.position_summaries:
+                final_positions[s.event_ticker] = {
+                    "status": s.status,
+                    "leg_a_filled": s.leg_a.filled_count,
+                    "leg_b_filled": s.leg_b.filled_count,
+                }
+            self._auto_accept_logger.log_session_end(self._auto_accept, final_positions)
+
+        self._auto_accept.stop()
+        self._auto_accept_logger = None
+
+        self.notify(
+            f"Auto-accept OFF — {count} accepted in {elapsed}",
+            severity="information",
+            markup=False,
+        )
+        logger.info("auto_accept_stopped", accepted_count=count, elapsed=elapsed)
 
     def action_clear_games(self) -> None:
         if self._engine is not None:
