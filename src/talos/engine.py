@@ -258,14 +258,18 @@ class TradingEngine:
                     await self._ticker_feed.subscribe(market_tickers)
 
             await self._feed.start()
-            # If we reach here, the WS listen loop exited — connection is dead
-            logger.error("ws_connection_lost")
+            # If we reach here without exception, the WS exited cleanly
+            logger.error("ws_connection_lost", reason="listen loop exited cleanly")
             self._ws_connected = False
             self._notify("WEBSOCKET DISCONNECTED — prices are stale!", "error")
         except Exception as e:
-            logger.exception("feed_connection_error")
+            logger.error(
+                "ws_connection_lost",
+                reason=str(e),
+                error_type=type(e).__name__,
+            )
             self._ws_connected = False
-            self._notify(f"WEBSOCKET ERROR: {type(e).__name__}: {e}", "error")
+            self._notify(f"WEBSOCKET DISCONNECTED: {e}", "error")
 
     async def refresh_account(self) -> None:
         """Fetch balance + orders, sync ledgers, compute positions."""

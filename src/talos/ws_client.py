@@ -291,7 +291,21 @@ class KalshiWSClient:
             msg = "WebSocket not connected"
             raise RuntimeError(msg)
 
-        async for raw_msg in self._ws:
-            data = json.loads(raw_msg)
-            logger.debug("ws_message", type=data.get("type"), sid=data.get("sid"))
-            await self._dispatch(data)
+        try:
+            async for raw_msg in self._ws:
+                data = json.loads(raw_msg)
+                logger.debug("ws_message", type=data.get("type"), sid=data.get("sid"))
+                await self._dispatch(data)
+        except websockets.ConnectionClosed as e:
+            logger.error(
+                "ws_connection_closed",
+                code=e.code,
+                reason=e.reason,
+            )
+            raise
+        except Exception as e:
+            logger.error("ws_listen_error", error=str(e), error_type=type(e).__name__)
+            raise
+        finally:
+            logger.error("ws_listen_loop_exited")
+            self._ws = None

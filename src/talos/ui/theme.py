@@ -91,6 +91,21 @@ Footer {{
     color: {RED};
 }}
 
+#ws-disconnect-banner {{
+    dock: top;
+    width: 100%;
+    height: 1;
+    background: #ff0000;
+    color: #ffffff;
+    text-style: bold;
+    text-align: center;
+    display: none;
+}}
+
+#ws-disconnect-banner.visible {{
+    display: block;
+}}
+
 .order-filled {{
     color: {GREEN};
 }}

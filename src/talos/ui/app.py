@@ -12,7 +12,7 @@ from textual import work
 from textual.app import App, ComposeResult
 from textual.containers import Horizontal
 from textual.notifications import SeverityLevel
-from textual.widgets import DataTable, Footer, Header
+from textual.widgets import DataTable, Footer, Header, Static
 from textual.widgets._data_table import CellDoesNotExist
 
 from talos.auto_accept import AutoAcceptState
@@ -63,6 +63,10 @@ class TalosApp(App):
 
     def compose(self) -> ComposeResult:
         yield Header()
+        yield Static(
+            "WEBSOCKET DISCONNECTED — ALL PRICES ARE STALE — RESTART TALOS",
+            id="ws-disconnect-banner",
+        )
         yield OpportunitiesTable(id="opportunities-table")
         yield ProposalPanel(
             self._engine.proposal_queue if self._engine else ProposalQueue(),
@@ -100,8 +104,15 @@ class TalosApp(App):
     def _refresh_proposals(self) -> None:
         """Update the proposal panel from queue state."""
         self.query_one(ProposalPanel).refresh_proposals()
-        # WS disconnect takes priority over all other sub_title content
-        if self._engine is not None and not self._engine.ws_connected:
+        # WS disconnect: show red banner and title bar warning
+        banner = self.query_one("#ws-disconnect-banner", Static)
+        ws_dead = self._engine is not None and not self._engine.ws_connected
+        if ws_dead:
+            banner.add_class("visible")
+        else:
+            banner.remove_class("visible")
+        # Sub_title: WS warning takes priority, then auto-accept, then clear
+        if ws_dead:
             self.sub_title = "!!! WEBSOCKET DISCONNECTED — PRICES ARE STALE !!!"
         elif self._auto_accept.active:
             self.sub_title = (
