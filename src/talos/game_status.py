@@ -297,20 +297,29 @@ class PandaScoreProvider:
 # ── Source Map & Resolver ─────────────────────────────────────────
 
 SOURCE_MAP: dict[str, tuple[str, str, str]] = {
-    "KXNHL": ("espn", "hockey", "nhl"),
-    "KXNBA": ("espn", "basketball", "nba"),
-    "KXMLB": ("espn", "baseball", "mlb"),
-    "KXNFL": ("espn", "football", "nfl"),
-    "KXWNBA": ("espn", "basketball", "wnba"),
-    "KXCFB": ("espn", "football", "college-football"),
-    "KXCBB": ("espn", "basketball", "mens-college-basketball"),
-    "KXMLS": ("espn", "soccer", "usa.1"),
-    "KXEPL": ("espn", "soccer", "eng.1"),
-    "KXAHL": ("odds-api", "icehockey_ahl", "icehockey_ahl"),
-    "KXLOL": ("pandascore", "lol", "league-of-legends"),
-    "KXCS2": ("pandascore", "csgo", "cs2"),
-    "KXVAL": ("pandascore", "valorant", "valorant"),
-    "KXDOTA": ("pandascore", "dota2", "dota-2"),
+    # ESPN — major US leagues
+    "KXNHLGAME": ("espn", "hockey", "nhl"),
+    "KXNBAGAME": ("espn", "basketball", "nba"),
+    "KXMLBGAME": ("espn", "baseball", "mlb"),
+    "KXNFLGAME": ("espn", "football", "nfl"),
+    "KXWNBAGAME": ("espn", "basketball", "wnba"),
+    "KXCFBGAME": ("espn", "football", "college-football"),
+    "KXCBBGAME": ("espn", "basketball", "mens-college-basketball"),
+    "KXMLSGAME": ("espn", "soccer", "usa.1"),
+    "KXEPLGAME": ("espn", "soccer", "eng.1"),
+    # ESPN — tennis
+    "KXATPMATCH": ("espn", "tennis", "atp"),
+    "KXATPDOUBLES": ("espn", "tennis", "atp"),
+    # The Odds API — minor leagues
+    "KXAHLGAME": ("odds-api", "icehockey_ahl", "icehockey_ahl"),
+    "KXATPCHALLENGERMATCH": ("odds-api", "tennis_atp_challenger", "tennis_atp_challenger"),
+    "KXWTACHALLENGERMATCH": ("odds-api", "tennis_wta_challenger", "tennis_wta_challenger"),
+    # PandaScore — esports
+    "KXLOLGAME": ("pandascore", "lol", "league-of-legends"),
+    "KXCS2GAME": ("pandascore", "csgo", "cs2"),
+    "KXVALGAME": ("pandascore", "valorant", "valorant"),
+    "KXDOTA2GAME": ("pandascore", "dota2", "dota-2"),
+    "KXCODGAME": ("pandascore", "codmw", "cod-mw"),
 }
 
 _MONTH_MAP: dict[str, str] = {
