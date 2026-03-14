@@ -47,10 +47,22 @@ class LifecycleFeed:
         ticker = msg.market_ticker
 
         if event_type == "determined" and self.on_determined:
+            if msg.settlement_value is None:
+                logger.warning(
+                    "lifecycle_determined_missing_settlement",
+                    ticker=ticker,
+                )
+                return
             self.on_determined(ticker, msg.result, msg.settlement_value)
         elif event_type == "settled" and self.on_settled:
             self.on_settled(ticker)
         elif event_type == "deactivated" and self.on_paused:
+            if msg.is_deactivated is None:
+                logger.warning(
+                    "lifecycle_deactivated_missing_flag",
+                    ticker=ticker,
+                )
+                return
             self.on_paused(ticker, msg.is_deactivated)
         elif event_type == "new_market" and self.on_created:
             self.on_created(ticker)

@@ -17,6 +17,8 @@
 | `market_feed.py` | WS subscription orchestrator (orderbook) | `MarketFeed` |
 | `portfolio_feed.py` | WS orchestrator for user_orders + fill channels | `PortfolioFeed` |
 | `ticker_feed.py` | WS orchestrator for ticker channel (BBA, volume) | `TickerFeed` |
+| `lifecycle_feed.py` | WS orchestrator for market_lifecycle_v2 channel | `LifecycleFeed` |
+| `position_feed.py` | WS orchestrator for market_positions channel (cross-check) | `PositionFeed` |
 | `models/strategy.py` | Strategy data models | `ArbPair`, `Opportunity`, `BidConfirmation` |
 | `models/position.py` | Position tracking models | `LegSummary`, `EventPositionSummary` |
 | `models/adjustment.py` | Bid adjustment proposal model | `ProposedAdjustment` |
@@ -27,7 +29,7 @@
 | `cpm.py` | Contracts-per-minute and ETA formatting | `format_cpm`, `format_eta` |
 | `scanner.py` | NO+NO arbitrage detection | `ArbitrageScanner` |
 | `game_manager.py` | Game lifecycle from URLs | `GameManager`, `parse_kalshi_url` |
-| `persistence.py` | Save/load game list to `games.json` | `load_saved_games`, `save_games` |
+| `persistence.py` | Save/load game list and settings | `load_saved_games`, `save_games`, `load_settings`, `save_settings` |
 | `top_of_market.py` | Top-of-market detection for resting NO bids | `TopOfMarketTracker` |
 | `ui/theme.py` | Catppuccin Mocha colors + TCSS | Color constants, `APP_CSS` |
 | `ui/widgets.py` | Dashboard widgets | `OpportunitiesTable`, `AccountPanel`, `OrderLog` |
@@ -37,7 +39,7 @@
 | `automation_config.py` | Automation settings (off by default) | `AutomationConfig` |
 | `models/proposal.py` | Proposal envelope model | `Proposal`, `ProposalKey`, `BidProposal` |
 | `ui/proposal_panel.py` | Collapsible sidebar for proposal approve/reject | `ProposalPanel` |
-| `ui/screens.py` | Modal dialogs | `AddGamesScreen`, `BidScreen` |
+| `ui/screens.py` | Modal dialogs | `AddGamesScreen`, `BidScreen`, `UnitSizeScreen` |
 | `ui/app.py` | Thin UI shell (delegates to TradingEngine) | `TalosApp` |
 | `__main__.py` | Entry point | `python -m talos` |
 
@@ -54,7 +56,9 @@
 - **Kalshi `queue_position` on orders is deprecated:** `GET /portfolio/orders` always returns `queue_position: 0`. Use the dedicated `GET /portfolio/orders/queue_positions` batch endpoint. **This endpoint requires `market_tickers` or `event_ticker` param** — omitting both returns 400 `"Need to specify market_tickers or event_ticker"`, silently swallowed by try/except. Response key varies across API versions — check `queue_positions`, `data`, `results`. Prefer `queue_position_fp` over `queue_position` (int), but **`queue_position_fp` is a STRING** (e.g., `"2835.00"`) — must `float(fp)` before comparison. **Zero means "no data", not "front of queue"** — only cache and display positive values.
 - **Kalshi Trade response field names differ from docs:** API returns `taker_side` (not `side`). Post March 12, 2026: price fields are `yes_price_dollars`/`no_price_dollars` (strings, e.g., `"0.52"`) and count is `count_fp` (string). Legacy integer fields (`yes_price`, `no_price`, `count`) have been removed from the API. The `Trade` model uses a `model_validator(mode="before")` to normalize both formats. Always verify Pydantic models against actual API responses, not just docs — mock-based tests can't catch schema drift.
 - **structlog `event` is reserved:** Use `event_ticker=` instead of `event=` in structlog calls. The `event` parameter is structlog's reserved name for the log message itself.
-- **Textual table refresh:** Poll `scanner.opportunities` every 500ms via `set_interval(0.5, callback)` — don't refresh on every WS delta (10-50/sec). Use `add_column(label, width=N)` individually — `add_columns()` silently truncates wider values.
+- **Use `capsys` not `caplog` for structlog tests:** structlog writes to stdout, not Python's `logging` module. `pytest`'s `caplog` fixture won't capture structlog output — use `capsys.readouterr().out` instead.
+- **Textual DataTable: getting the row key from cursor position:** `get_row_at(index)` returns cell VALUES, not the key. There is NO `get_row_key()` method. Use `row_key, _ = table.coordinate_to_cell_key(table.cursor_coordinate)` to get the `RowKey` at the cursor. From events, use `event.row_key.value`. Broad `except Exception` around DataTable calls will silently mask `AttributeError` for nonexistent methods — catch `CellDoesNotExist` specifically.
+- **Textual table refresh:** Poll `scanner.opportunities` every 500ms via `set_interval(0.5, callback)` — don't refresh on every WS delta (10-50/sec). Use `add_column(label, width=N)` individually — `add_columns()` silently truncates wider values. Wrap all cell mutations in `self.app.batch_update()` to collapse N×16 per-cell repaints into 1 per cycle. See [[patterns#Batch widget updates in Textual]].
 - **Textual test mode:** Inject dependencies via `TalosApp(scanner=scanner)`. In headless mode, `pilot.click("#id")` is unreliable inside modals — use keyboard interaction instead.
 - **Textual ModalScreen escape:** No default escape binding. Add `BINDINGS = [("escape", "cancel", "Cancel")]` and `action_cancel` to every modal.
 - **WS startup ordering for game restore:** In `_start_feed`, games must be restored AFTER `feed.connect()` (subscribe sends WS messages) but BEFORE `feed.start()` (which blocks in a listen loop). The restore goes between connect and start. Subscribe is a send-only operation; the server queues responses until the listen loop picks them up. See [[decisions#2026-03-06 — Game persistence: tickers only, re-fetch on startup]].
@@ -81,3 +85,6 @@
 - **Rebalance partial-amend and catchup are mutually exclusive:** The rebalance math `target = max(over_filled, under_committed)` means: if `over_filled > under_committed` → target = over_filled → target_over_resting = 0 → cancel, not amend. If `under_committed > over_filled` → target = under_committed → catchup_gap = 0. You cannot have both `target_over_resting > 0` AND `catchup_qty > 0` in a single rebalance.
 - **Kalshi API has no "live game" indicator:** `market.status = "active"` covers both pre-game and in-play states — there is no field to distinguish them. `product_metadata` only contains `competition` and `competition_scope`. The website's LIVE badge comes from a separate data source not exposed via the trading API. If Talos needs live-game detection, it must come from an external source (e.g., scraping, third-party sports API).
 - **Scanner snapshots default to 0 prices:** `all_snapshots` contains placeholder `Opportunity` entries with `no_a=0, no_b=0` before any orderbook data arrives. Always check `price > 0` before using a snapshot price for order placement. The rebalance catch-up skips step 2 when it can't get a valid price.
+- **`unit_remaining()` returns 0 for complete units:** When `filled_count % unit_size == 0` (including zero fills), `unit_remaining()` returns 0 — meaning "no remaining capacity in the current unit." For rebalance catch-ups that need to START a new unit, use `unit_size` directly, not `unit_remaining()`. The proposer handles this via the re-entry exception: when `both_sides_complete()` and fills are balanced, it uses full `unit_size` instead of `unit_remaining()`.
+- **Capacity-based coverage, not boolean:** `OpportunityProposer` Gate 2 checks `resting_count >= unit_remaining` (not `resting > 0`). `is_placement_safe` checks `filled_in_unit + resting + count > unit_size` (not "one resting per side"). Multiple resting orders on the same side are valid — what matters is whether total coverage meets the unit capacity.
+- **Event-level vs side-level proposals:** `ProposalKey.side=""` for event-level actions (`bid`, `withdraw`); `side="A"/"B"` for side-level actions (`adjustment`, `hold`). `reevaluate_jumps` must check for event-level `withdraw` before iterating per-side to avoid duplicates. When adding a new proposal kind, decide whether it's event-level or side-level and set `side` accordingly.

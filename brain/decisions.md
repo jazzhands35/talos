@@ -156,8 +156,48 @@ Key changes:
 
 **Rationale:** The filter was a premature optimization. The exact root cause was ambiguous — potentially the filter, a WS parse error crashing the listen loop, or a model validation issue in the newly-subscribed portfolio/ticker channels. Rather than debugging blind (no access to runtime logs), the safest fix was reverting the most suspicious change and adding WS safety wrappers to prevent the most dangerous failure mode (listen loop crash). The filter can be re-added later with proper runtime validation. See [[patterns#Defensive WS dispatch (never crash the listen loop)]].
 
+## 2026-03-12 — BidAdjuster.execute: fetch fresh order before amend
+
+**Context:** `BidAdjuster.execute` computed `total_count = ledger.filled_count(side) + ledger.resting_count(side)` for the amend API's `count` parameter. The ledger's `filled_count` is the AGGREGATE across all orders (including archived ones augmented by the positions API). If old orders were archived and fills were augmented, the aggregate could be much higher than the specific order's fill_count, silently expanding the order.
+
+**Decision:** Changed to `rest_client.get_order(cancel_order_id)` before amending, then `total_count = fresh_order.fill_count + fresh_order.remaining_count`. This uses the ORDER's own state, not the ledger aggregate.
+
+**Rationale:** Direct application of [[patterns#Order-specific APIs need order-specific data]]. The rebalance path was already fixed (uses `decrease_order`), but the bid adjustment path still had the aggregate-vs-instance bug. The extra API call is cheap insurance against silent order expansion.
+
+## 2026-03-12 — Removed dead _discrepancy field from PositionLedger
+
+**Context:** `PositionLedger._discrepancy` had field, properties (`has_discrepancy`, `discrepancy`), and guards in `is_placement_safe()`, `_check_post_cancel_safety()`, and `_compute_event_status()`. But no code path ever set it to a non-None value — all tests manually assigned `ledger._discrepancy = "..."`. The field was infrastructure for a halt-on-mismatch design that was superseded by monotonic sync.
+
+**Decision:** Removed the field, properties, all guards, and 4 tests across `position_ledger.py`, `bid_adjuster.py`, `engine.py`, and their test files.
+
+**Rationale:** The monotonic sync pattern (`sync_from_orders` only increases fills, authoritatively overwrites resting) makes discrepancy detection unnecessary — the system self-corrects. Dead safety code creates false confidence that a protection exists when it doesn't. If halt-on-mismatch is needed in the future, it should be designed fresh against the current architecture. See [[patterns#Monotonic state updates across data sources]].
+
+## 2026-03-12 — is_placement_safe: pair-specific fee rate
+
+**Context:** `is_placement_safe()` called `fee_adjusted_cost(price)` without a `rate=` parameter, defaulting to `MAKER_FEE_RATE = 0.0175`. But pairs can have different fee rates via `ArbPair.fee_rate` (from the Series API). `BidAdjuster.evaluate_jump` and `_check_post_cancel_safety` already passed pair-specific rates — only this gate was hardcoded.
+
+**Decision:** Added optional `rate` keyword to `is_placement_safe(side, count, price, *, rate=MAKER_FEE_RATE)`. Both call sites in `engine.py` (`place_bids` and rebalance catch-up) now pass `pair.fee_rate`.
+
+**Rationale:** For pairs with higher fee rates, the hardcoded default underestimated fees and could approve unprofitable placements. Backward compatible — all existing callers without `rate=` use the default. See [[principles#18. Profitable Arb Gate]].
+
 ## 2026-03-07 — Bid modal falls back to all_snapshots
 
 **Context:** After placing orders, users couldn't reopen the bid modal on the same game. `on_data_table_row_selected` called `scanner.get_opportunity()` which only returns pairs with positive raw edge. After fills move the market, edge drops to 0 or negative — the row stays visible (from `all_snapshots`) but clicking it silently did nothing.
 **Decision:** Fall back to `scanner.all_snapshots` when `get_opportunity()` returns None. See [[codebase/index#Gotchas]] "Don't gate UI actions on volatile data."
 **Rationale:** The table is built from `all_snapshots` (all monitored pairs), so the click handler must use the same data source. Users should be able to place bids on any monitored pair regardless of current edge. See [[principles#2. Human in the Loop]].
+
+## 2026-03-12 — Capacity-based safety gate and proposer coverage
+
+**Context:** After changing unit size at runtime (e.g., 10→20), Talos blocked valid placements with "already resting on Side B" and proposed wrong quantities (full unit_size instead of the gap). Three overlapping issues: (1) `is_placement_safe` had a boolean "one resting per side" hard block, preventing additions alongside existing orders; (2) `OpportunityProposer` Gate 2 used boolean `resting > 0` to mean "side is covered," which was wrong when resting orders only partially filled the new unit; (3) qty computation didn't subtract existing resting orders.
+
+**Decision:** Three-layer fix: (1) Removed the "one resting per side" check from `is_placement_safe` — it was strictly redundant with the unit capacity check (`filled_in_unit + resting + count > unit_size`). (2) Changed Gate 2 from `resting > 0` to `resting >= unit_remaining(side)` — a side is "covered" only when resting orders fill the remaining capacity. (3) Qty computation subtracts existing resting: `need = unit_remaining(side) - resting_count(side)`, with an exception for re-entry after both sides complete (uses full `unit_size`).
+
+**Rationale:** The fix is general-purpose — works for any partial state (unit size change, Kalshi-side errors, manual interventions) without special-casing. Boolean coverage was a false simplification: 5 resting in a 20-unit is not "covered." Capacity-based checks naturally handle any combination of fills, resting, and unit size. See [[principles#16. Delta Neutral by Construction]].
+
+## 2026-03-12 — Withdraw both sides when unprofitable with no fills
+
+**Context:** With 0 fills on both sides and resting orders, a jump can make the arb unprofitable. The existing `hold` action keeps capital locked in a losing position with no delta-neutral anchor to protect.
+
+**Decision:** Added `withdraw` action to `evaluate_jump`. When the profitability check fails AND `filled_count(A) == 0 AND filled_count(B) == 0`, return a `withdraw` instead of `hold`. The engine cancels both sides' resting orders at execution time (looking up order IDs fresh from the ledger per P7). When fills exist on either side, `hold` remains correct — the filled side provides a delta anchor and waiting for market return avoids crystallizing a loss.
+
+**Rationale:** With 0 fills, there's no sunk cost and no delta to protect. Holding resting orders in an unprofitable arb just locks capital. Withdrawing frees capital to redeploy when conditions improve. With fills, the calculus reverses — the filled side creates an obligation, and the market often returns to fill the other side. See [[principles#16. Delta Neutral by Construction]].

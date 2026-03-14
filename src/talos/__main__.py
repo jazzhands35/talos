@@ -47,8 +47,9 @@ def main() -> None:
     from talos.lifecycle_feed import LifecycleFeed
     from talos.market_feed import MarketFeed
     from talos.orderbook import OrderBookManager
-    from talos.persistence import load_saved_games, save_games
+    from talos.persistence import load_saved_games, load_settings, save_games, save_settings
     from talos.portfolio_feed import PortfolioFeed
+    from talos.position_feed import PositionFeed
     from talos.rest_client import KalshiRESTClient
     from talos.scanner import ArbitrageScanner
     from talos.suggestion_log import SuggestionLog
@@ -64,10 +65,13 @@ def main() -> None:
     feed = MarketFeed(ws, books)
     scanner = ArbitrageScanner(books)
     tracker = TopOfMarketTracker(books)
-    adjuster = BidAdjuster(books, [], unit_size=10)
+    settings = load_settings()
+    unit_size = int(settings.get("unit_size", 10))  # type: ignore[arg-type]
+    adjuster = BidAdjuster(books, [], unit_size=unit_size)
     portfolio_feed = PortfolioFeed(ws_client=ws)
     ticker_feed = TickerFeed(ws_client=ws)
     lifecycle_feed = LifecycleFeed(ws_client=ws)
+    position_feed = PositionFeed(ws_client=ws)
     game_mgr = GameManager(rest, feed, scanner)
 
     # Wire scanner + tracker to book updates
@@ -92,7 +96,16 @@ def main() -> None:
         portfolio_feed=portfolio_feed,
         ticker_feed=ticker_feed,
         lifecycle_feed=lifecycle_feed,
+        position_feed=position_feed,
     )
+
+    # Wire unit size persistence
+    def _persist_unit_size(size: int) -> None:
+        s = load_settings()
+        s["unit_size"] = size
+        save_settings(s)
+
+    engine.on_unit_size_change = _persist_unit_size
 
     # Wire suggestion audit log
     log_path = Path(__file__).resolve().parents[2] / "suggestions.log"

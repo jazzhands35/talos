@@ -64,6 +64,31 @@ class TestDecisionLogic:
         assert proposal.action == "hold"
         assert "not profitable" in proposal.reason
 
+    def test_unprofitable_no_fills_returns_withdraw(self):
+        """When arb is unprofitable and neither side has fills, propose withdrawal."""
+        ledger = self.adjuster.get_ledger("EVT-1")
+        ledger.record_resting(Side.A, order_id="ord-a", count=10, price=48)
+        ledger.record_resting(Side.B, order_id="ord-b", count=10, price=47)
+        # Top of market moved to 53 — unprofitable: fee_adjusted_cost(53) + fee_adjusted_cost(50) >= 100
+        self.books._prices["TK-B"] = 53
+        proposal = self.adjuster.evaluate_jump("TK-B", at_top=False)
+        assert proposal is not None
+        assert proposal.action == "withdraw"
+        assert "no fills" in proposal.reason
+
+    def test_unprofitable_with_fills_returns_hold(self):
+        """When arb is unprofitable but has fills, hold position."""
+        ledger = self.adjuster.get_ledger("EVT-1")
+        ledger.record_fill(Side.A, count=5, price=48)
+        ledger.record_resting(Side.A, order_id="ord-a", count=5, price=48)
+        ledger.record_resting(Side.B, order_id="ord-b", count=10, price=47)
+        # Top of market moved to 53 — unprofitable
+        self.books._prices["TK-B"] = 53
+        proposal = self.adjuster.evaluate_jump("TK-B", at_top=False)
+        assert proposal is not None
+        assert proposal.action == "hold"
+        assert "not profitable" in proposal.reason
+
     def test_back_at_top_no_proposal(self):
         ledger = self.adjuster.get_ledger("EVT-1")
         ledger.record_resting(Side.B, order_id="ord-b", count=10, price=48)
@@ -169,14 +194,17 @@ class TestAsyncExecution:
         proposal = adjuster.evaluate_jump("TK-B", at_top=False)
         assert proposal is not None
 
+        fresh_order = _make_order("ord-b", price=47, fill_count=0, remaining_count=10)
         old_order = _make_order("ord-b", price=47, fill_count=0, remaining_count=10)
         amended_order = _make_order("ord-b", price=48, fill_count=0, remaining_count=10)
 
         rest_client = AsyncMock()
+        rest_client.get_order.return_value = fresh_order
         rest_client.amend_order.return_value = (old_order, amended_order)
 
         await adjuster.execute(proposal, rest_client)
 
+        rest_client.get_order.assert_called_once_with("ord-b")
         rest_client.amend_order.assert_called_once_with(
             "ord-b",
             ticker="TK-B",
@@ -206,22 +234,26 @@ class TestAsyncExecution:
         assert proposal is not None
         assert proposal.new_count == 4
 
+        # get_order returns the ORDER's own state (6 fills on this order)
+        fresh_order = _make_order("ord-b", price=32, fill_count=6, remaining_count=4)
         old_order = _make_order("ord-b", price=32, fill_count=6, remaining_count=4)
         amended_order = _make_order("ord-b", price=33, fill_count=6, remaining_count=4)
 
         rest_client = AsyncMock()
+        rest_client.get_order.return_value = fresh_order
         rest_client.amend_order.return_value = (old_order, amended_order)
 
         await adjuster.execute(proposal, rest_client)
 
-        # count passed to amend = fill_count + remaining_count (total)
+        # count passed to amend = ORDER's fill_count + remaining_count (not ledger aggregate)
+        rest_client.get_order.assert_called_once_with("ord-b")
         rest_client.amend_order.assert_called_once_with(
             "ord-b",
             ticker="TK-B",
             side="no",
             action="buy",
             no_price=33,
-            count=10,  # 6 filled + 4 remaining = 10 total
+            count=10,  # 6 filled + 4 remaining = 10 total (from fresh order)
         )
         assert ledger.resting_price(Side.B) == 33
         assert ledger.resting_count(Side.B) == 4
@@ -239,6 +271,7 @@ class TestAsyncExecution:
         proposal = adjuster.evaluate_jump("TK-B", at_top=False)
         assert proposal is not None
         rest_client = AsyncMock()
+        rest_client.get_order.return_value = _make_order("ord-b", price=47, fill_count=0, remaining_count=10)
         rest_client.amend_order.side_effect = Exception("API error")
 
         with pytest.raises(Exception, match="API error"):

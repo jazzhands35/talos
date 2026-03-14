@@ -63,6 +63,12 @@ class BidAdjuster:
         """Get the position ledger for an event."""
         return self._ledgers[event_ticker]
 
+    def set_unit_size(self, unit_size: int) -> None:
+        """Update unit size for future and existing ledgers."""
+        self._unit_size = unit_size
+        for ledger in self._ledgers.values():
+            ledger.unit_size = unit_size
+
     def add_event(self, pair: ArbPair) -> None:
         """Register a new event pair."""
         self._ticker_map[pair.ticker_a] = (pair, Side.A)
@@ -147,6 +153,30 @@ class BidAdjuster:
 
         this_effective = fee_adjusted_cost(new_price, rate=rate)
         if other_effective > 0 and this_effective + other_effective >= 100:
+            # No fills on either side → withdraw both orders entirely.
+            # With fills → hold and wait for market to return (P16).
+            if ledger.filled_count(Side.A) == 0 and ledger.filled_count(Side.B) == 0:
+                logger.info(
+                    "jump_withdraw",
+                    ticker=ticker,
+                    new_price=new_price,
+                    effective_sum=this_effective + other_effective,
+                )
+                return ProposedAdjustment(
+                    event_ticker=pair.event_ticker,
+                    side=side.value,
+                    action="withdraw",
+                    reason=(
+                        f"no fills — withdraw both sides, "
+                        f"following to {new_price}c not profitable "
+                        f"({this_effective:.1f}+{other_effective:.1f}"
+                        f"={this_effective + other_effective:.1f} >= 100)"
+                    ),
+                    position_before=(
+                        f"A: {ledger.format_position(Side.A)}"
+                        f" | B: {ledger.format_position(Side.B)}"
+                    ),
+                )
             logger.info(
                 "jump_not_profitable",
                 ticker=ticker,
@@ -316,8 +346,13 @@ class BidAdjuster:
         # Find the ticker for this side
         ticker = self._side_ticker(proposal.event_ticker, side)
 
-        # Compute total count for amend API (fill_count + remaining_count)
-        total_count = ledger.filled_count(side) + ledger.resting_count(side)
+        # Fetch the ORDER's own state — amend needs order-specific fill_count,
+        # not the ledger aggregate which includes archived orders (P7/P21).
+        # See patterns.md "Order-specific APIs need order-specific data".
+        fresh_order = await rest_client.get_order(  # type: ignore[attr-defined]
+            proposal.cancel_order_id,
+        )
+        total_count = fresh_order.fill_count + fresh_order.remaining_count
 
         logger.info(
             "adjustment_amend",
@@ -327,6 +362,8 @@ class BidAdjuster:
             old_price=proposal.cancel_price,
             new_price=proposal.new_price,
             total_count=total_count,
+            order_fills=fresh_order.fill_count,
+            order_remaining=fresh_order.remaining_count,
         )
 
         # Single atomic amend call
@@ -396,10 +433,6 @@ class BidAdjuster:
         new_price: int,
     ) -> tuple[bool, str]:
         """Check safety as if the existing resting order were already cancelled."""
-        # P15: never act when position data is uncertain
-        if ledger.has_discrepancy:
-            return False, f"ledger has unresolved discrepancy: {ledger.discrepancy}"
-
         # Simulate post-cancel state (use fills in current unit, not total)
         filled_in_unit = ledger.filled_count(side) % ledger.unit_size
         if filled_in_unit + new_count > ledger.unit_size:

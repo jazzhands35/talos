@@ -17,12 +17,19 @@ from talos.models.order import Order
 from talos.models.portfolio import Balance, Position, Settlement
 from talos.models.proposal import ProposalKey
 from talos.models.strategy import ArbPair
-from talos.models.ws import FillMessage, OrderBookSnapshot, UserOrderMessage
+from talos.models.ws import (
+    FillMessage,
+    MarketPositionMessage,
+    OrderBookSnapshot,
+    UserOrderMessage,
+)
 from talos.orderbook import OrderBookManager
+from talos.position_feed import PositionFeed
 from talos.position_ledger import Side
 from talos.rest_client import KalshiRESTClient
 from talos.scanner import ArbitrageScanner
 from talos.top_of_market import TopOfMarketTracker
+from talos.ws_client import KalshiWSClient
 
 
 def _make_engine(**overrides) -> TradingEngine:
@@ -212,7 +219,7 @@ class TestPolling:
     @pytest.mark.asyncio
     async def test_refresh_account_computes_position_summaries(self):
         engine, rest = _engine_with_pair()
-        # Pre-seed ledger so sync_from_orders sees consistency (no discrepancy)
+        # Pre-seed ledger so sync_from_orders sees consistency
         ledger = engine.adjuster.get_ledger("EVT-1")
         ledger.record_fill(Side.A, count=5, price=45)
         ledger.record_resting(Side.A, order_id="ord-a", count=5, price=45)
@@ -304,7 +311,7 @@ class TestPolling:
     @pytest.mark.asyncio
     async def test_refresh_account_syncs_ledger(self):
         engine, rest = _engine_with_pair()
-        # Use resting-only orders — empty ledger matches (no fills = no discrepancy)
+        # Use resting-only orders — empty ledger matches (no fills)
         orders = [
             _make_order("TK-A", order_id="ord-a", fill_count=0, remaining_count=10, no_price=45),
         ]
@@ -460,7 +467,7 @@ class TestPlaceBidsSafety:
 
     @pytest.mark.asyncio
     async def test_safety_gate_blocks_duplicate_placement(self):
-        """When resting order already exists, place_bids blocks (one resting per side)."""
+        """When resting covers the full unit, place_bids blocks (exceeds unit capacity)."""
         engine, rest = _engine_with_pair()
         ledger = engine.adjuster.get_ledger("EVT-1")
         ledger.record_resting(Side.A, order_id="existing-a", count=10, price=45)
@@ -620,6 +627,67 @@ class TestProposalQueue:
         key = engine.proposal_queue.pending()[0].key
         engine.reject_proposal(key)
         assert len(engine.proposal_queue) == 0
+
+    def test_unprofitable_no_fills_generates_withdraw(self):
+        """When jumped and unprofitable with 0 fills, propose withdrawal."""
+        # fee_adjusted_cost(53) + fee_adjusted_cost(50) ≈ 53.87 + 50.875 = 104.7 >= 100
+        books = FakeBookManager({"TK-A": 50, "TK-B": 53})
+        scanner = ArbitrageScanner(books)
+        scanner.add_pair("EVT-1", "TK-A", "TK-B")
+        pair = ArbPair(event_ticker="EVT-1", ticker_a="TK-A", ticker_b="TK-B")
+        adjuster = BidAdjuster(books, [pair], unit_size=10)
+        tracker = TopOfMarketTracker(books)
+        engine = TradingEngine(
+            scanner=scanner,
+            game_manager=MagicMock(spec=GameManager),
+            rest_client=AsyncMock(spec=KalshiRESTClient),
+            market_feed=MagicMock(spec=MarketFeed),
+            tracker=tracker,
+            adjuster=adjuster,
+        )
+        ledger = adjuster.get_ledger("EVT-1")
+        # Both sides resting, 0 fills
+        ledger.record_resting(Side.A, order_id="ord-a", count=10, price=48)
+        ledger.record_resting(Side.B, order_id="ord-b", count=10, price=47)
+
+        engine.on_top_of_market_change("TK-B", at_top=False)
+        assert len(engine.proposal_queue) == 1
+        p = engine.proposal_queue.pending()[0]
+        assert p.kind == "withdraw"
+        assert p.key.side == ""  # event-level, not side-level
+
+    @pytest.mark.asyncio
+    async def test_approve_withdraw_cancels_both_orders(self):
+        """Approving a withdraw proposal cancels both sides' resting orders."""
+        books = FakeBookManager({"TK-A": 50, "TK-B": 53})
+        scanner = ArbitrageScanner(books)
+        scanner.add_pair("EVT-1", "TK-A", "TK-B")
+        pair = ArbPair(event_ticker="EVT-1", ticker_a="TK-A", ticker_b="TK-B")
+        adjuster = BidAdjuster(books, [pair], unit_size=10)
+        tracker = TopOfMarketTracker(books)
+        rest = AsyncMock(spec=KalshiRESTClient)
+        rest.get_orders = AsyncMock(return_value=[])
+        rest.get_positions = AsyncMock(return_value=[])
+        engine = TradingEngine(
+            scanner=scanner,
+            game_manager=MagicMock(spec=GameManager),
+            rest_client=rest,
+            market_feed=MagicMock(spec=MarketFeed),
+            tracker=tracker,
+            adjuster=adjuster,
+        )
+        ledger = adjuster.get_ledger("EVT-1")
+        ledger.record_resting(Side.A, order_id="ord-a", count=10, price=48)
+        ledger.record_resting(Side.B, order_id="ord-b", count=10, price=47)
+
+        engine.on_top_of_market_change("TK-B", at_top=False)
+        key = engine.proposal_queue.pending()[0].key
+        await engine.approve_proposal(key)
+
+        # Both orders should have been cancelled
+        cancel_calls = rest.cancel_order.call_args_list
+        cancelled_ids = {call.args[0] for call in cancel_calls}
+        assert cancelled_ids == {"ord-a", "ord-b"}
 
 
 # ── Automation / OpportunityProposer integration ──────────────────────
@@ -1432,27 +1500,6 @@ class TestComputeEventStatus:
         status = engine._compute_event_status("EVT-1")
         assert not status.startswith("Jumped")
 
-    def test_discrepancy_takes_priority_over_jumped(self):
-        """Discrepancy status should fire before Jumped check."""
-        books = OrderBookManager()
-        scanner = ArbitrageScanner(books)
-        scanner.add_pair("EVT-1", "TK-A", "TK-B")
-        pair = ArbPair(event_ticker="EVT-1", ticker_a="TK-A", ticker_b="TK-B")
-        tracker = TopOfMarketTracker(books)
-        adjuster = BidAdjuster(books, [pair], unit_size=10)
-        engine = _make_engine(
-            scanner=scanner,
-            adjuster=adjuster,
-            tracker=tracker,
-        )
-
-        ledger = engine.adjuster.get_ledger("EVT-1")
-        ledger.record_resting(Side.A, "ord-a", 10, 45)
-        ledger._discrepancy = "test"
-
-        status = engine._compute_event_status("EVT-1")
-        assert status == "Discrepancy"
-
 
 # ── Stale book recovery ────────────────────────────────────────────
 
@@ -1781,3 +1828,71 @@ class TestLifecycleFiltering:
         await asyncio.sleep(0)
 
         rest.get_settlements.assert_not_called()
+
+
+class TestPositionCrossCheck:
+    """Cross-check WS market_positions data against ledger."""
+
+    def _engine_with_position_feed(self) -> tuple[TradingEngine, PositionFeed]:
+        engine, _ = _engine_with_pair()
+        pf = PositionFeed(ws_client=MagicMock(spec=KalshiWSClient))
+        engine._position_feed = pf
+        return engine, pf
+
+    def test_no_mismatch_when_counts_match(self, capsys: pytest.CaptureFixture[str]) -> None:
+        engine, pf = self._engine_with_position_feed()
+        ledger = engine.adjuster.get_ledger("EVT-1")
+        ledger.record_fill(Side.A, 10, 45)
+
+        pf._latest["TK-A"] = MarketPositionMessage(
+            market_ticker="TK-A",
+            position=-10,
+            fees_paid=0,
+        )
+        engine._cross_check_positions()
+        assert "position_mismatch" not in capsys.readouterr().out
+
+    def test_logs_position_mismatch(self, capsys: pytest.CaptureFixture[str]) -> None:
+        engine, pf = self._engine_with_position_feed()
+        ledger = engine.adjuster.get_ledger("EVT-1")
+        ledger.record_fill(Side.A, 10, 45)
+
+        # WS says 15, ledger says 10
+        pf._latest["TK-A"] = MarketPositionMessage(
+            market_ticker="TK-A",
+            position=-15,
+            fees_paid=0,
+        )
+        engine._cross_check_positions()
+        out = capsys.readouterr().out
+        assert "position_mismatch" in out
+        assert "ws_count=15" in out
+        assert "ledger_count=10" in out
+
+    def test_logs_fees_mismatch(self, capsys: pytest.CaptureFixture[str]) -> None:
+        engine, pf = self._engine_with_position_feed()
+        ledger = engine.adjuster.get_ledger("EVT-1")
+        ledger.record_fill(Side.B, 10, 48)
+
+        pf._latest["TK-B"] = MarketPositionMessage(
+            market_ticker="TK-B",
+            position=-10,
+            fees_paid=99,
+        )
+        engine._cross_check_positions()
+        out = capsys.readouterr().out
+        assert "fees_mismatch" in out
+        assert "ws_fees=99" in out
+
+    def test_skips_when_no_ws_data(self, capsys: pytest.CaptureFixture[str]) -> None:
+        engine, pf = self._engine_with_position_feed()
+        ledger = engine.adjuster.get_ledger("EVT-1")
+        ledger.record_fill(Side.A, 10, 45)
+        # No WS data cached
+        engine._cross_check_positions()
+        assert "position_mismatch" not in capsys.readouterr().out
+
+    def test_skips_when_no_position_feed(self) -> None:
+        engine, _ = _engine_with_pair()
+        assert engine._position_feed is None
+        engine._cross_check_positions()  # Should not raise

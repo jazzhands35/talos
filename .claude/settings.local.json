@@ -20,7 +20,20 @@
       "Bash(wc:*)",
       "Bash(git:*)",
       "Bash(echo exit: $?:*)",
-      "Bash(set:*)"
+      "Bash(set:*)",
+      "Bash(C:/Users/Sean/Documents/Python/Talos/.venv/Scripts/python:*)",
+      "Bash(xargs grep -l \"yes_price\\\\|no_price\\\\|fill_count\\\\|remaining_count\\\\|initial_count\\\\|yes_bid\\\\|yes_ask\\\\|no_bid\\\\|no_ask\\\\|queue_position\\\\|maker_fees\\\\|taker_fees\")",
+      "Bash(xargs grep:*)",
+      "Bash(for file in \"C:\\\\Users\\\\Sean\\\\Documents\\\\Python\\\\Talos\\\\docs\\\\plans\\\\2026-03-06-top-of-market-tracking-design.md\" \"C:\\\\Users\\\\Sean\\\\Documents\\\\Python\\\\Talos\\\\docs\\\\plans\\\\2026-03-06-top-of-market-tracking-plan.md\" \"C:\\\\Users\\\\Sean\\\\Documents\\\\Python\\\\Talos\\\\docs\\\\plans\\\\2026-03-07-position-aware-bid-adjustment-design.md\" \"C:\\\\Users\\\\Sean\\\\Documents\\\\Python\\\\Talos\\\\docs\\\\plans\\\\2026-03-07-position-aware-bid-adjustment-plan.md\")",
+      "Bash(do echo \"=== $file ===\")",
+      "Read(//c/Users/Sean/Documents/Python/Talos/**)",
+      "Bash(done)",
+      "Bash(/tmp/cpm_fix.py:*)",
+      "Bash(/tmp/cpm_patch.py:*)",
+      "Bash(/tmp/test_lifecycle_patch.py:*)",
+      "Bash(/tmp/test_rest_client_patch.py:*)",
+      "Bash(echo EXIT_CODE=$?:*)",
+      "Bash(C:/Users/Sean/Documents/Python/Talos/.venv/Scripts/pip install:*)"
     ]
   }
 }

@@ -17,6 +17,7 @@ from talos.automation_config import AutomationConfig
 from talos.bid_adjuster import BidAdjuster
 from talos.cpm import CPMTracker
 from talos.errors import KalshiAPIError
+from talos.fees import MAKER_FEE_RATE
 from talos.game_manager import GameManager
 from talos.lifecycle_feed import LifecycleFeed
 from talos.market_feed import MarketFeed
@@ -27,6 +28,7 @@ from talos.models.proposal import Proposal, ProposalKey, ProposedRebalance
 from talos.models.ws import FillMessage, TickerMessage, UserOrderMessage
 from talos.opportunity_proposer import OpportunityProposer
 from talos.portfolio_feed import PortfolioFeed
+from talos.position_feed import PositionFeed
 from talos.position_ledger import PositionLedger, Side, compute_display_positions
 from talos.proposal_queue import ProposalQueue
 from talos.rest_client import KalshiRESTClient
@@ -82,6 +84,7 @@ class TradingEngine:
         portfolio_feed: PortfolioFeed | None = None,
         ticker_feed: TickerFeed | None = None,
         lifecycle_feed: LifecycleFeed | None = None,
+        position_feed: PositionFeed | None = None,
     ) -> None:
         self._scanner = scanner
         self._game_manager = game_manager
@@ -95,6 +98,7 @@ class TradingEngine:
         self._portfolio_feed = portfolio_feed
         self._ticker_feed = ticker_feed
         self._lifecycle_feed = lifecycle_feed
+        self._position_feed = position_feed
         self._proposer = OpportunityProposer(self._auto_config)
 
         # Mutable caches
@@ -119,8 +123,9 @@ class TradingEngine:
             self._lifecycle_feed.on_settled = self._on_market_settled
             self._lifecycle_feed.on_paused = self._on_market_paused
 
-        # Callbacks for UI communication
+        # Callbacks for UI communication and persistence
         self.on_notification: Callable[[str, str], None] | None = None
+        self.on_unit_size_change: Callable[[int], None] | None = None
 
     # ── Read-only properties ─────────────────────────────────────────
 
@@ -177,6 +182,17 @@ class TradingEngine:
         """Rich event-level position data from Kalshi."""
         return self._event_positions
 
+    @property
+    def unit_size(self) -> int:
+        return self._adjuster._unit_size
+
+    def set_unit_size(self, size: int) -> None:
+        """Update unit size across adjuster and all existing ledgers."""
+        self._adjuster.set_unit_size(size)
+        logger.info("unit_size_changed", unit_size=size)
+        if self.on_unit_size_change is not None:
+            self.on_unit_size_change(size)
+
     def get_ticker_data(self, ticker: str) -> TickerMessage | None:
         """Return the latest WS ticker data for a market, or None."""
         if self._ticker_feed is None:
@@ -216,6 +232,10 @@ class TradingEngine:
             # Subscribe to lifecycle events globally
             if self._lifecycle_feed is not None:
                 await self._lifecycle_feed.subscribe()
+
+            # Subscribe to position updates globally
+            if self._position_feed is not None:
+                await self._position_feed.subscribe()
 
             # Subscribe to ticker updates for all active markets
             if self._ticker_feed is not None:
@@ -333,6 +353,9 @@ class TradingEngine:
 
             # Evaluate scanner opportunities for automated bid proposals
             self.evaluate_opportunities()
+
+            # Cross-check WS position data against ledger (observability only)
+            self._cross_check_positions()
         except Exception:
             logger.exception("refresh_account_error")
 
@@ -527,6 +550,44 @@ class TradingEngine:
         """Currently paused markets."""
         return set(self._paused_markets)
 
+    # ── Position cross-check (observability) ─────────────────────
+
+    def _cross_check_positions(self) -> None:
+        """Compare WS market_positions data against ledger. Log-only."""
+        if self._position_feed is None:
+            return
+        for pair in self._scanner.pairs:
+            ledger = self._adjuster.get_ledger(pair.event_ticker)
+            if ledger is None:
+                continue
+            for side, ticker in ((Side.A, pair.ticker_a), (Side.B, pair.ticker_b)):
+                ws_pos = self._position_feed.get_position(ticker)
+                if ws_pos is None:
+                    continue
+                # Kalshi position: negative = NO contracts held
+                ws_count = abs(ws_pos.position)
+                ledger_count = ledger.filled_count(side)
+                if ws_count != ledger_count:
+                    logger.warning(
+                        "position_mismatch",
+                        ticker=ticker,
+                        event_ticker=pair.event_ticker,
+                        side=side.value,
+                        ws_count=ws_count,
+                        ledger_count=ledger_count,
+                    )
+                ws_fees = ws_pos.fees_paid
+                ledger_fees = ledger.filled_fees(side)
+                if ws_fees != ledger_fees:
+                    logger.warning(
+                        "fees_mismatch",
+                        ticker=ticker,
+                        event_ticker=pair.event_ticker,
+                        side=side.value,
+                        ws_fees=ws_fees,
+                        ledger_fees=ledger_fees,
+                    )
+
     # ── Event handlers ───────────────────────────────────────────
 
     def on_top_of_market_change(self, ticker: str, at_top: bool) -> None:
@@ -554,7 +615,15 @@ class TradingEngine:
             evt = proposal.event_ticker
             name = self._display_name(evt)
 
-            if proposal.action == "hold":
+            if proposal.action == "withdraw":
+                logger.info(
+                    "adjustment_withdraw",
+                    event_ticker=evt,
+                    reason=proposal.reason,
+                )
+                kind = "withdraw"
+                summary = f"WITHDRAW {name} — cancel both sides"
+            elif proposal.action == "hold":
                 logger.info(
                     "adjustment_hold",
                     event_ticker=evt,
@@ -579,7 +648,7 @@ class TradingEngine:
                 )
             key = ProposalKey(
                 event_ticker=proposal.event_ticker,
-                side=proposal.side,
+                side="" if kind == "withdraw" else proposal.side,
                 kind=kind,
             )
             envelope = Proposal(
@@ -588,7 +657,7 @@ class TradingEngine:
                 summary=summary,
                 detail=proposal.reason,
                 created_at=datetime.now(UTC),
-                adjustment=proposal if proposal.action != "hold" else None,
+                adjustment=proposal if proposal.action == "follow_jump" else None,
             )
             self._proposal_queue.add(envelope)
 
@@ -601,6 +670,13 @@ class TradingEngine:
         """
         pending_keys = {p.key for p in self._proposal_queue.pending()}
         for pair in self._scanner.pairs:
+            # Skip if a withdraw proposal already covers this event
+            has_withdraw = any(
+                k.event_ticker == pair.event_ticker and k.kind == "withdraw"
+                for k in pending_keys
+            )
+            if has_withdraw:
+                continue
             for ticker, side_label in [
                 (pair.ticker_a, "A"),
                 (pair.ticker_b, "B"),
@@ -820,8 +896,10 @@ class TradingEngine:
 
         # Hard safety gate (P16, P18) — blocks if unit exceeded or arb unprofitable
         if ledger is not None:
+            pair = self._find_pair(ledger.event_ticker)
+            fee_rate = pair.fee_rate if pair is not None else MAKER_FEE_RATE
             for side, price in [(Side.A, bid.no_a), (Side.B, bid.no_b)]:
-                ok, reason = ledger.is_placement_safe(side, bid.qty, price)
+                ok, reason = ledger.is_placement_safe(side, bid.qty, price, rate=fee_rate)
                 if not ok:
                     self._notify(f"Bid BLOCKED (side {side.value}): {reason}", "error")
                     logger.error(
@@ -905,6 +983,10 @@ class TradingEngine:
             self._notify(f"Dismissed: {envelope.summary}")
             return
 
+        if envelope.kind == "withdraw":
+            await self._execute_withdrawal(envelope.key.event_ticker)
+            return
+
         if envelope.kind == "rebalance":
             if envelope.rebalance is not None:
                 await self._execute_rebalance(envelope.rebalance)
@@ -952,6 +1034,50 @@ class TradingEngine:
         elif key.kind == "bid":
             self._proposer.record_rejection(key.event_ticker)
         self._notify(f"Rejected: {key.event_ticker} {key.kind}")
+
+    async def _execute_withdrawal(self, event_ticker: str) -> None:
+        """Cancel both sides' resting orders when arb is unprofitable with no fills.
+
+        Looks up resting order IDs fresh from the ledger at execution time (P7).
+        """
+        try:
+            ledger = self._adjuster.get_ledger(event_ticker)
+        except KeyError:
+            self._notify(f"Withdraw FAILED: no ledger for {event_ticker}", "error")
+            return
+
+        name = self._display_name(event_ticker)
+        cancelled = 0
+        for side in (Side.A, Side.B):
+            order_id = ledger.resting_order_id(side)
+            if order_id is not None:
+                try:
+                    await self._rest.cancel_order(order_id)
+                    cancelled += 1
+                    logger.info(
+                        "withdrawal_cancelled",
+                        event_ticker=event_ticker,
+                        side=side.value,
+                        order_id=order_id,
+                    )
+                except Exception as e:
+                    self._notify(
+                        f"Withdraw cancel FAILED ({side.value}): {e}",
+                        "error",
+                    )
+                    logger.exception(
+                        "withdrawal_cancel_error",
+                        event_ticker=event_ticker,
+                        side=side.value,
+                        order_id=order_id,
+                    )
+
+        if cancelled > 0:
+            self._notify(f"Withdrew {name} — cancelled {cancelled} order(s)")
+        else:
+            self._notify(f"Withdrew {name} — no resting orders to cancel")
+
+        await self._verify_after_action(event_ticker)
 
     async def _execute_rebalance(self, rebalance: ProposedRebalance) -> None:
         """Execute a two-step rebalance: reduce over-side, then catch up under-side.
@@ -1079,7 +1205,10 @@ class TradingEngine:
 
             # Safety gate — same checks as place_bids (P16, P18)
             ok, reason = ledger.is_placement_safe(
-                under_side, rebalance.catchup_qty, rebalance.catchup_price
+                under_side,
+                rebalance.catchup_qty,
+                rebalance.catchup_price,
+                rate=pair.fee_rate,
             )
             if not ok:
                 self._notify(
@@ -1217,10 +1346,6 @@ class TradingEngine:
                 if not books.best_ask(pair.ticker_a) and not books.best_ask(pair.ticker_b):
                     return "Settled"
 
-        # Discrepancy — ledger doesn't trust its own data
-        if ledger.has_discrepancy:
-            return "Discrepancy"
-
         # Jumped — resting orders not at top of market
         if resting_a > 0 or resting_b > 0:
             pair = self._find_pair(event_ticker)
@@ -1307,9 +1432,7 @@ class TradingEngine:
                 return pair
         return None
 
-    async def _create_order_group(
-        self, event_ticker: str, side: str, qty: int
-    ) -> str | None:
+    async def _create_order_group(self, event_ticker: str, side: str, qty: int) -> str | None:
         """Create a server-side order group for fill-limit safety.
 
         Returns the order_group_id, or None if creation fails (non-blocking).

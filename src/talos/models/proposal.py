@@ -52,14 +52,14 @@ class ProposalKey(BaseModel, frozen=True):
 
     event_ticker: str
     side: str  # "A", "B", or "" for bids (both sides)
-    kind: Literal["adjustment", "bid", "hold", "rebalance"]
+    kind: Literal["adjustment", "bid", "hold", "rebalance", "withdraw"]
 
 
 class Proposal(BaseModel):
     """Unified envelope wrapping either an adjustment or bid proposal."""
 
     key: ProposalKey
-    kind: Literal["adjustment", "bid", "hold", "rebalance"]
+    kind: Literal["adjustment", "bid", "hold", "rebalance", "withdraw"]
     summary: str
     detail: str
     created_at: datetime

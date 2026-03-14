@@ -5,6 +5,8 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from typing import Any
 
+from rich.segment import Segment
+from rich.style import Style as RichStyle
 from rich.text import Text as RichText
 from textual.widgets import DataTable, Static
 
@@ -13,7 +15,7 @@ from talos.fees import american_from_win_risk, american_odds, fee_adjusted_cost,
 from talos.models.position import EventPositionSummary
 from talos.scanner import ArbitrageScanner
 from talos.top_of_market import TopOfMarketTracker
-from talos.ui.theme import BLUE, GREEN, PEACH, RED, YELLOW
+from talos.ui.theme import BLUE, GREEN, PEACH, RED, SURFACE2, YELLOW
 
 
 def _fmt_cents(value: int) -> RichText:
@@ -184,25 +186,45 @@ class OpportunitiesTable(DataTable):
         self._positions: dict[str, EventPositionSummary] = {}
         self._labels: dict[str, str] = {}
 
+    _SEP_STYLE = RichStyle(color=SURFACE2)
+
     def on_mount(self) -> None:
         self.cursor_type = "row"
         self.zebra_stripes = True
+        r = "right"
         self.add_column("Event")
-        self.add_column("NO-A")
-        self.add_column("NO-B")
-        self.add_column("Edge")
-        self.add_column("Closes", width=8)
-        self.add_column("Pos-A", width=14)
-        self.add_column("Pos-B", width=14)
-        self.add_column("Q-A", width=10)
-        self.add_column("CPM-A", width=8)
-        self.add_column("ETA-A", width=7)
-        self.add_column("Q-B", width=10)
-        self.add_column("CPM-B", width=8)
-        self.add_column("ETA-B", width=7)
+        self.add_column(RichText("NO-A", justify=r))
+        self.add_column(RichText("NO-B", justify=r))
+        self.add_column(RichText("Edge", justify=r))
+        self.add_column(RichText("Closes", justify=r), width=8)
+        self.add_column(RichText("Pos-A", justify=r), width=14)
+        self.add_column(RichText("Pos-B", justify=r), width=14)
+        self.add_column(RichText("Q-A", justify=r), width=10)
+        self.add_column(RichText("CPM-A", justify=r), width=8)
+        self.add_column(RichText("ETA-A", justify=r), width=7)
+        self.add_column(RichText("Q-B", justify=r), width=10)
+        self.add_column(RichText("CPM-B", justify=r), width=8)
+        self.add_column(RichText("ETA-B", justify=r), width=7)
         self.add_column("Status", width=16)
-        self.add_column("P&L", width=16)
-        self.add_column("Net/Odds", width=20)
+        self.add_column(RichText("P&L", justify=r), width=16)
+        self.add_column(RichText("Net/Odds", justify=r), width=20)
+
+    def _render_line_in_row(  # type: ignore[override]
+        self, *args: Any, **kwargs: Any
+    ) -> Any:
+        """Insert faint vertical dividers between columns."""
+        fixed, scrollable = super()._render_line_in_row(*args, **kwargs)
+        col_count = len(self.ordered_columns)
+        if col_count < 2:
+            return fixed, scrollable
+        sep = [Segment("\u2502", self._SEP_STYLE)]
+        result = [scrollable[0]]
+        for i in range(1, col_count):
+            result.append(sep)
+            result.append(scrollable[i])
+        for i in range(col_count, len(scrollable)):
+            result.append(scrollable[i])
+        return fixed, result
 
     def update_positions(self, summaries: list[EventPositionSummary]) -> None:
         """Store latest position summaries for next table refresh."""
@@ -225,116 +247,119 @@ class OpportunitiesTable(DataTable):
         current_keys = {row_key.value for row_key in self.rows}
         new_keys = set(all_snaps.keys())
 
-        # Remove vanished rows
-        for key in current_keys - new_keys:
-            if key is not None:
-                self.remove_row(key)
+        with self.app.batch_update():
+            # Remove vanished rows
+            for key in current_keys - new_keys:
+                if key is not None:
+                    self.remove_row(key)
 
-        # Add or update rows (positive edge first, then rest)
-        sorted_opps = sorted(all_snaps.values(), key=lambda o: o.raw_edge, reverse=True)
-        for opp in sorted_opps:
-            edge_str = _fmt_edge(opp.fee_edge)
+            # Add or update rows (positive edge first, then rest)
+            sorted_opps = sorted(all_snaps.values(), key=lambda o: o.raw_edge, reverse=True)
+            for opp in sorted_opps:
+                edge_str = _fmt_edge(opp.fee_edge)
 
-            # Position columns
-            pos = self._positions.get(opp.event_ticker)
-            if pos is not None:
-                total_a = pos.leg_a.filled_count + pos.leg_a.resting_count
-                total_b = pos.leg_b.filled_count + pos.leg_b.resting_count
-                pos_a = _fmt_pos(pos.leg_a.filled_count, total_a, pos.leg_a.no_price)
-                pos_b = _fmt_pos(pos.leg_b.filled_count, total_b, pos.leg_b.no_price)
+                # Position columns
+                pos = self._positions.get(opp.event_ticker)
+                if pos is not None:
+                    total_a = pos.leg_a.filled_count + pos.leg_a.resting_count
+                    total_b = pos.leg_b.filled_count + pos.leg_b.resting_count
+                    pos_a = _fmt_pos(pos.leg_a.filled_count, total_a, pos.leg_a.no_price)
+                    pos_b = _fmt_pos(pos.leg_b.filled_count, total_b, pos.leg_b.no_price)
 
-                # Delta neutrality highlighting — yellow on behind side
-                fa, fb = pos.leg_a.filled_count, pos.leg_b.filled_count
-                ra, rb = pos.leg_a.resting_count, pos.leg_b.resting_count
-                ta, tb = fa + ra, fb + rb
-                if fa != fb:
-                    # Fill imbalance — highlight the side with fewer fills
-                    if fa < fb:
-                        pos_a = RichText(str(pos_a), style=YELLOW, justify="right")
+                    # Delta neutrality highlighting — yellow on behind side
+                    fa, fb = pos.leg_a.filled_count, pos.leg_b.filled_count
+                    ra, rb = pos.leg_a.resting_count, pos.leg_b.resting_count
+                    ta, tb = fa + ra, fb + rb
+                    if fa != fb:
+                        if fa < fb:
+                            pos_a = RichText(str(pos_a), style=YELLOW, justify="right")
+                        else:
+                            pos_b = RichText(str(pos_b), style=YELLOW, justify="right")
+                    elif ta != tb:
+                        if ta < tb:
+                            pos_a = RichText(str(pos_a), style=YELLOW, justify="right")
+                        else:
+                            pos_b = RichText(str(pos_b), style=YELLOW, justify="right")
+
+                    if pos.leg_a.queue_position:
+                        q_a = RichText(str(pos.leg_a.queue_position), justify="right")
                     else:
-                        pos_b = RichText(str(pos_b), style=YELLOW, justify="right")
-                elif ta != tb:
-                    # Resting imbalance (fills equal) — highlight side with fewer total
-                    if ta < tb:
-                        pos_a = RichText(str(pos_a), style=YELLOW, justify="right")
+                        q_a = DIM_DASH
+                    if pos.leg_b.queue_position:
+                        q_b = RichText(str(pos.leg_b.queue_position), justify="right")
                     else:
-                        pos_b = RichText(str(pos_b), style=YELLOW, justify="right")
-
-                if pos.leg_a.queue_position:
-                    q_a = RichText(str(pos.leg_a.queue_position), justify="right")
+                        q_b = DIM_DASH
+                    cpm_a = RichText(
+                        format_cpm(pos.leg_a.cpm, pos.leg_a.cpm_partial), justify="right"
+                    )
+                    cpm_b = RichText(
+                        format_cpm(pos.leg_b.cpm, pos.leg_b.cpm_partial), justify="right"
+                    )
+                    eta_a = RichText(
+                        format_eta(pos.leg_a.eta_minutes, pos.leg_a.cpm_partial), justify="right"
+                    )
+                    eta_b = RichText(
+                        format_eta(pos.leg_b.eta_minutes, pos.leg_b.cpm_partial), justify="right"
+                    )
+                    net = pos.locked_profit_cents - pos.exposure_cents
+                    pnl = _fmt_pnl(net, pos.kalshi_pnl)
+                    status = _fmt_status(pos.status)
+                    net_odds = _fmt_net_odds(
+                        opp.no_a,
+                        opp.no_b,
+                        pos.leg_a.filled_count,
+                        pos.leg_b.filled_count,
+                        pos.leg_a.total_fill_cost,
+                        pos.leg_b.total_fill_cost,
+                        pos.leg_a.total_fees,
+                        pos.leg_b.total_fees,
+                    )
                 else:
+                    pos_a = DIM_DASH
+                    pos_b = DIM_DASH
                     q_a = DIM_DASH
-                if pos.leg_b.queue_position:
-                    q_b = RichText(str(pos.leg_b.queue_position), justify="right")
-                else:
                     q_b = DIM_DASH
-                cpm_a = RichText(format_cpm(pos.leg_a.cpm, pos.leg_a.cpm_partial), justify="right")
-                cpm_b = RichText(format_cpm(pos.leg_b.cpm, pos.leg_b.cpm_partial), justify="right")
-                eta_a = RichText(
-                    format_eta(pos.leg_a.eta_minutes, pos.leg_a.cpm_partial), justify="right"
-                )
-                eta_b = RichText(
-                    format_eta(pos.leg_b.eta_minutes, pos.leg_b.cpm_partial), justify="right"
-                )
-                net = pos.locked_profit_cents - pos.exposure_cents
-                pnl = _fmt_pnl(net, pos.kalshi_pnl)
-                status = _fmt_status(pos.status)
-                net_odds = _fmt_net_odds(
-                    opp.no_a,
-                    opp.no_b,
-                    pos.leg_a.filled_count,
-                    pos.leg_b.filled_count,
-                    pos.leg_a.total_fill_cost,
-                    pos.leg_b.total_fill_cost,
-                    pos.leg_a.total_fees,
-                    pos.leg_b.total_fees,
-                )
-            else:
-                pos_a = DIM_DASH
-                pos_b = DIM_DASH
-                q_a = DIM_DASH
-                q_b = DIM_DASH
-                cpm_a = DIM_DASH
-                cpm_b = DIM_DASH
-                eta_a = DIM_DASH
-                eta_b = DIM_DASH
-                pnl = DIM_DASH
-                status = _fmt_status("")
-                net_odds = _fmt_net_odds(opp.no_a, opp.no_b)
+                    cpm_a = DIM_DASH
+                    cpm_b = DIM_DASH
+                    eta_a = DIM_DASH
+                    eta_b = DIM_DASH
+                    pnl = DIM_DASH
+                    status = _fmt_status("")
+                    net_odds = _fmt_net_odds(opp.no_a, opp.no_b)
 
-            # Top-of-market warning (applies regardless of position data)
-            if tracker is not None:
-                if tracker.is_at_top(opp.ticker_a) is False:
-                    q_a = RichText(f"!! {q_a}", style=YELLOW, justify="right")
-                if tracker.is_at_top(opp.ticker_b) is False:
-                    q_b = RichText(f"!! {q_b}", style=YELLOW, justify="right")
+                # Top-of-market warning (applies regardless of position data)
+                if tracker is not None:
+                    if tracker.is_at_top(opp.ticker_a) is False:
+                        q_a = RichText(f"!! {q_a}", style=YELLOW, justify="right")
+                    if tracker.is_at_top(opp.ticker_b) is False:
+                        q_b = RichText(f"!! {q_b}", style=YELLOW, justify="right")
 
-            display_name = self._labels.get(opp.event_ticker, opp.event_ticker)
-            closes = _fmt_closes(opp.close_time)
-            row_data = (
-                display_name,
-                _fmt_cents(opp.no_a),
-                _fmt_cents(opp.no_b),
-                edge_str,
-                closes,
-                pos_a,
-                pos_b,
-                q_a,
-                cpm_a,
-                eta_a,
-                q_b,
-                cpm_b,
-                eta_b,
-                status,
-                pnl,
-                net_odds,
-            )
-            if opp.event_ticker in current_keys:
-                for col_idx, value in enumerate(row_data):
-                    col_key = self.ordered_columns[col_idx].key
-                    self.update_cell(opp.event_ticker, col_key, value)
-            else:
-                self.add_row(*row_data, key=opp.event_ticker)
+                display_name = self._labels.get(opp.event_ticker, opp.event_ticker)
+                closes = _fmt_closes(opp.close_time)
+                row_data = (
+                    display_name,
+                    _fmt_cents(opp.no_a),
+                    _fmt_cents(opp.no_b),
+                    edge_str,
+                    closes,
+                    pos_a,
+                    pos_b,
+                    q_a,
+                    cpm_a,
+                    eta_a,
+                    q_b,
+                    cpm_b,
+                    eta_b,
+                    status,
+                    pnl,
+                    net_odds,
+                )
+                if opp.event_ticker in current_keys:
+                    for col_idx, value in enumerate(row_data):
+                        col_key = self.ordered_columns[col_idx].key
+                        self.update_cell(opp.event_ticker, col_key, value)
+                else:
+                    self.add_row(*row_data, key=opp.event_ticker)
 
 
 class AccountPanel(Static):

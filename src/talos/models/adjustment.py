@@ -15,7 +15,7 @@ class ProposedAdjustment(BaseModel):
 
     event_ticker: str
     side: Literal["A", "B"]
-    action: Literal["follow_jump", "hold"]
+    action: Literal["follow_jump", "hold", "withdraw"]
     cancel_order_id: str = ""
     cancel_count: int = 0
     cancel_price: int = 0

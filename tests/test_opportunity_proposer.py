@@ -71,7 +71,22 @@ class TestEdgeThreshold:
 
 
 class TestPositionGate:
-    def test_resting_on_both_sides_no_proposal(self) -> None:
+    def test_resting_covers_unit_no_proposal(self) -> None:
+        """When resting on both sides covers the full unit, no proposal."""
+        cfg = AutomationConfig(edge_threshold_cents=1.0, stability_seconds=0)
+        proposer = OpportunityProposer(cfg)
+        pair = _make_pair()
+        opp = _make_opp(fee_edge=2.0)
+        ledger = PositionLedger("EVT-1", unit_size=10)
+        ledger.record_resting(Side.A, "ord-a", 10, 48)
+        ledger.record_resting(Side.B, "ord-b", 10, 50)
+        now = datetime.now(UTC)
+
+        result = proposer.evaluate(pair, opp, ledger, set(), now=now)
+        assert result is None
+
+    def test_partial_resting_proposes_remainder(self) -> None:
+        """When resting doesn't cover the full unit, propose the gap."""
         cfg = AutomationConfig(edge_threshold_cents=1.0, stability_seconds=0)
         proposer = OpportunityProposer(cfg)
         pair = _make_pair()
@@ -82,7 +97,9 @@ class TestPositionGate:
         now = datetime.now(UTC)
 
         result = proposer.evaluate(pair, opp, ledger, set(), now=now)
-        assert result is None
+        assert result is not None
+        assert result.bid is not None
+        assert result.bid.qty == 5
 
     def test_both_sides_complete_suggests_reentry(self) -> None:
         """After both sides fill a full unit, suggest re-entry if profitable."""

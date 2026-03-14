@@ -70,8 +70,8 @@ Talos currently uses 10 of 40+ REST endpoints and 1 of 10 WebSocket channels. A 
 - [[plans/03-api-integration/phase-12-order-groups]] — DONE — Server-side unit size enforcement via Order Groups (REST CRUD, not yet wired to engine bidding)
 - [[plans/03-api-integration/phase-13-decrease-order]] — DONE — POST /portfolio/orders/{id}/decrease, rebalance step 1 now uses decrease_order
 
-### Tier 3 — Nice to Have
-- [[plans/03-api-integration/phase-14-tier3-extras]] — market_positions WS, top-of-book sizes, account limits, user_data_timestamp, list_subscriptions
+### Tier 3 — Nice to Have — TRIAGED
+- [[plans/03-api-integration/phase-14-tier3-extras]] — DONE: market_positions WS cross-check. SKIPPED: top-of-book sizes, account limits, user_data_timestamp. DEFERRED: list_subscriptions debug wiring.
 
 ## Verification
 

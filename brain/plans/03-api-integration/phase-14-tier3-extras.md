@@ -4,52 +4,28 @@ Back to [[plans/03-api-integration/overview]]
 
 ## Goal
 
-Implement remaining nice-to-have items: market_positions WS (fallback cross-check), top-of-book sizes on Market, account limits, user_data_timestamp, and list_subscriptions. All are low-risk additions that round out API coverage.
+Triage and selectively implement remaining nice-to-have items from the API audit.
 
-## Changes
+## Decisions (2026-03-12)
 
-### market_positions WS channel
-- Wire into PortfolioFeed (or create separate handler)
-- Subscribe globally, cache latest `MarketPositionMessage` per ticker
-- `realized_pnl` cross-check: compare against ledger's computed P&L each refresh cycle
-- Log discrepancies but don't act on them — this is observability only
+### market_positions WS channel — DONE
+- New `PositionFeed` handler (separate from PortfolioFeed — different channel, different semantics)
+- Subscribes globally, caches latest `MarketPositionMessage` per ticker
+- Cross-checks position counts and fees against ledger each refresh cycle
+- Logs mismatches via structlog but never acts on them — pure observability
 
-### Top-of-book sizes on Market model
-- Add `yes_bid_size: int | None = None` and `yes_ask_size: int | None = None` to `Market` model
-- Add FP migration for `yes_bid_size_fp` and `yes_ask_size_fp`
-- Display in UI (informational — "150 contracts at best bid")
+### Top-of-book sizes on Market model — SKIPPED
+- Redundant with OrderBookManager's full depth data
+- Queue position + CPM/ETA already provide more actionable fill-time info
 
-### GET /account/limits
-- Add `get_account_limits() -> dict` to REST client
-- Returns tier, read/write limits per second
-- Log at startup for awareness
-- Optionally display in AccountPanel
+### GET /account/limits — SKIPPED
+- Polling cadences are hand-tuned and well under limits
+- Info available in Kalshi dashboard; no runtime use case
 
-### GET /exchange/user_data_timestamp
-- Add `get_user_data_timestamp() -> str` to REST client
-- Log after `_verify_after_action()` to confirm data freshness
-- Diagnostic only — not used for control flow
+### GET /exchange/user_data_timestamp — SKIPPED
+- Verify-after-action already re-fetches orders and checks fills
+- No observed "Kalshi silently didn't process" bugs to justify the extra API call
 
-### list_subscriptions WS command
-- Already added to ws_client in Phase 1
-- Add a debug method to engine: `debug_subscriptions()` that sends the command and logs the response
-- Could be wired to a debug keybinding in the TUI
-
-## Data Structures
-
-- `Market` gains: `yes_bid_size: int | None`, `yes_ask_size: int | None`
-- `MarketPositionMessage` from Phase 1 used for WS channel
-- No new complex types
-
-## Verification
-
-### Static
-- `pyright` passes
-- `ruff` passes
-
-### Runtime
-- Unit test: `Market` model parses `yes_bid_size_fp` correctly
-- Unit test: `get_account_limits()` returns parsed response
-- Unit test: `get_user_data_timestamp()` returns timestamp string
-- Unit test: market_positions WS handler caches latest data and cross-checks P&L
-- Manual test: start Talos, verify account limits logged at startup
+### list_subscriptions WS command — DEFERRED
+- WS command already exists in ws_client (Phase 1)
+- Engine debug wrapper + TUI keybinding deferred until needed for debugging

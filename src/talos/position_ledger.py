@@ -13,7 +13,7 @@ from typing import TYPE_CHECKING
 
 import structlog
 
-from talos.fees import fee_adjusted_cost, fee_adjusted_profit_matched
+from talos.fees import MAKER_FEE_RATE, fee_adjusted_cost, fee_adjusted_profit_matched
 from talos.models.position import EventPositionSummary, LegSummary
 
 if TYPE_CHECKING:
@@ -76,7 +76,6 @@ class PositionLedger:
             Side.A: _SideState(),
             Side.B: _SideState(),
         }
-        self._discrepancy: str | None = None
 
     # ── Per-side accessors ──────────────────────────────────────────
 
@@ -127,29 +126,17 @@ class PositionLedger:
     def both_sides_complete(self) -> bool:
         return self.is_unit_complete(Side.A) and self.is_unit_complete(Side.B)
 
-    @property
-    def has_discrepancy(self) -> bool:
-        return self._discrepancy is not None
-
-    @property
-    def discrepancy(self) -> str | None:
-        return self._discrepancy
-
     # ── Safety gate ─────────────────────────────────────────────────
 
-    def is_placement_safe(self, side: Side, count: int, price: int) -> tuple[bool, str]:
+    def is_placement_safe(
+        self, side: Side, count: int, price: int, *, rate: float = MAKER_FEE_RATE
+    ) -> tuple[bool, str]:
         """Check if placing an order is safe. Returns (ok, reason).
 
         Enforces Principles 16 (unit gating), 18 (profitability gate).
+        Pass the pair-specific ``rate`` for non-standard fee series.
         """
-        if self._discrepancy is not None:
-            return False, f"ledger has unresolved discrepancy: {self._discrepancy}"
-
         s = self._sides[side]
-
-        # P16: only one resting order per side (check first — more specific error)
-        if s.resting_order_id is not None:
-            return False, f"order already resting on side {side.value}: {s.resting_order_id}"
 
         # P16: resting + filled-in-unit + new must not exceed unit.
         # Modular arithmetic allows re-entry after a complete unit (10/10 → next pair).
@@ -171,9 +158,9 @@ class PositionLedger:
             # No position on the other side — can't check arb yet, allow placement
             return True, ""
 
-        # Fee-adjusted: effective cost = price + (100 - price) * fee_rate
-        effective_this = fee_adjusted_cost(price)
-        effective_other = fee_adjusted_cost(int(round(other_price)))
+        # Fee-adjusted: effective cost = price + fee(price)
+        effective_this = fee_adjusted_cost(price, rate=rate)
+        effective_other = fee_adjusted_cost(int(round(other_price)), rate=rate)
         if effective_this + effective_other >= 100:
             return (
                 False,
@@ -218,7 +205,6 @@ class PositionLedger:
         """Clear state after both sides complete. Ready for next pair."""
         self._sides[Side.A].reset()
         self._sides[Side.B].reset()
-        self._discrepancy = None
 
     def sync_from_orders(self, orders: list, ticker_a: str, ticker_b: str) -> None:
         """Reconcile ledger against polled order state from Kalshi.
@@ -298,8 +284,6 @@ class PositionLedger:
                 s.resting_price = 0
 
         # Two-source sync (orders + positions) keeps the ledger accurate.
-        # Clear any stale discrepancy from previous cycles.
-        self._discrepancy = None
 
     def sync_from_positions(
         self,

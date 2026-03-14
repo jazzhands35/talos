@@ -75,8 +75,14 @@ class OpportunityProposer:
             if ledger.resting_count(Side.A) > 0 or ledger.resting_count(Side.B) > 0:
                 return None
         else:
-            has_a = ledger.resting_count(Side.A) > 0 or ledger.unit_remaining(Side.A) == 0
-            has_b = ledger.resting_count(Side.B) > 0 or ledger.unit_remaining(Side.B) == 0
+            has_a = (
+                ledger.unit_remaining(Side.A) == 0
+                or ledger.resting_count(Side.A) >= ledger.unit_remaining(Side.A)
+            )
+            has_b = (
+                ledger.unit_remaining(Side.B) == 0
+                or ledger.resting_count(Side.B) >= ledger.unit_remaining(Side.B)
+            )
             if has_a and has_b:
                 return None
 
@@ -106,13 +112,27 @@ class OpportunityProposer:
             stable_for = 0.0
 
         # All gates passed — build proposal
+        # Qty = remaining capacity minus what's already resting.
+        # After a unit_size change, existing fills/resting are a partial unit.
+        # Exception: re-entry after both sides complete → start a fresh full unit.
+        if ledger.both_sides_complete() and ledger.filled_count(
+            Side.A
+        ) == ledger.filled_count(Side.B):
+            qty = ledger.unit_size
+        else:
+            need_a = ledger.unit_remaining(Side.A) - ledger.resting_count(Side.A)
+            need_b = ledger.unit_remaining(Side.B) - ledger.resting_count(Side.B)
+            qty = min(need_a, need_b)
+            if qty <= 0:
+                return None
+
         bid = ProposedBid(
             event_ticker=event,
             ticker_a=pair.ticker_a,
             ticker_b=pair.ticker_b,
             no_a=opportunity.no_a,
             no_b=opportunity.no_b,
-            qty=ledger.unit_size,
+            qty=qty,
             edge_cents=opportunity.fee_edge,
             stable_for_seconds=stable_for,
             reason=f"Edge {opportunity.fee_edge:.1f}c stable for {stable_for:.0f}s",
@@ -129,7 +149,7 @@ class OpportunityProposer:
                 f"NO-A {opportunity.no_a}c + NO-B {opportunity.no_b}c = "
                 f"{opportunity.no_a + opportunity.no_b}c cost, "
                 f"{opportunity.fee_edge:.1f}c fee-adjusted edge, "
-                f"stable {stable_for:.0f}s, qty {ledger.unit_size}"
+                f"stable {stable_for:.0f}s, qty {qty}"
             ),
             created_at=now,
             bid=bid,

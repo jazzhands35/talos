@@ -153,8 +153,22 @@ Applied in: `ws_client.py` `_dispatch()` — catches parse errors and callback e
 
 When calling an API that acts on a single order (amend, cancel, get), use data from that specific order — not aggregates from the position ledger. The ledger aggregates fills across all orders (including archived ones augmented by the positions API), but the amend API needs `count = order.fill_count + desired_remaining` for *that* order.
 
-Applied in: `_execute_rebalance` previously fetched `get_order(order_id)` and used `fresh_order.fill_count` for amend. Now uses `decrease_order(reduce_to=target)` which sidesteps the issue entirely — `reduce_to` is absolute, not relative to fill count. See [[decisions#2026-03-12 — Rebalance step 1: decrease_order replaces amend_order]].
+Applied in: `_execute_rebalance` uses `decrease_order(reduce_to=target)` which sidesteps the issue entirely — `reduce_to` is absolute, not relative to fill count. `BidAdjuster.execute` fetches `get_order(cancel_order_id)` and uses `fresh_order.fill_count + fresh_order.remaining_count` for the amend `count`. See [[decisions#2026-03-12 — Rebalance step 1: decrease_order replaces amend_order]] and [[decisions#2026-03-12 — BidAdjuster.execute: fetch fresh order before amend]].
 
-**Lesson:** Prefer APIs with absolute targets (`reduce_to=N`) over relative ones (`count = fill_count + desired`) when possible. Absolute targets eliminate the class of bugs where aggregate vs instance data produces wrong inputs. The amend API's relative semantics remain a trap for any future use — always fetch fresh order state first.
+**Lesson:** Prefer APIs with absolute targets (`reduce_to=N`) over relative ones (`count = fill_count + desired`) when possible. When amend is required (price changes), always fetch the order's own state first — never use ledger aggregates.
 
 **Why not use aggregate:** If old orders were archived and a new one was placed, the aggregate might show 40 fills while the current order has 0. Using aggregate fills in the amend `count` makes `new_total` equal the order's existing total → `AMEND_ORDER_NO_OP`. The aggregate is correct for position display; the order's own state is correct for order-specific actions.
+
+## Batch widget updates in Textual
+
+When mutating multiple cells in a Textual `DataTable`, wrap all `update_cell` / `add_row` / `remove_row` calls in `self.app.batch_update()`. Without this, each call triggers a layout invalidation and repaint. At 20+ rows × 16 columns × 2 refreshes/sec, that's 640+ repaints/sec — causing visible UI lag.
+
+```python
+with self.app.batch_update():
+    for opp in sorted_opps:
+        ...
+        for col_idx, value in enumerate(row_data):
+            self.update_cell(key, col_key, value)
+```
+
+Applied in: `OpportunitiesTable.refresh_from_scanner()`. Collapsed 320+ per-cell repaints into 1 per refresh cycle.

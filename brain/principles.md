@@ -162,7 +162,7 @@ When the system evaluates a market change and decides not to act, that decision 
 - The operator should never have to wonder whether the system saw a change, failed to process it, or deliberately chose inaction
 - This applies to jump evaluations, opportunity scanning, and any future automated decision point
 
-**Why:** A jumped order with no proposal looks identical to a system that crashed, lost its WebSocket, or has a bug. The operator can't trust the system unless non-action is as transparent as action. Evidence: the `sync_from_orders` discrepancy bug silently blocked all proposals — indistinguishable from "working correctly, nothing to do."
+**Why:** A jumped order with no proposal looks identical to a system that crashed, lost its WebSocket, or has a bug. The operator can't trust the system unless non-action is as transparent as action. Evidence: a historical `sync_from_orders` discrepancy bug silently blocked all proposals — indistinguishable from "working correctly, nothing to do." (Field since removed; see [[decisions#2026-03-12 — Removed dead _discrepancy field from PositionLedger]].)
 
 ## 21. Authoritative Data Over Computed Data
 
