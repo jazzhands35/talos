@@ -277,6 +277,35 @@ class KalshiRESTClient:
         data = await self._request("GET", "/portfolio/orders", params=params)
         return [Order.model_validate(o) for o in data["orders"]]
 
+    async def get_all_orders(
+        self,
+        *,
+        ticker: str | None = None,
+        event_ticker: str | None = None,
+        status: str | None = None,
+        page_size: int = 200,
+    ) -> list[Order]:
+        """Fetch ALL orders by paginating through cursor-based results."""
+        all_orders: list[Order] = []
+        cursor: str | None = None
+        while True:
+            params: dict[str, Any] = {"limit": page_size}
+            if ticker:
+                params["ticker"] = ticker
+            if event_ticker:
+                params["event_ticker"] = event_ticker
+            if status:
+                params["status"] = status
+            if cursor:
+                params["cursor"] = cursor
+            data = await self._request("GET", "/portfolio/orders", params=params)
+            orders = [Order.model_validate(o) for o in data["orders"]]
+            all_orders.extend(orders)
+            cursor = data.get("cursor")
+            if not cursor or len(orders) < page_size:
+                break
+        return all_orders
+
     async def get_order(self, order_id: str) -> Order:
         data = await self._request("GET", f"/portfolio/orders/{order_id}")
         return Order.model_validate(data["order"])

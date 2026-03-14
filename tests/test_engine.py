@@ -19,17 +19,14 @@ from talos.models.proposal import ProposalKey
 from talos.models.strategy import ArbPair
 from talos.models.ws import (
     FillMessage,
-    MarketPositionMessage,
     OrderBookSnapshot,
     UserOrderMessage,
 )
 from talos.orderbook import OrderBookManager
-from talos.position_feed import PositionFeed
 from talos.position_ledger import Side
 from talos.rest_client import KalshiRESTClient
 from talos.scanner import ArbitrageScanner
 from talos.top_of_market import TopOfMarketTracker
-from talos.ws_client import KalshiWSClient
 
 
 def _make_engine(**overrides) -> TradingEngine:
@@ -139,7 +136,6 @@ def _engine_with_pair() -> tuple[TradingEngine, AsyncMock]:
     pair = ArbPair(event_ticker="EVT-1", ticker_a="TK-A", ticker_b="TK-B")
     adjuster = BidAdjuster(books, [pair], unit_size=10)
     rest = AsyncMock(spec=KalshiRESTClient)
-    rest.create_order_group = AsyncMock(return_value="grp-test")
     engine = _make_engine(
         scanner=scanner,
         adjuster=adjuster,
@@ -168,7 +164,6 @@ def _engine_with_pair_and_books(
     pair = ArbPair(event_ticker="EVT-1", ticker_a="TK-A", ticker_b="TK-B")
     adjuster = BidAdjuster(books, [pair], unit_size=10)
     rest = AsyncMock(spec=KalshiRESTClient)
-    rest.create_order_group = AsyncMock(return_value="grp-test")
     engine = _make_engine(
         scanner=scanner,
         adjuster=adjuster,
@@ -182,7 +177,7 @@ class TestPolling:
     async def test_refresh_account_updates_balance(self):
         engine, rest = _engine_with_pair()
         rest.get_balance.return_value = Balance(balance=50000, portfolio_value=60000)
-        rest.get_orders.return_value = []
+        rest.get_all_orders.return_value = []
         rest.get_queue_positions.return_value = {}
 
         await engine.refresh_account()
@@ -194,12 +189,12 @@ class TestPolling:
     async def test_refresh_account_fetches_all_orders(self):
         engine, rest = _engine_with_pair()
         rest.get_balance.return_value = Balance(balance=1000, portfolio_value=1000)
-        rest.get_orders.return_value = []
+        rest.get_all_orders.return_value = []
         rest.get_queue_positions.return_value = {}
 
         await engine.refresh_account()
 
-        rest.get_orders.assert_called_once_with(limit=200)
+        rest.get_all_orders.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_refresh_account_stores_orders(self):
@@ -208,7 +203,7 @@ class TestPolling:
             _make_order("TK-A", order_id="ord-a", fill_count=5, remaining_count=5),
         ]
         rest.get_balance.return_value = Balance(balance=1000, portfolio_value=1000)
-        rest.get_orders.return_value = orders
+        rest.get_all_orders.return_value = orders
         rest.get_queue_positions.return_value = {}
 
         await engine.refresh_account()
@@ -231,7 +226,7 @@ class TestPolling:
             _make_order("TK-B", order_id="ord-b", fill_count=5, remaining_count=5, no_price=47),
         ]
         rest.get_balance.return_value = Balance(balance=1000, portfolio_value=1000)
-        rest.get_orders.return_value = orders
+        rest.get_all_orders.return_value = orders
         rest.get_queue_positions.return_value = {}
 
         await engine.refresh_account()
@@ -248,7 +243,7 @@ class TestPolling:
             _make_order("TK-A", order_id="ord-a", fill_count=3, remaining_count=7),
         ]
         rest.get_balance.return_value = Balance(balance=1000, portfolio_value=1000)
-        rest.get_orders.return_value = orders
+        rest.get_all_orders.return_value = orders
         rest.get_queue_positions.return_value = {}
 
         await engine.refresh_account()
@@ -265,7 +260,7 @@ class TestPolling:
             _make_order("TK-A", order_id="ord-a", fill_count=0, remaining_count=10),
         ]
         rest.get_balance.return_value = Balance(balance=1000, portfolio_value=1000)
-        rest.get_orders.return_value = orders
+        rest.get_all_orders.return_value = orders
         rest.get_queue_positions.return_value = {"ord-a": 50}
         await engine.refresh_account()
 
@@ -299,7 +294,7 @@ class TestPolling:
         engine._queue_cache["old-order"] = 10
 
         rest.get_balance.return_value = Balance(balance=1000, portfolio_value=1000)
-        rest.get_orders.return_value = [
+        rest.get_all_orders.return_value = [
             _make_order("TK-A", order_id="new-order", remaining_count=10),
         ]
         rest.get_queue_positions.return_value = {}
@@ -316,7 +311,7 @@ class TestPolling:
             _make_order("TK-A", order_id="ord-a", fill_count=0, remaining_count=10, no_price=45),
         ]
         rest.get_balance.return_value = Balance(balance=1000, portfolio_value=1000)
-        rest.get_orders.return_value = orders
+        rest.get_all_orders.return_value = orders
         rest.get_queue_positions.return_value = {}
 
         await engine.refresh_account()
@@ -332,7 +327,7 @@ class TestPolling:
         engine, rest = _engine_with_pair()
         # Orders API returns nothing (orders archived)
         rest.get_balance.return_value = Balance(balance=1000, portfolio_value=1000)
-        rest.get_orders.return_value = []
+        rest.get_all_orders.return_value = []
         rest.get_queue_positions.return_value = {}
         # Positions API shows actual holdings
         rest.get_positions.return_value = [
@@ -352,7 +347,7 @@ class TestPolling:
         """If positions API fails, sync_from_orders still works."""
         engine, rest = _engine_with_pair()
         rest.get_balance.return_value = Balance(balance=1000, portfolio_value=1000)
-        rest.get_orders.return_value = []
+        rest.get_all_orders.return_value = []
         rest.get_queue_positions.return_value = {}
         rest.get_positions.side_effect = RuntimeError("API error")
 
@@ -519,23 +514,30 @@ class TestPlaceBidsSafety:
         assert rest.create_order.call_count == 2
 
     @pytest.mark.asyncio
-    async def test_ledger_not_updated_optimistically(self):
-        """Ledger is NOT updated after placement — Kalshi is source of truth."""
+    async def test_ledger_updated_optimistically_after_placement(self):
+        """Ledger IS updated optimistically to prevent duplicate proposals
+        from concurrent refresh_account with stale data."""
         engine, rest = _engine_with_pair()
         ledger = engine.adjuster.get_ledger("EVT-1")
 
-        rest.create_order.return_value = _make_order(
-            "TK-A", order_id="new-a", remaining_count=10, no_price=45
-        )
+        # create_order returns different orders for each call
+        order_a = _make_order("TK-A", order_id="new-a", remaining_count=10, no_price=45)
+        order_b = _make_order("TK-B", order_id="new-b", remaining_count=10, no_price=47)
+        rest.create_order.side_effect = [order_a, order_b]
 
         from talos.models.strategy import BidConfirmation
 
         bid = BidConfirmation(ticker_a="TK-A", ticker_b="TK-B", no_a=45, no_b=47, qty=10)
         await engine.place_bids(bid)
 
-        # Ledger should NOT have resting orders — sync_from_orders handles that
-        assert ledger.resting_order_id(Side.A) is None
-        assert ledger.resting_order_id(Side.B) is None
+        # Ledger should reflect the placed orders immediately
+        assert ledger.resting_order_id(Side.A) == "new-a"
+        assert ledger.resting_count(Side.A) == 10
+        assert ledger.resting_order_id(Side.B) == "new-b"
+        assert ledger.resting_count(Side.B) == 10
+        # Orders also added to cache for WS handler
+        assert any(o.order_id == "new-a" for o in engine.orders)
+        assert any(o.order_id == "new-b" for o in engine.orders)
 
 
 class FakeBookManager:
@@ -779,7 +781,7 @@ class TestOpportunityProposerIntegration:
         """refresh_account calls evaluate_opportunities at end of cycle."""
         engine, rest = _engine_with_automation()
         rest.get_balance.return_value = Balance(balance=1000, portfolio_value=1000)
-        rest.get_orders.return_value = []
+        rest.get_all_orders.return_value = []
         rest.get_queue_positions.return_value = {}
 
         await engine.refresh_account()
@@ -793,63 +795,6 @@ class TestOpportunityProposerIntegration:
 
 
 class TestCheckImbalances:
-    def test_no_imbalance_no_proposal(self):
-        """Balanced positions produce no rebalance proposal."""
-        engine, _ = _engine_with_pair()
-        ledger = engine.adjuster.get_ledger("EVT-1")
-        ledger.record_resting(Side.A, "ord-a", 10, 45)
-        ledger.record_resting(Side.B, "ord-b", 10, 47)
-
-        engine.check_imbalances()
-        assert len(engine.proposal_queue) == 0
-
-    def test_imbalance_within_unit_no_proposal(self):
-        """Delta < unit_size is tolerated (normal fill asymmetry)."""
-        engine, _ = _engine_with_pair()
-        ledger = engine.adjuster.get_ledger("EVT-1")
-        ledger.record_fill(Side.A, 10, 45)
-        ledger.record_resting(Side.A, "ord-a", 5, 45)
-        # Side B: 10 filled, no resting — delta = 5 < unit_size
-        ledger.record_fill(Side.B, 10, 47)
-
-        engine.check_imbalances()
-        assert len(engine.proposal_queue) == 0
-
-    def test_imbalance_at_exactly_unit_size_proposes(self):
-        """Delta == unit_size is flagged (a full unit of imbalance)."""
-        engine, _ = _engine_with_pair()
-        ledger = engine.adjuster.get_ledger("EVT-1")
-        ledger.record_fill(Side.A, 10, 45)
-        ledger.record_resting(Side.A, "ord-a", 10, 45)
-        # Side B: 10 filled, no resting — delta = 10 = unit_size
-        ledger.record_fill(Side.B, 10, 47)
-
-        engine.check_imbalances()
-        assert len(engine.proposal_queue) == 1
-        p = engine.proposal_queue.pending()[0]
-        assert p.kind == "rebalance"
-
-    def test_imbalance_exceeds_unit_proposes_rebalance(self):
-        """Delta > unit_size produces a rebalance proposal."""
-        engine, _ = _engine_with_pair()
-        ledger = engine.adjuster.get_ledger("EVT-1")
-        # Side A: 50 filled + 60 resting = 110 committed
-        ledger.record_fill(Side.A, 50, 45)
-        ledger.record_resting(Side.A, "ord-a", 60, 45)
-        # Side B: 50 filled + 10 resting = 60 committed
-        ledger.record_fill(Side.B, 50, 47)
-        ledger.record_resting(Side.B, "ord-b", 10, 47)
-
-        engine.check_imbalances()
-
-        assert len(engine.proposal_queue) == 1
-        p = engine.proposal_queue.pending()[0]
-        assert p.kind == "rebalance"
-        assert p.key.side == "A"  # over-extended side
-        assert "Reduce" in p.detail
-        assert "110" in p.detail  # committed_A
-        assert "60" in p.detail  # committed_B
-
     def test_no_duplicate_rebalance_proposals(self):
         """Second check doesn't add another rebalance for the same side."""
         engine, _ = _engine_with_pair()
@@ -864,478 +809,12 @@ class TestCheckImbalances:
 
         assert len(engine.proposal_queue) == 1
 
-    def test_fill_imbalance_no_books_manual_fallback(self):
-        """Without book data, fill imbalance falls back to manual action."""
-        engine, _ = _engine_with_pair()
-        ledger = engine.adjuster.get_ledger("EVT-1")
-        # Side A: 30 filled, 0 resting = 30 committed
-        ledger.record_fill(Side.A, 30, 45)
-        # Side B: 10 filled, 0 resting = 10 committed
-        ledger.record_fill(Side.B, 10, 47)
-
-        engine.check_imbalances()
-
-        assert len(engine.proposal_queue) == 1
-        p = engine.proposal_queue.pending()[0]
-        assert p.kind == "rebalance"
-        assert p.key.side == "A"  # over side
-        assert p.rebalance is None  # no executable step — manual fallback
-
-    def test_fill_imbalance_with_books_proposes_catchup(self):
-        """With book data, fill imbalance proposes catch-up bid on under-side."""
-        engine, _ = _engine_with_pair_and_books()
-        ledger = engine.adjuster.get_ledger("EVT-1")
-        # Side A: 30 filled, 0 resting = 30 committed
-        ledger.record_fill(Side.A, 30, 45)
-        # Side B: 20 filled, 0 resting = 20 committed
-        ledger.record_fill(Side.B, 20, 48)
-
-        engine.check_imbalances()
-
-        assert len(engine.proposal_queue) == 1
-        p = engine.proposal_queue.pending()[0]
-        assert p.kind == "rebalance"
-        assert p.rebalance is not None
-        # No step 1 (no resting to cancel)
-        assert p.rebalance.order_id is None
-        # Step 2: catch-up 10 on B at current book price
-        assert p.rebalance.catchup_ticker == "TK-B"
-        assert p.rebalance.catchup_qty == 10
-        assert p.rebalance.catchup_price == 48
-
-    def test_two_step_cancel_then_catchup(self):
-        """30f+10r / 20f → cancel A resting, then catch up on B."""
-        engine, _ = _engine_with_pair_and_books()
-        ledger = engine.adjuster.get_ledger("EVT-1")
-        ledger.record_fill(Side.A, 30, 45)
-        ledger.record_resting(Side.A, "ord-a", 10, 45)
-        ledger.record_fill(Side.B, 20, 48)
-
-        engine.check_imbalances()
-
-        p = engine.proposal_queue.pending()[0]
-        assert p.rebalance is not None
-        # Step 1: cancel all resting on A
-        assert p.rebalance.order_id == "ord-a"
-        assert p.rebalance.current_resting == 10
-        assert p.rebalance.target_resting == 0
-        # Step 2: catch-up 10 on B
-        assert p.rebalance.catchup_ticker == "TK-B"
-        assert p.rebalance.catchup_qty == 10
-        assert p.rebalance.catchup_price == 48
-        assert "Cancel" in p.detail
-        assert "Place 10" in p.detail
-
-    def test_reduce_only_when_under_has_resting(self):
-        """If under-side already has resting, only reduce over-side."""
-        engine, _ = _engine_with_pair_and_books()
-        ledger = engine.adjuster.get_ledger("EVT-1")
-        # A: 40f + 10r = 50, B: 20f + 10r = 30, delta = 20
-        ledger.record_fill(Side.A, 40, 45)
-        ledger.record_resting(Side.A, "ord-a", 10, 45)
-        ledger.record_fill(Side.B, 20, 48)
-        ledger.record_resting(Side.B, "ord-b", 10, 48)
-
-        engine.check_imbalances()
-
-        p = engine.proposal_queue.pending()[0]
-        assert p.rebalance is not None
-        # Step 1: reduce A resting to 0 (target = max(40, 30) = 40, need 0 resting)
-        assert p.rebalance.order_id == "ord-a"
-        assert p.rebalance.target_resting == 0
-        # Step 2: no catch-up (B already has 10 resting)
-        assert p.rebalance.catchup_qty == 0
-
-    def test_partial_reduce_when_under_committed_exceeds_over_filled(self):
-        """Reduce over resting partially when under-committed > over-filled."""
-        engine, _ = _engine_with_pair_and_books()
-        ledger = engine.adjuster.get_ledger("EVT-1")
-        # A: 30f + 20r = 50, B: 40f + 0r = 40, delta = 10
-        ledger.record_fill(Side.A, 30, 45)
-        ledger.record_resting(Side.A, "ord-a", 20, 45)
-        ledger.record_fill(Side.B, 40, 48)
-
-        engine.check_imbalances()
-
-        p = engine.proposal_queue.pending()[0]
-        assert p.rebalance is not None
-        # target = max(30, 40) = 40, target_resting = 40 - 30 = 10
-        assert p.rebalance.target_resting == 10
-        assert p.rebalance.current_resting == 20
-        # No catch-up needed (B committed = 40 = target)
-        assert p.rebalance.catchup_qty == 0
-
-    def test_catchup_capped_at_unit_size(self):
-        """Catch-up quantity is capped at one unit even if gap is larger."""
-        engine, _ = _engine_with_pair_and_books()
-        ledger = engine.adjuster.get_ledger("EVT-1")
-        # A: 50f, B: 20f → gap = 30 but catchup capped at 10
-        ledger.record_fill(Side.A, 50, 45)
-        ledger.record_fill(Side.B, 20, 48)
-
-        engine.check_imbalances()
-
-        p = engine.proposal_queue.pending()[0]
-        assert p.rebalance is not None
-        assert p.rebalance.catchup_qty == 10  # capped at unit_size
-
     @pytest.mark.asyncio
-    async def test_execute_rebalance_cancel_and_catchup(self):
-        """Executing two-step rebalance cancels first, then places catch-up."""
+    async def test_rebalance_approve_verifies_after_action(self):
+        """Approving a rebalance runs verify_after_action from the engine."""
         engine, rest = _engine_with_pair_and_books()
         ledger = engine.adjuster.get_ledger("EVT-1")
-        ledger.record_fill(Side.A, 30, 45)
-        ledger.record_resting(Side.A, "ord-a", 10, 45)
-        ledger.record_fill(Side.B, 20, 48)
-
-        engine.check_imbalances()
-        key = engine.proposal_queue.pending()[0].key
-
-        rest.cancel_order = AsyncMock()
-        rest.create_order = AsyncMock(return_value=_make_order("TK-B", order_id="new-b"))
-        # Fresh sync before catch-up — return orders maintaining imbalance
-        rest.get_orders = AsyncMock(
-            return_value=[
-                _make_order(
-                    "TK-A",
-                    order_id="ord-a-done",
-                    fill_count=30,
-                    no_price=45,
-                    status="canceled",
-                ),
-                _make_order(
-                    "TK-B",
-                    order_id="ord-b-done",
-                    fill_count=20,
-                    no_price=48,
-                    status="canceled",
-                ),
-            ]
-        )
-        await engine.approve_proposal(key)
-
-        rest.cancel_order.assert_called_once_with("ord-a")
-        rest.create_order.assert_called_once_with(
-            ticker="TK-B",
-            action="buy",
-            side="no",
-            no_price=48,
-            count=10,
-            order_group_id="grp-test",
-        )
-
-    @pytest.mark.asyncio
-    async def test_execute_rebalance_decrease_reduces_resting(self):
-        """Partial reduce uses decrease_order (preserves queue position)."""
-        engine, rest = _engine_with_pair_and_books()
-        ledger = engine.adjuster.get_ledger("EVT-1")
-        # A: 30f + 20r @ 45c = 50, B: 40f = 40, delta = 10 → reduce A to 10 resting
-        ledger.record_fill(Side.A, 30, 45)
-        ledger.record_resting(Side.A, "ord-a", 20, 45)
-        ledger.record_fill(Side.B, 40, 48)
-
-        engine.check_imbalances()
-        key = engine.proposal_queue.pending()[0].key
-
-        # Mock get_order to return fresh order state (P15)
-        rest.get_order = AsyncMock(
-            return_value=_make_order(
-                "TK-A", order_id="ord-a", fill_count=30, remaining_count=20, no_price=45
-            )
-        )
-        rest.decrease_order = AsyncMock(
-            return_value=_make_order("TK-A", order_id="ord-a", remaining_count=10)
-        )
-        await engine.approve_proposal(key)
-
-        rest.get_order.assert_called_once_with("ord-a")
-        rest.decrease_order.assert_called_once_with(
-            "ord-a",
-            reduce_to=10,
-        )
-
-    @pytest.mark.asyncio
-    async def test_execute_rebalance_already_at_target(self):
-        """If remaining_count already at or below target, skip the decrease call."""
-        engine, rest = _engine_with_pair_and_books()
-        ledger = engine.adjuster.get_ledger("EVT-1")
-        # A: 20f + 30r @ 45c = 50, B: 25f = 25, delta = 25
-        ledger.record_fill(Side.A, 20, 45)
-        ledger.record_resting(Side.A, "ord-a", 30, 45)
-        ledger.record_fill(Side.B, 25, 48)
-
-        engine.check_imbalances()
-        key = engine.proposal_queue.pending()[0].key
-
-        # Fresh order shows remaining already at target (fills arrived between
-        # proposal and execution)
-        rest.get_order = AsyncMock(
-            return_value=_make_order(
-                "TK-A", order_id="ord-a", fill_count=25, remaining_count=5, no_price=45
-            )
-        )
-        rest.decrease_order = AsyncMock()
-        notifications: list[tuple[str, str]] = []
-        engine.on_notification = lambda msg, sev: notifications.append((msg, sev))
-
-        await engine.approve_proposal(key)
-
-        # Already at target — no decrease call, info notification
-        rest.decrease_order.assert_not_called()
-        assert any("already at target" in msg.lower() for msg, _ in notifications)
-        assert not any(sev == "error" for _, sev in notifications)
-
-    @pytest.mark.asyncio
-    async def test_execute_rebalance_decrease_uses_target_resting(self):
-        """decrease_order uses target_resting directly (not order fill count).
-
-        With decrease_order, we pass reduce_to=target_resting. The old amend
-        path needed order.fill_count + target_resting, but decrease is simpler.
-        """
-        engine, rest = _engine_with_pair_and_books()
-        ledger = engine.adjuster.get_ledger("EVT-1")
-        # A: 30f + 20r @ 45c = 50, B: 40f = 40, delta = 10 → target_resting = 10
-        ledger.record_fill(Side.A, 30, 45)
-        ledger.record_resting(Side.A, "ord-a-new", 20, 45)
-        ledger.record_fill(Side.B, 40, 48)
-
-        engine.check_imbalances()
-        key = engine.proposal_queue.pending()[0].key
-
-        rest.get_order = AsyncMock(
-            return_value=_make_order(
-                "TK-A", order_id="ord-a-new", fill_count=0, remaining_count=20, no_price=45
-            )
-        )
-        rest.decrease_order = AsyncMock(
-            return_value=_make_order("TK-A", order_id="ord-a-new", remaining_count=10)
-        )
-        await engine.approve_proposal(key)
-
-        rest.decrease_order.assert_called_once_with(
-            "ord-a-new",
-            reduce_to=10,
-        )
-
-    @pytest.mark.asyncio
-    async def test_execute_rebalance_skips_amend_when_already_at_target(self):
-        """If fresh order remaining is already <= target, skip the amend."""
-        engine, rest = _engine_with_pair_and_books()
-        ledger = engine.adjuster.get_ledger("EVT-1")
-        ledger.record_fill(Side.A, 30, 45)
-        ledger.record_resting(Side.A, "ord-a", 20, 45)
-        ledger.record_fill(Side.B, 40, 48)
-
-        engine.check_imbalances()
-        key = engine.proposal_queue.pending()[0].key
-
-        # Fresh order shows fills absorbed the resting (remaining is now 5, below target 10)
-        rest.get_order = AsyncMock(
-            return_value=_make_order(
-                "TK-A", order_id="ord-a", fill_count=45, remaining_count=5, no_price=45
-            )
-        )
-        rest.amend_order = AsyncMock()
-
-        notifications: list[tuple[str, str]] = []
-        engine.on_notification = lambda msg, sev: notifications.append((msg, sev))
-        await engine.approve_proposal(key)
-
-        # Should NOT attempt amend — already at target
-        rest.amend_order.assert_not_called()
-        assert any("already at target" in msg.lower() for msg, _ in notifications)
-
-    @pytest.mark.asyncio
-    async def test_execute_rebalance_catchup_blocked_by_safety(self):
-        """Catch-up blocked by safety gate doesn't place order."""
-        engine, rest = _engine_with_pair_and_books()
-        ledger = engine.adjuster.get_ledger("EVT-1")
-        # Create larger imbalance so fresh sync still shows delta >= unit_size
-        # even after B picks up 5 resting
-        ledger.record_fill(Side.A, 40, 45)
-        ledger.record_fill(Side.B, 20, 48)
-
-        engine.check_imbalances()
-        assert len(engine.proposal_queue) == 1
-
-        key = engine.proposal_queue.pending()[0].key
-        rest.create_order = AsyncMock()
-        # Fresh sync: A=40f, B=20f+5r=25 committed → delta=15 >= 10,
-        # but B has resting → safety gate blocks placement
-        rest.get_orders = AsyncMock(
-            return_value=[
-                _make_order(
-                    "TK-A",
-                    order_id="ord-a-done",
-                    fill_count=40,
-                    no_price=45,
-                    status="canceled",
-                ),
-                _make_order(
-                    "TK-B",
-                    order_id="ord-b-done",
-                    fill_count=20,
-                    no_price=48,
-                    status="canceled",
-                ),
-                _make_order(
-                    "TK-B",
-                    order_id="ord-b-late",
-                    remaining_count=5,
-                    no_price=48,
-                    status="resting",
-                ),
-            ]
-        )
-        notifications: list[tuple[str, str]] = []
-        engine.on_notification = lambda msg, sev: notifications.append((msg, sev))
-        await engine.approve_proposal(key)
-
-        # Catch-up should be blocked (B already has resting after fresh sync)
-        rest.create_order.assert_not_called()
-        assert any("BLOCKED" in msg for msg, _ in notifications)
-
-
-# ── Fresh-sync-before-catchup tests ──────────────────────────────────
-
-
-class TestFreshSyncBeforeCatchup:
-    """Tests for the fresh Kalshi sync guard before catch-up placement (P7/P21)."""
-
-    @pytest.mark.asyncio
-    async def test_catchup_skipped_when_fresh_sync_resolves_imbalance(self):
-        """If fresh sync shows imbalance < unit_size, catch-up is skipped."""
-        engine, rest = _engine_with_pair_and_books()
-        ledger = engine.adjuster.get_ledger("EVT-1")
-        # Stale view: A=30f, B=20f → delta=10 → proposes catch-up
-        ledger.record_fill(Side.A, 30, 45)
-        ledger.record_fill(Side.B, 20, 48)
-
-        engine.check_imbalances()
-        assert len(engine.proposal_queue) == 1
-        key = engine.proposal_queue.pending()[0].key
-
-        # Fresh sync reveals B filled up to 25 between polls → delta=5 < 10
-        rest.get_orders = AsyncMock(
-            return_value=[
-                _make_order(
-                    "TK-A",
-                    order_id="oa",
-                    fill_count=30,
-                    no_price=45,
-                    status="canceled",
-                ),
-                _make_order(
-                    "TK-B",
-                    order_id="ob",
-                    fill_count=25,
-                    no_price=48,
-                    status="canceled",
-                ),
-            ]
-        )
-        rest.create_order = AsyncMock()
-        notifications: list[tuple[str, str]] = []
-        engine.on_notification = lambda msg, sev: notifications.append((msg, sev))
-
-        await engine.approve_proposal(key)
-
-        rest.create_order.assert_not_called()
-        assert any("skipped" in msg.lower() for msg, _ in notifications)
-
-    @pytest.mark.asyncio
-    async def test_catchup_blocked_when_fresh_sync_fails(self):
-        """If fresh sync raises, catch-up is blocked — never trust stale data."""
-        engine, rest = _engine_with_pair_and_books()
-        ledger = engine.adjuster.get_ledger("EVT-1")
-        ledger.record_fill(Side.A, 30, 45)
-        ledger.record_fill(Side.B, 20, 48)
-
-        engine.check_imbalances()
-        key = engine.proposal_queue.pending()[0].key
-
-        rest.get_orders = AsyncMock(side_effect=RuntimeError("API timeout"))
-        rest.create_order = AsyncMock()
-        notifications: list[tuple[str, str]] = []
-        engine.on_notification = lambda msg, sev: notifications.append((msg, sev))
-
-        await engine.approve_proposal(key)
-
-        rest.create_order.assert_not_called()
-        assert any("fresh sync failed" in msg.lower() for msg, _ in notifications)
-
-    @pytest.mark.asyncio
-    async def test_catchup_blocked_when_pair_not_found(self):
-        """If pair is missing from scanner, catch-up is blocked."""
-        engine, rest = _engine_with_pair_and_books()
-        ledger = engine.adjuster.get_ledger("EVT-1")
-        ledger.record_fill(Side.A, 30, 45)
-        ledger.record_fill(Side.B, 20, 48)
-
-        engine.check_imbalances()
-        key = engine.proposal_queue.pending()[0].key
-
-        # Remove the pair from scanner so _find_pair returns None
-        engine._scanner._pairs.clear()
-
-        rest.create_order = AsyncMock()
-        notifications: list[tuple[str, str]] = []
-        engine.on_notification = lambda msg, sev: notifications.append((msg, sev))
-
-        await engine.approve_proposal(key)
-
-        rest.create_order.assert_not_called()
-        assert any("pair not found" in msg.lower() for msg, _ in notifications)
-
-    @pytest.mark.asyncio
-    async def test_fresh_sync_confirms_imbalance_catchup_proceeds(self):
-        """When fresh sync confirms imbalance still exists, catch-up proceeds."""
-        engine, rest = _engine_with_pair_and_books()
-        ledger = engine.adjuster.get_ledger("EVT-1")
-        ledger.record_fill(Side.A, 30, 45)
-        ledger.record_fill(Side.B, 20, 48)
-
-        engine.check_imbalances()
-        key = engine.proposal_queue.pending()[0].key
-
-        # Fresh sync confirms same state — imbalance still exists
-        rest.get_orders = AsyncMock(
-            return_value=[
-                _make_order(
-                    "TK-A",
-                    order_id="oa",
-                    fill_count=30,
-                    no_price=45,
-                    status="canceled",
-                ),
-                _make_order(
-                    "TK-B",
-                    order_id="ob",
-                    fill_count=20,
-                    no_price=48,
-                    status="canceled",
-                ),
-            ]
-        )
-        rest.create_order = AsyncMock(return_value=_make_order("TK-B", order_id="new-b"))
-
-        await engine.approve_proposal(key)
-
-        rest.create_order.assert_called_once_with(
-            ticker="TK-B",
-            action="buy",
-            side="no",
-            no_price=48,
-            count=10,
-            order_group_id="grp-test",
-        )
-
-    @pytest.mark.asyncio
-    async def test_reduce_only_rebalance_no_catchup_but_verifies(self):
-        """Rebalance with only step 1 (reduce) still verifies after action."""
-        engine, rest = _engine_with_pair_and_books()
-        ledger = engine.adjuster.get_ledger("EVT-1")
-        # A: 40f+10r=50, B: 20f+10r=30 → reduce A only (B has resting)
+        # A: 40f+10r=50, B: 20f+10r=30 -> reduce A only (B has resting)
         ledger.record_fill(Side.A, 40, 45)
         ledger.record_resting(Side.A, "ord-a", 10, 45)
         ledger.record_fill(Side.B, 20, 48)
@@ -1346,15 +825,42 @@ class TestFreshSyncBeforeCatchup:
 
         rest.cancel_order = AsyncMock()
         # Verification sync happens after step 1
-        rest.get_orders = AsyncMock(return_value=[])
+        rest.get_all_orders = AsyncMock(return_value=[])
         rest.get_positions = AsyncMock(return_value=[])
 
         await engine.approve_proposal(key)
 
         rest.cancel_order.assert_called_once_with("ord-a")
         # Post-action verification did run
-        rest.get_orders.assert_called_once()
+        rest.get_all_orders.assert_called_once()
         rest.get_positions.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_verify_failure_notifies_operator(self):
+        """When post-action verify fails, operator sees a warning toast."""
+        engine, rest = _engine_with_pair_and_books()
+        ledger = engine.adjuster.get_ledger("EVT-1")
+        ledger.record_fill(Side.A, 40, 45)
+        ledger.record_resting(Side.A, "ord-a", 10, 45)
+        ledger.record_fill(Side.B, 20, 48)
+        ledger.record_resting(Side.B, "ord-b", 10, 48)
+
+        engine.check_imbalances()
+        key = engine.proposal_queue.pending()[0].key
+
+        rest.cancel_order = AsyncMock()
+        # Verify fails — API unreachable after action
+        rest.get_all_orders = AsyncMock(side_effect=RuntimeError("API down"))
+
+        notifications: list[tuple[str, str]] = []
+        engine.on_notification = lambda msg, sev: notifications.append((msg, sev))
+
+        await engine.approve_proposal(key)
+
+        # Action succeeded, but verify failed — operator should see warning
+        rest.cancel_order.assert_called_once()
+        assert any("Verify FAILED" in msg for msg, _ in notifications)
+        assert any(sev == "warning" for _, sev in notifications)
 
 
 class TestComputeEventStatus:
@@ -1596,7 +1102,7 @@ class TestStaleBookRecovery:
         books.get_book("TK-A").stale = True
 
         rest.get_balance.return_value = Balance(balance=1000, portfolio_value=1000)
-        rest.get_orders.return_value = []
+        rest.get_all_orders.return_value = []
         rest.get_queue_positions.return_value = {}
 
         await engine.refresh_account()
@@ -1830,69 +1336,135 @@ class TestLifecycleFiltering:
         rest.get_settlements.assert_not_called()
 
 
-class TestPositionCrossCheck:
-    """Cross-check WS market_positions data against ledger."""
+class TestReconcileWithKalshi:
+    """Full ledger reconciliation against Kalshi API data."""
 
-    def _engine_with_position_feed(self) -> tuple[TradingEngine, PositionFeed]:
+    def _notify_collector(self, engine: TradingEngine) -> list[tuple[str, str]]:
+        notifications: list[tuple[str, str]] = []
+        engine.on_notification = lambda msg, sev="info": notifications.append((msg, sev))
+        return notifications
+
+    def test_clean_state_no_alerts(self, capsys: pytest.CaptureFixture[str]) -> None:
+        """Kalshi and ledger agree perfectly — no alerts."""
         engine, _ = _engine_with_pair()
-        pf = PositionFeed(ws_client=MagicMock(spec=KalshiWSClient))
-        engine._position_feed = pf
-        return engine, pf
-
-    def test_no_mismatch_when_counts_match(self, capsys: pytest.CaptureFixture[str]) -> None:
-        engine, pf = self._engine_with_position_feed()
         ledger = engine.adjuster.get_ledger("EVT-1")
-        ledger.record_fill(Side.A, 10, 45)
+        ledger.record_fill(Side.A, 5, 45)
+        ledger.record_resting(Side.A, "ord-a", 5, 45)
+        notes = self._notify_collector(engine)
 
-        pf._latest["TK-A"] = MarketPositionMessage(
-            market_ticker="TK-A",
-            position=-10,
-            fees_paid=0,
-        )
-        engine._cross_check_positions()
-        assert "position_mismatch" not in capsys.readouterr().out
+        orders = [
+            _make_order("TK-A", order_id="ord-a", fill_count=5, remaining_count=5),
+        ]
+        engine._reconcile_with_kalshi(orders, {})
+        assert not notes
+        assert "reconcile" not in capsys.readouterr().out
 
-    def test_logs_position_mismatch(self, capsys: pytest.CaptureFixture[str]) -> None:
-        engine, pf = self._engine_with_position_feed()
-        ledger = engine.adjuster.get_ledger("EVT-1")
-        ledger.record_fill(Side.A, 10, 45)
-
-        # WS says 15, ledger says 10
-        pf._latest["TK-A"] = MarketPositionMessage(
-            market_ticker="TK-A",
-            position=-15,
-            fees_paid=0,
-        )
-        engine._cross_check_positions()
-        out = capsys.readouterr().out
-        assert "position_mismatch" in out
-        assert "ws_count=15" in out
-        assert "ledger_count=10" in out
-
-    def test_logs_fees_mismatch(self, capsys: pytest.CaptureFixture[str]) -> None:
-        engine, pf = self._engine_with_position_feed()
-        ledger = engine.adjuster.get_ledger("EVT-1")
-        ledger.record_fill(Side.B, 10, 48)
-
-        pf._latest["TK-B"] = MarketPositionMessage(
-            market_ticker="TK-B",
-            position=-10,
-            fees_paid=99,
-        )
-        engine._cross_check_positions()
-        out = capsys.readouterr().out
-        assert "fees_mismatch" in out
-        assert "ws_fees=99" in out
-
-    def test_skips_when_no_ws_data(self, capsys: pytest.CaptureFixture[str]) -> None:
-        engine, pf = self._engine_with_position_feed()
-        ledger = engine.adjuster.get_ledger("EVT-1")
-        ledger.record_fill(Side.A, 10, 45)
-        # No WS data cached
-        engine._cross_check_positions()
-        assert "position_mismatch" not in capsys.readouterr().out
-
-    def test_skips_when_no_position_feed(self) -> None:
+    def test_overcommit_from_double_bid(self) -> None:
+        """Double-bid scenario: 20 resting on unit_size=10."""
         engine, _ = _engine_with_pair()
-        assert engine._position_feed is None
-        engine._cross_check_positions()  # Should not raise
+        notes = self._notify_collector(engine)
+
+        # Two separate orders on the same side — the double-bid signature
+        orders = [
+            _make_order("TK-A", order_id="ord-1", fill_count=0, remaining_count=10),
+            _make_order("TK-A", order_id="ord-2", fill_count=0, remaining_count=10),
+        ]
+        engine._reconcile_with_kalshi(orders, {})
+        errors = [msg for msg, sev in notes if sev == "error"]
+        warnings = [msg for msg, sev in notes if sev == "warning"]
+        assert any("OVERCOMMIT" in msg for msg in errors)
+        assert any("MULTI-ORDER" in msg for msg in warnings)
+
+    def test_multiple_resting_orders_warned(self) -> None:
+        """Two resting orders on same side — even if within unit, flag it."""
+        engine, _ = _engine_with_pair()
+        notes = self._notify_collector(engine)
+
+        # 3 + 3 = 6 ≤ 10, but still two orders
+        orders = [
+            _make_order("TK-A", order_id="ord-1", fill_count=0, remaining_count=3),
+            _make_order("TK-A", order_id="ord-2", fill_count=0, remaining_count=3),
+        ]
+        engine._reconcile_with_kalshi(orders, {})
+        warnings = [msg for msg, sev in notes if sev == "warning"]
+        assert any("MULTI-ORDER" in msg for msg in warnings)
+        # No overcommit (6 ≤ 10)
+        errors = [msg for msg, sev in notes if sev == "error"]
+        assert not errors
+
+    def test_no_alert_after_unit_complete_reentry(self) -> None:
+        """10 filled (unit complete) + 10 resting = valid re-entry."""
+        engine, _ = _engine_with_pair()
+        ledger = engine.adjuster.get_ledger("EVT-1")
+        ledger.record_fill(Side.A, 10, 45)
+        ledger.record_resting(Side.A, "ord-2", 10, 46)
+        notes = self._notify_collector(engine)
+
+        orders = [
+            _make_order("TK-A", order_id="ord-1", fill_count=10, remaining_count=0, status="executed"),
+            _make_order("TK-A", order_id="ord-2", fill_count=0, remaining_count=10),
+        ]
+        engine._reconcile_with_kalshi(orders, {})
+        assert not any("OVERCOMMIT" in msg for msg, _ in notes)
+
+    def test_fill_mismatch_logged(self, capsys: pytest.CaptureFixture[str]) -> None:
+        """Ledger fills disagree with Kalshi — log warning."""
+        engine, _ = _engine_with_pair()
+        ledger = engine.adjuster.get_ledger("EVT-1")
+        ledger.record_fill(Side.A, 10, 45)  # Ledger says 10
+
+        from talos.models.portfolio import Position
+
+        # Kalshi orders say 10, but positions API says 15
+        orders = [
+            _make_order("TK-A", order_id="ord-a", fill_count=10, remaining_count=0, status="executed"),
+        ]
+        pos_map = {"TK-A": Position(ticker="TK-A", position=-15, total_traded=675)}
+        engine._reconcile_with_kalshi(orders, pos_map)
+        out = capsys.readouterr().out
+        # Auth fills = max(10, 15) = 15, ledger has 10 → mismatch
+        assert "reconcile_fill_mismatch" in out
+
+    def test_resting_mismatch_logged(self, capsys: pytest.CaptureFixture[str]) -> None:
+        """Ledger resting disagrees with Kalshi — log warning."""
+        engine, _ = _engine_with_pair()
+        ledger = engine.adjuster.get_ledger("EVT-1")
+        # Ledger thinks 5 resting, but Kalshi has 10
+        ledger.record_resting(Side.A, "ord-a", 5, 45)
+
+        orders = [
+            _make_order("TK-A", order_id="ord-a", fill_count=0, remaining_count=10),
+        ]
+        engine._reconcile_with_kalshi(orders, {})
+        out = capsys.readouterr().out
+        assert "reconcile_resting_mismatch" in out
+
+    def test_resting_mismatch_skipped_during_optimistic_placement(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """During stale-sync guard, ledger-vs-kalshi resting mismatch is expected."""
+        engine, _ = _engine_with_pair()
+        ledger = engine.adjuster.get_ledger("EVT-1")
+        # Optimistic placement: ledger has resting, Kalshi doesn't yet
+        ledger.record_placement(Side.A, "ord-new", 10, 45)
+
+        orders: list[Order] = []  # Stale — doesn't include the new order
+        engine._reconcile_with_kalshi(orders, {})
+        out = capsys.readouterr().out
+        # Should NOT log resting mismatch (stale-sync guard active)
+        assert "reconcile_resting_mismatch" not in out
+
+    def test_both_sides_checked(self) -> None:
+        """Overcommit on both sides → two separate errors."""
+        engine, _ = _engine_with_pair()
+        notes = self._notify_collector(engine)
+
+        orders = [
+            _make_order("TK-A", order_id="a1", fill_count=0, remaining_count=10),
+            _make_order("TK-A", order_id="a2", fill_count=0, remaining_count=10),
+            _make_order("TK-B", order_id="b1", fill_count=0, remaining_count=10, no_price=47),
+            _make_order("TK-B", order_id="b2", fill_count=0, remaining_count=10, no_price=47),
+        ]
+        engine._reconcile_with_kalshi(orders, {})
+        errors = [msg for msg, sev in notes if sev == "error"]
+        assert len(errors) == 2  # One per side

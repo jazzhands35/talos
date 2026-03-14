@@ -273,7 +273,7 @@ class TradingEngine:
             self._balance = balance.balance
             self._portfolio_value = balance.portfolio_value
 
-            orders = await self._rest.get_orders(limit=200)
+            orders = await self._rest.get_all_orders()
             self._orders_cache = orders
 
             # Update top-of-market tracker with current orders
@@ -1115,7 +1115,7 @@ class TradingEngine:
         if pair is None:
             return
         try:
-            orders = await self._rest.get_orders(limit=200)
+            orders = await self._rest.get_all_orders()
             ledger = self._adjuster.get_ledger(event_ticker)
             ledger.sync_from_orders(orders, ticker_a=pair.ticker_a, ticker_b=pair.ticker_b)
             positions = await self._rest.get_positions(limit=200)
