@@ -16,15 +16,17 @@ import structlog
 from talos.automation_config import AutomationConfig
 from talos.bid_adjuster import BidAdjuster
 from talos.cpm import CPMTracker
-from talos.errors import KalshiAPIError
 from talos.fees import MAKER_FEE_RATE
 from talos.game_manager import GameManager
+from talos.game_status import GameStatusResolver
 from talos.lifecycle_feed import LifecycleFeed
 from talos.market_feed import MarketFeed
 from talos.models.order import Order
-from talos.models.portfolio import EventPosition
+from talos.models.portfolio import EventPosition, Position
 from talos.models.position import EventPositionSummary
-from talos.models.proposal import Proposal, ProposalKey, ProposedRebalance
+from talos.models.proposal import Proposal, ProposalKey
+from talos.rebalance import compute_rebalance_proposal
+from talos.rebalance import execute_rebalance as _execute_rebalance
 from talos.models.ws import FillMessage, TickerMessage, UserOrderMessage
 from talos.opportunity_proposer import OpportunityProposer
 from talos.portfolio_feed import PortfolioFeed
@@ -53,15 +55,6 @@ def _merge_queue(existing: int | None, incoming: int) -> int:
     return min(existing, incoming)
 
 
-def _is_no_op(err: KalshiAPIError) -> bool:
-    """Check if the API error is a no-op amend (desired state already reached)."""
-    if isinstance(err.body, dict):
-        inner = err.body.get("error", {})
-        if isinstance(inner, dict):
-            return inner.get("code") == "AMEND_ORDER_NO_OP"
-    return False
-
-
 class TradingEngine:
     """Central orchestrator for all trading logic.
 
@@ -85,6 +78,7 @@ class TradingEngine:
         ticker_feed: TickerFeed | None = None,
         lifecycle_feed: LifecycleFeed | None = None,
         position_feed: PositionFeed | None = None,
+        game_status_resolver: GameStatusResolver | None = None,
     ) -> None:
         self._scanner = scanner
         self._game_manager = game_manager
@@ -98,6 +92,7 @@ class TradingEngine:
         self._portfolio_feed = portfolio_feed
         self._ticker_feed = ticker_feed
         self._lifecycle_feed = lifecycle_feed
+        self._game_status_resolver = game_status_resolver
         self._position_feed = position_feed
         self._proposer = OpportunityProposer(self._auto_config)
 
@@ -144,6 +139,10 @@ class TradingEngine:
     @property
     def game_manager(self) -> GameManager:
         return self._game_manager
+
+    @property
+    def game_status_resolver(self) -> GameStatusResolver | None:
+        return self._game_status_resolver
 
     @property
     def proposal_queue(self) -> ProposalQueue:
@@ -251,6 +250,15 @@ class TradingEngine:
     async def refresh_account(self) -> None:
         """Fetch balance + orders, sync ledgers, compute positions."""
         await self._recover_stale_books()
+
+        # Bump sync generation so optimistic placements from this cycle
+        # are protected against stale-data overwrites.
+        for pair in self._scanner.pairs:
+            try:
+                self._adjuster.get_ledger(pair.event_ticker).bump_sync_gen()
+            except KeyError:
+                pass
+
         try:
             balance = await self._rest.get_balance()
             self._balance = balance.balance
@@ -261,6 +269,11 @@ class TradingEngine:
 
             # Update top-of-market tracker with current orders
             self._tracker.update_orders(orders, self._scanner.pairs)
+
+            # Re-check all tracked tickers against the live book so the
+            # _at_top cache reflects current state, not stale WS events.
+            for ticker in self._tracker.resting_tickers:
+                self._tracker.check(ticker)
 
             # Fetch queue positions and merge into cache
             try:
@@ -303,6 +316,7 @@ class TradingEngine:
             # of truth, always). GET /portfolio/orders archives old orders,
             # but GET /portfolio/positions never does. This catches fills
             # invisible to sync_from_orders due to order archival.
+            pos_map: dict[str, Position] = {}
             try:
                 market_positions = await self._rest.get_positions(limit=200)
                 pos_map = {p.ticker: p for p in market_positions}
@@ -345,6 +359,9 @@ class TradingEngine:
                 for o in orders
             ]
 
+            # Full ledger reconciliation against Kalshi API data
+            self._reconcile_with_kalshi(orders, pos_map)
+
             # Re-evaluate jumped tickers that have no pending proposal (P20)
             self.reevaluate_jumps()
 
@@ -353,9 +370,6 @@ class TradingEngine:
 
             # Evaluate scanner opportunities for automated bid proposals
             self.evaluate_opportunities()
-
-            # Cross-check WS position data against ledger (observability only)
-            self._cross_check_positions()
         except Exception:
             logger.exception("refresh_account_error")
 
@@ -550,42 +564,132 @@ class TradingEngine:
         """Currently paused markets."""
         return set(self._paused_markets)
 
-    # ── Position cross-check (observability) ─────────────────────
+    # ── Integrity checks ────────────────────────────────────────
 
-    def _cross_check_positions(self) -> None:
-        """Compare WS market_positions data against ledger. Log-only."""
-        if self._position_feed is None:
-            return
+    def _reconcile_with_kalshi(
+        self,
+        orders: list[Order],
+        pos_map: dict[str, Position],
+    ) -> None:
+        """Full reconciliation: compute ground truth from Kalshi API data
+        and compare against ledger state.
+
+        Checks:
+        1. Unit overcommit (filled-in-unit + resting > unit_size)
+        2. Multiple resting orders per side (double-bid indicator)
+        3. Fill count: orders vs positions API
+        4. Ledger resting divergence from Kalshi
+        5. Ledger fill divergence from Kalshi
+
+        Runs every poll cycle after sync_from_orders + sync_from_positions.
+        """
         for pair in self._scanner.pairs:
-            ledger = self._adjuster.get_ledger(pair.event_ticker)
-            if ledger is None:
+            try:
+                ledger = self._adjuster.get_ledger(pair.event_ticker)
+            except KeyError:
                 continue
-            for side, ticker in ((Side.A, pair.ticker_a), (Side.B, pair.ticker_b)):
-                ws_pos = self._position_feed.get_position(ticker)
-                if ws_pos is None:
+
+            ticker_to_side = {pair.ticker_a: Side.A, pair.ticker_b: Side.B}
+            name = self._display_name(pair.event_ticker)
+
+            # ── Compute ground truth from Kalshi orders ──
+            kalshi_fills: dict[Side, int] = {Side.A: 0, Side.B: 0}
+            kalshi_resting: dict[Side, int] = {Side.A: 0, Side.B: 0}
+            kalshi_resting_order_count: dict[Side, int] = {Side.A: 0, Side.B: 0}
+
+            for order in orders:
+                if order.side != "no" or order.action != "buy":
                     continue
-                # Kalshi position: negative = NO contracts held
-                ws_count = abs(ws_pos.position)
-                ledger_count = ledger.filled_count(side)
-                if ws_count != ledger_count:
-                    logger.warning(
-                        "position_mismatch",
-                        ticker=ticker,
-                        event_ticker=pair.event_ticker,
-                        side=side.value,
-                        ws_count=ws_count,
-                        ledger_count=ledger_count,
+                side = ticker_to_side.get(order.ticker)
+                if side is None:
+                    continue
+                if order.fill_count > 0:
+                    kalshi_fills[side] += order.fill_count
+                if order.remaining_count > 0 and order.status in ("resting", "executed"):
+                    kalshi_resting[side] += order.remaining_count
+                    kalshi_resting_order_count[side] += 1
+
+            # ── Augment fills from positions API ──
+            pos_fills: dict[Side, int] = {Side.A: 0, Side.B: 0}
+            for side, ticker in ((Side.A, pair.ticker_a), (Side.B, pair.ticker_b)):
+                pos = pos_map.get(ticker)
+                if pos is not None:
+                    pos_fills[side] = abs(pos.position)
+            # Authoritative fill count = max of both sources
+            auth_fills = {
+                s: max(kalshi_fills[s], pos_fills[s]) for s in (Side.A, Side.B)
+            }
+
+            for side in (Side.A, Side.B):
+                sl = side.value  # "A" or "B"
+
+                # Check 1: Unit overcommit (hard invariant P16)
+                filled_in_unit = auth_fills[side] % ledger.unit_size
+                if filled_in_unit + kalshi_resting[side] > ledger.unit_size:
+                    msg = (
+                        f"OVERCOMMIT {name} {sl}: "
+                        f"{filled_in_unit} filled + {kalshi_resting[side]} resting "
+                        f"= {filled_in_unit + kalshi_resting[side]} > unit {ledger.unit_size}"
                     )
-                ws_fees = ws_pos.fees_paid
-                ledger_fees = ledger.filled_fees(side)
-                if ws_fees != ledger_fees:
-                    logger.warning(
-                        "fees_mismatch",
-                        ticker=ticker,
+                    logger.error(
+                        "reconcile_overcommit",
                         event_ticker=pair.event_ticker,
-                        side=side.value,
-                        ws_fees=ws_fees,
-                        ledger_fees=ledger_fees,
+                        side=sl,
+                        filled_in_unit=filled_in_unit,
+                        kalshi_resting=kalshi_resting[side],
+                        unit_size=ledger.unit_size,
+                    )
+                    self._notify(msg, "error")
+
+                # Check 2: Multiple resting orders (double-bid indicator)
+                if kalshi_resting_order_count[side] > 1:
+                    msg = (
+                        f"MULTI-ORDER {name} {sl}: "
+                        f"{kalshi_resting_order_count[side]} resting orders "
+                        f"({kalshi_resting[side]} total contracts)"
+                    )
+                    logger.warning(
+                        "reconcile_multiple_resting",
+                        event_ticker=pair.event_ticker,
+                        side=sl,
+                        order_count=kalshi_resting_order_count[side],
+                        total_resting=kalshi_resting[side],
+                    )
+                    self._notify(msg, "warning")
+
+                # Check 3: Fill consistency between orders and positions APIs
+                if pos_fills[side] > 0 and kalshi_fills[side] > 0:
+                    if pos_fills[side] != kalshi_fills[side]:
+                        logger.info(
+                            "reconcile_fill_source_gap",
+                            event_ticker=pair.event_ticker,
+                            side=sl,
+                            orders_fills=kalshi_fills[side],
+                            positions_fills=pos_fills[side],
+                        )
+
+                # Check 4: Ledger resting vs Kalshi resting
+                # Skip during optimistic placement (stale-sync guard active)
+                ledger_resting = ledger.resting_count(side)
+                if ledger._sides[side]._placed_at_gen is None:
+                    if ledger_resting != kalshi_resting[side]:
+                        logger.warning(
+                            "reconcile_resting_mismatch",
+                            event_ticker=pair.event_ticker,
+                            side=sl,
+                            ledger=ledger_resting,
+                            kalshi=kalshi_resting[side],
+                        )
+
+                # Check 5: Ledger fills vs authoritative fills
+                ledger_fills = ledger.filled_count(side)
+                if ledger_fills != auth_fills[side]:
+                    logger.warning(
+                        "reconcile_fill_mismatch",
+                        event_ticker=pair.event_ticker,
+                        side=sl,
+                        ledger=ledger_fills,
+                        kalshi=auth_fills[side],
                     )
 
     # ── Event handlers ───────────────────────────────────────────
@@ -593,12 +697,14 @@ class TradingEngine:
     def on_top_of_market_change(self, ticker: str, at_top: bool) -> None:
         """Handle top-of-market state transition — evaluate adjustment."""
         resting = self._tracker.resting_price(ticker)
+        evt = self._adjuster.resolve_event(ticker)
+        label = self._display_name(evt) if evt else ticker
         if at_top:
-            self._notify(f"Back at top: {ticker} ({resting}c)")
+            self._notify(f"Back at top: {label} ({resting}c)")
         else:
             top_price = self._tracker.book_top_price(ticker) or "?"
             self._notify(
-                f"Jumped: {ticker} (you: {resting}c, top: {top_price}c)",
+                f"Jumped: {label} (you: {resting}c, top: {top_price}c)",
                 "warning",
             )
 
@@ -696,10 +802,7 @@ class TradingEngine:
     def check_imbalances(self) -> None:
         """Detect position imbalances and propose rebalancing (P16).
 
-        Two-step rebalance plan to maintain delta neutrality at every step:
-        1. Reduce over-side resting (cancel/amend) — shrinks the larger side
-        2. Catch-up bid on under-side — grows the smaller side
-        Step 1 always executes before step 2 (delta-neutral at each point).
+        Delegates to compute_rebalance_proposal() for pure detection logic.
         """
         pending_keys = {p.key for p in self._proposal_queue.pending()}
         for pair in self._scanner.pairs:
@@ -708,144 +811,26 @@ class TradingEngine:
             except KeyError:
                 continue
 
-            committed_a = ledger.total_committed(Side.A)
-            committed_b = ledger.total_committed(Side.B)
-
-            if committed_a == 0 and committed_b == 0:
-                continue
-
-            # No resting orders + fills balanced → event settled, nothing actionable
-            if (
-                ledger.resting_count(Side.A) == 0
-                and ledger.resting_count(Side.B) == 0
-                and ledger.filled_count(Side.A) == ledger.filled_count(Side.B)
-            ):
-                continue
-
-            # No resting + markets closed → settled with imbalance, nothing actionable
-            if ledger.resting_count(Side.A) == 0 and ledger.resting_count(Side.B) == 0:
-                books = self._feed.book_manager
-                if not books.best_ask(pair.ticker_a) and not books.best_ask(pair.ticker_b):
-                    continue
-
-            delta = committed_a - committed_b
-            if abs(delta) < ledger.unit_size:
-                continue  # Less than one unit — normal
-
-            # Determine over-extended side
-            if delta > 0:
-                over, under = Side.A, Side.B
-                over_committed, under_committed = committed_a, committed_b
-            else:
-                over, under = Side.B, Side.A
-                over_committed, under_committed = committed_b, committed_a
-
-            # Skip if we already have a rebalance proposal for this side
-            has_proposal = any(
-                k.event_ticker == pair.event_ticker
-                and k.side == over.value
-                and k.kind == "rebalance"
+            # Skip if a rebalance proposal already covers this event
+            has_rebalance = any(
+                k.event_ticker == pair.event_ticker and k.kind == "rebalance"
                 for k in pending_keys
             )
-            if has_proposal:
+            if has_rebalance:
                 continue
 
-            over_resting = ledger.resting_count(over)
-            over_filled = ledger.filled_count(over)
-            under_resting = ledger.resting_count(under)
-
-            evt = pair.event_ticker
-            name = self._display_name(evt)
-            over_ticker = pair.ticker_a if over == Side.A else pair.ticker_b
-            under_ticker = pair.ticker_a if under == Side.A else pair.ticker_b
-            over_order_id = ledger.resting_order_id(over)
-
-            # Equalize: both sides converge to max(over_filled, under_committed)
-            target = max(over_filled, under_committed)
-            target_over_resting = max(0, target - over_filled)
-            reduce_by = over_resting - target_over_resting
-
-            # Step 2: catch-up on under-side (only if no resting already there)
-            gap = target - under_committed
-            catchup_qty = 0
-            catchup_price = 0
-            catchup_ticker: str | None = None
-            if gap > 0 and under_resting == 0:
-                catchup_qty = min(gap, ledger.unit_size)
-                catchup_ticker = under_ticker
-                # Get current price from scanner snapshot
-                snapshot = self._scanner.all_snapshots.get(pair.event_ticker)
-                if snapshot is not None:
-                    catchup_price = snapshot.no_a if under == Side.A else snapshot.no_b
-                if snapshot is None or catchup_price <= 0:
-                    catchup_qty = 0  # Can't determine price — skip catch-up
-                    catchup_ticker = None
-
-            # Build step descriptions for the detail text
-            steps: list[str] = []
-            if reduce_by > 0:
-                if target_over_resting == 0:
-                    steps.append(f"Cancel {over_resting} resting on {over.value}")
-                else:
-                    steps.append(
-                        f"Reduce {over.value} resting {over_resting} → {target_over_resting}"
-                    )
-            if catchup_qty > 0:
-                steps.append(f"Place {catchup_qty} @ {catchup_price}c on {under.value}")
-            if not steps:
-                steps.append(
-                    f"Side {over.value} has {over_filled} fills vs "
-                    f"side {under.value} {ledger.filled_count(under)} "
-                    f"(under-side has {under_resting} resting — wait or adjust)"
-                )
-
-            logger.warning(
-                "position_imbalance",
-                event_ticker=evt,
-                over_side=over.value,
-                committed_over=over_committed,
-                committed_under=under_committed,
-                delta=abs(delta),
+            snapshot = self._scanner.all_snapshots.get(pair.event_ticker)
+            proposal = compute_rebalance_proposal(
+                pair.event_ticker,
+                ledger,
+                pair,
+                snapshot,
+                self._display_name(pair.event_ticker),
+                self._feed.book_manager,
             )
-
-            # Build rebalance data if we have any executable step
-            rebalance_data = None
-            has_reduce = reduce_by > 0 and over_order_id is not None
-            has_catchup = catchup_qty > 0 and catchup_ticker is not None
-            if has_reduce or has_catchup:
-                rebalance_data = ProposedRebalance(
-                    event_ticker=evt,
-                    side=over.value,
-                    order_id=over_order_id if has_reduce else None,
-                    ticker=over_ticker if has_reduce else None,
-                    current_resting=over_resting if has_reduce else 0,
-                    target_resting=target_over_resting if has_reduce else 0,
-                    resting_price=ledger.resting_price(over) if has_reduce else 0,
-                    filled_count=over_filled if has_reduce else 0,
-                    catchup_ticker=catchup_ticker if has_catchup else None,
-                    catchup_price=catchup_price if has_catchup else 0,
-                    catchup_qty=catchup_qty if has_catchup else 0,
-                )
-
-            key = ProposalKey(
-                event_ticker=evt,
-                side=over.value,
-                kind="rebalance",
-            )
-            envelope = Proposal(
-                key=key,
-                kind="rebalance",
-                summary=f"REBALANCE {name} side {over.value}",
-                detail=(
-                    f"Imbalanced: {over.value}={over_committed} vs "
-                    f"{under.value}={under_committed} "
-                    f"(delta {abs(delta)}). {'; '.join(steps)}"
-                ),
-                created_at=datetime.now(UTC),
-                rebalance=rebalance_data,
-            )
-            self._proposal_queue.add(envelope)
-            pending_keys.add(key)
+            if proposal is not None:
+                self._proposal_queue.add(proposal)
+                pending_keys.add(proposal.key)
 
     def evaluate_opportunities(self) -> None:
         """Run OpportunityProposer against all scanner pairs.
@@ -880,14 +865,15 @@ class TradingEngine:
         """Place NO orders on both legs.
 
         Safety: checks is_placement_safe() on both sides before sending orders.
-        Ledger is NOT optimistically updated — Kalshi is source of truth (P7/P21),
-        and sync_from_orders reconciles on the next polling cycle. The stability
-        reset (fix #3) provides the time buffer to prevent duplicate proposals.
+        After placement, optimistically updates the ledger via record_placement()
+        (with generation-based stale-sync guard) and appends to _orders_cache.
         """
         # Block on paused markets
         for ticker in (bid.ticker_a, bid.ticker_b):
             if ticker in self._paused_markets:
-                self._notify(f"Bid BLOCKED: {ticker} is paused", "error")
+                evt = self._adjuster.resolve_event(ticker)
+                label = self._display_name(evt) if evt else ticker
+                self._notify(f"Bid BLOCKED {label}: {ticker} is paused", "error")
                 logger.error("bid_blocked_market_paused", ticker=ticker)
                 return
 
@@ -901,7 +887,10 @@ class TradingEngine:
             for side, price in [(Side.A, bid.no_a), (Side.B, bid.no_b)]:
                 ok, reason = ledger.is_placement_safe(side, bid.qty, price, rate=fee_rate)
                 if not ok:
-                    self._notify(f"Bid BLOCKED (side {side.value}): {reason}", "error")
+                    name = self._display_name(ledger.event_ticker)
+                    self._notify(
+                        f"Bid BLOCKED {name} (side {side.value}): {reason}", "error"
+                    )
                     logger.error(
                         "bid_blocked_safety_gate",
                         event_ticker=ledger.event_ticker,
@@ -912,11 +901,6 @@ class TradingEngine:
                     )
                     return
 
-        # Create server-side order groups (belt-and-suspenders with is_placement_safe)
-        event_ticker = ledger.event_ticker if ledger is not None else bid.ticker_a
-        group_a = await self._create_order_group(event_ticker, "A", bid.qty)
-        group_b = await self._create_order_group(event_ticker, "B", bid.qty)
-
         try:
             order_a = await self._rest.create_order(
                 ticker=bid.ticker_a,
@@ -924,7 +908,6 @@ class TradingEngine:
                 side="no",
                 no_price=bid.no_a,
                 count=bid.qty,
-                order_group_id=group_a,
             )
             logger.info("order_placed", ticker=bid.ticker_a, order_id=order_a.order_id)
             order_b = await self._rest.create_order(
@@ -933,12 +916,25 @@ class TradingEngine:
                 side="no",
                 no_price=bid.no_b,
                 count=bid.qty,
-                order_group_id=group_b,
             )
             logger.info("order_placed", ticker=bid.ticker_b, order_id=order_b.order_id)
             self._notify(
                 f"Orders placed: {bid.ticker_a} @ {bid.no_a}c, {bid.ticker_b} @ {bid.no_b}c",
             )
+
+            # Optimistic ledger update — prevents duplicate proposals when a
+            # concurrent refresh_account has stale data (the orders weren't in
+            # the API response it fetched before placement). The generation
+            # guard in sync_from_orders prevents stale syncs from clearing this.
+            if ledger is not None:
+                ledger.record_placement(
+                    Side.A, order_a.order_id, order_a.remaining_count, bid.no_a,
+                )
+                ledger.record_placement(
+                    Side.B, order_b.order_id, order_b.remaining_count, bid.no_b,
+                )
+            # Add to orders cache so WS handler can match future updates
+            self._orders_cache.extend([order_a, order_b])
         except Exception as e:
             self._notify(f"Order error: {type(e).__name__}: {e}", "error")
             logger.exception("place_bids_error")
@@ -949,6 +945,10 @@ class TradingEngine:
             pairs = await self._game_manager.add_games(urls)
             for pair in pairs:
                 self._adjuster.add_event(pair)
+            if self._game_status_resolver is not None:
+                for pair in self._game_manager.active_games:
+                    sub_title = self._game_manager.subtitles.get(pair.event_ticker, "")
+                    await self._game_status_resolver.resolve(pair.event_ticker, sub_title)
             self._notify(f"Added {len(urls)} game(s)")
         except Exception as e:
             self._notify(f"Error: {e}", "error")
@@ -957,6 +957,8 @@ class TradingEngine:
     async def remove_game(self, event_ticker: str) -> None:
         """Remove a game from monitoring."""
         try:
+            if self._game_status_resolver is not None:
+                self._game_status_resolver.remove(event_ticker)
             await self._game_manager.remove_game(event_ticker)
             self._notify(f"Removed {event_ticker}")
         except Exception as e:
@@ -966,10 +968,18 @@ class TradingEngine:
         """Clear all monitored games."""
         try:
             count = len(self._game_manager.active_games)
+            if self._game_status_resolver is not None:
+                for pair in self._game_manager.active_games:
+                    self._game_status_resolver.remove(pair.event_ticker)
             await self._game_manager.clear_all_games()
             self._notify(f"Cleared {count} game(s)")
         except Exception as e:
             self._notify(f"Error: {e}", "error")
+
+    async def refresh_game_status(self) -> None:
+        """Hourly: re-fetch game status for all active events."""
+        if self._game_status_resolver is not None:
+            await self._game_status_resolver.refresh_all()
 
     async def approve_proposal(self, key: ProposalKey) -> None:
         """Approve and execute a queued proposal."""
@@ -989,7 +999,14 @@ class TradingEngine:
 
         if envelope.kind == "rebalance":
             if envelope.rebalance is not None:
-                await self._execute_rebalance(envelope.rebalance)
+                await _execute_rebalance(
+                    envelope.rebalance,
+                    rest_client=self._rest,
+                    adjuster=self._adjuster,
+                    scanner=self._scanner,
+                    notify=self._notify,
+                )
+                await self._verify_after_action(envelope.rebalance.event_ticker)
             else:
                 self._notify(f"Acknowledged: {envelope.summary} (manual action needed)")
             return
@@ -997,8 +1014,9 @@ class TradingEngine:
         if envelope.kind == "adjustment" and envelope.adjustment is not None:
             try:
                 await self._adjuster.execute(envelope.adjustment, self._rest)
+                adj_name = self._display_name(envelope.adjustment.event_ticker)
                 self._notify(
-                    f"Adjusted: {envelope.adjustment.event_ticker}"
+                    f"Adjusted: {adj_name}"
                     f" {envelope.adjustment.side}"
                     f" \u2192 {envelope.adjustment.new_price}c",
                 )
@@ -1033,7 +1051,7 @@ class TradingEngine:
             self._adjuster.clear_proposal(key.event_ticker, Side(key.side))
         elif key.kind == "bid":
             self._proposer.record_rejection(key.event_ticker)
-        self._notify(f"Rejected: {key.event_ticker} {key.kind}")
+        self._notify(f"Rejected: {self._display_name(key.event_ticker)} {key.kind}")
 
     async def _execute_withdrawal(self, event_ticker: str) -> None:
         """Cancel both sides' resting orders when arb is unprofitable with no fills.
@@ -1079,188 +1097,6 @@ class TradingEngine:
 
         await self._verify_after_action(event_ticker)
 
-    async def _execute_rebalance(self, rebalance: ProposedRebalance) -> None:
-        """Execute a two-step rebalance: reduce over-side, then catch up under-side.
-
-        Step 1 (reduce) always runs before step 2 (catch-up) to maintain
-        delta neutrality at every intermediate state.
-        """
-        # Step 1: Reduce over-side resting
-        has_reduce = (
-            rebalance.order_id is not None
-            and rebalance.ticker is not None
-            and rebalance.current_resting > rebalance.target_resting
-        )
-        if has_reduce:
-            try:
-                assert rebalance.order_id is not None  # guarded by has_reduce
-                assert rebalance.ticker is not None
-                if rebalance.target_resting == 0:
-                    await self._rest.cancel_order(rebalance.order_id)
-                    self._notify(
-                        f"Rebalance step 1: cancelled {rebalance.current_resting}"
-                        f" resting on {rebalance.side} ({rebalance.ticker})",
-                    )
-                else:
-                    # Use decrease_order for quantity-only reductions (preserves
-                    # queue position, simpler semantics than amend).
-                    fresh_order = await self._rest.get_order(rebalance.order_id)
-                    if fresh_order.remaining_count <= rebalance.target_resting:
-                        self._notify(
-                            f"Rebalance step 1: already at target"
-                            f" (remaining={fresh_order.remaining_count})",
-                        )
-                    else:
-                        logger.info(
-                            "rebalance_decrease",
-                            order_id=rebalance.order_id,
-                            order_remaining=fresh_order.remaining_count,
-                            target_resting=rebalance.target_resting,
-                        )
-                        await self._rest.decrease_order(
-                            rebalance.order_id,
-                            reduce_to=rebalance.target_resting,
-                        )
-                        self._notify(
-                            f"Rebalance step 1: {rebalance.side} resting"
-                            f" {fresh_order.remaining_count}"
-                            f" \u2192 {rebalance.target_resting}",
-                        )
-            except KalshiAPIError as e:
-                if _is_no_op(e):
-                    # Order already at desired state (fills happened between
-                    # proposal and execution). Treat as success — proceed to
-                    # step 2.
-                    self._notify(
-                        "Rebalance step 1: already at target (no-op)",
-                    )
-                else:
-                    self._notify(
-                        f"Rebalance FAILED (reduce): {e}",
-                        "error",
-                    )
-                    logger.exception(
-                        "rebalance_reduce_error",
-                        event_ticker=rebalance.event_ticker,
-                        side=rebalance.side,
-                        order_id=rebalance.order_id,
-                    )
-                    return  # Don't proceed to catch-up if reduce failed
-            except Exception as e:
-                self._notify(
-                    f"Rebalance FAILED (reduce): {type(e).__name__}: {e}",
-                    "error",
-                )
-                logger.exception(
-                    "rebalance_reduce_error",
-                    event_ticker=rebalance.event_ticker,
-                    side=rebalance.side,
-                    order_id=rebalance.order_id,
-                )
-                return  # Don't proceed to catch-up if reduce failed
-
-        # Step 2: Catch-up bid on under-side
-        if rebalance.catchup_ticker and rebalance.catchup_qty > 0:
-            under_side = Side.A if rebalance.side == "B" else Side.B
-
-            # Fresh sync from Kalshi before placing (P7/P21 — Kalshi is ALWAYS
-            # source of truth). The proposal was computed from potentially stale
-            # ledger data. Re-fetch orders and re-verify the imbalance exists.
-            pair = self._find_pair(rebalance.event_ticker)
-            if pair is None:
-                self._notify("Catch-up BLOCKED: pair not found", "error")
-                return
-
-            try:
-                orders = await self._rest.get_orders(limit=200)
-                ledger = self._adjuster.get_ledger(rebalance.event_ticker)
-                ledger.sync_from_orders(orders, ticker_a=pair.ticker_a, ticker_b=pair.ticker_b)
-            except Exception:
-                logger.warning(
-                    "rebalance_fresh_sync_failed",
-                    event_ticker=rebalance.event_ticker,
-                    exc_info=True,
-                )
-                self._notify("Catch-up BLOCKED: fresh sync failed", "error")
-                return
-
-            # Re-check: is there still an imbalance worth catching up?
-            over_side = Side.A if rebalance.side == "A" else Side.B
-            fresh_over = ledger.total_committed(over_side)
-            fresh_under = ledger.total_committed(under_side)
-            fresh_delta = fresh_over - fresh_under
-            if fresh_delta < ledger.unit_size:
-                self._notify(
-                    f"Catch-up skipped — fresh sync shows delta"
-                    f" {fresh_delta} (< {ledger.unit_size})",
-                )
-                logger.info(
-                    "rebalance_catchup_skipped_after_sync",
-                    event_ticker=rebalance.event_ticker,
-                    fresh_over=fresh_over,
-                    fresh_under=fresh_under,
-                    fresh_delta=fresh_delta,
-                )
-                return
-
-            # Safety gate — same checks as place_bids (P16, P18)
-            ok, reason = ledger.is_placement_safe(
-                under_side,
-                rebalance.catchup_qty,
-                rebalance.catchup_price,
-                rate=pair.fee_rate,
-            )
-            if not ok:
-                self._notify(
-                    f"Catch-up BLOCKED ({under_side.value}): {reason}",
-                    "warning",
-                )
-                logger.warning(
-                    "rebalance_catchup_blocked",
-                    event_ticker=rebalance.event_ticker,
-                    side=under_side.value,
-                    reason=reason,
-                )
-                return
-
-            catchup_group = await self._create_order_group(
-                rebalance.event_ticker, under_side.value, rebalance.catchup_qty
-            )
-            try:
-                await self._rest.create_order(
-                    ticker=rebalance.catchup_ticker,
-                    action="buy",
-                    side="no",
-                    no_price=rebalance.catchup_price,
-                    count=rebalance.catchup_qty,
-                    order_group_id=catchup_group,
-                )
-                self._notify(
-                    f"Rebalance step 2: catch-up {rebalance.catchup_ticker}"
-                    f" {rebalance.catchup_qty} @ {rebalance.catchup_price}c",
-                )
-                logger.info(
-                    "rebalance_catchup_placed",
-                    event_ticker=rebalance.event_ticker,
-                    ticker=rebalance.catchup_ticker,
-                    qty=rebalance.catchup_qty,
-                    price=rebalance.catchup_price,
-                )
-            except Exception as e:
-                self._notify(
-                    f"Catch-up FAILED: {type(e).__name__}: {e}",
-                    "error",
-                )
-                logger.exception(
-                    "rebalance_catchup_error",
-                    event_ticker=rebalance.event_ticker,
-                    ticker=rebalance.catchup_ticker,
-                )
-
-        # Post-action: always re-sync from Kalshi regardless of outcome.
-        # The review must verify reality, not trust the model (P7/P15).
-        await self._verify_after_action(rebalance.event_ticker)
-
     async def _verify_after_action(self, event_ticker: str) -> None:
         """Re-sync from Kalshi after any order action to verify outcome."""
         pair = self._find_pair(event_ticker)
@@ -1295,6 +1131,11 @@ class TradingEngine:
                 "post_action_verify_failed",
                 event_ticker=event_ticker,
                 exc_info=True,
+            )
+            name = self._display_name(event_ticker)
+            self._notify(
+                f"Verify FAILED for {name} — position data may be stale",
+                "warning",
             )
 
     # ── Internal helpers ─────────────────────────────────────────────
@@ -1432,32 +1273,6 @@ class TradingEngine:
                 return pair
         return None
 
-    async def _create_order_group(self, event_ticker: str, side: str, qty: int) -> str | None:
-        """Create a server-side order group for fill-limit safety.
-
-        Returns the order_group_id, or None if creation fails (non-blocking).
-        Any group-triggered cancellation means client-side safety failed — alert loudly.
-        """
-        ts = datetime.now(UTC).strftime("%H%M%S")
-        name = f"{event_ticker}-{side}-{qty}-{ts}"
-        try:
-            group_id = await self._rest.create_order_group(name, qty)
-            logger.info(
-                "order_group_created",
-                event_ticker=event_ticker,
-                side=side,
-                limit=qty,
-                group_id=group_id,
-            )
-            return group_id
-        except Exception:
-            logger.warning(
-                "order_group_create_failed",
-                event_ticker=event_ticker,
-                side=side,
-                exc_info=True,
-            )
-            return None
 
     def _find_ledger_for_bid(self, bid: BidConfirmation) -> PositionLedger | None:
         """Look up the position ledger for a bid's event."""

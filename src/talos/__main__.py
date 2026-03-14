@@ -44,6 +44,7 @@ def main() -> None:
     from talos.bid_adjuster import BidAdjuster
     from talos.engine import TradingEngine
     from talos.game_manager import GameManager
+    from talos.game_status import GameStatusResolver
     from talos.lifecycle_feed import LifecycleFeed
     from talos.market_feed import MarketFeed
     from talos.orderbook import OrderBookManager
@@ -73,6 +74,7 @@ def main() -> None:
     lifecycle_feed = LifecycleFeed(ws_client=ws)
     position_feed = PositionFeed(ws_client=ws)
     game_mgr = GameManager(rest, feed, scanner)
+    game_status_resolver = GameStatusResolver()
 
     # Wire scanner + tracker to book updates
     def on_book_update(ticker: str) -> None:
@@ -97,6 +99,7 @@ def main() -> None:
         ticker_feed=ticker_feed,
         lifecycle_feed=lifecycle_feed,
         position_feed=position_feed,
+        game_status_resolver=game_status_resolver,
     )
 
     # Wire unit size persistence

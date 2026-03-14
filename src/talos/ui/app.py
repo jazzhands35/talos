@@ -82,8 +82,12 @@ class TalosApp(App):
             self.set_interval(10.0, self._poll_trades)
             self.set_interval(1.0, self._refresh_proposals)
             self.set_interval(1.0, self._auto_accept_tick)
+            self.set_interval(3600.0, self._refresh_game_status)
             self._engine.on_notification = self._on_engine_notification
             self._engine.tracker.on_change = self._engine.on_top_of_market_change
+            if self._engine.game_status_resolver is not None:
+                table = self.query_one(OpportunitiesTable)
+                table.set_resolver(self._engine.game_status_resolver)
             self._start_feed()
 
     # ── Engine callbacks ──────────────────────────────────────────
@@ -162,7 +166,7 @@ class TalosApp(App):
 
         top_of_market: dict[str, dict[str, int | None]] = {}
         tracker = self._engine.tracker
-        for ticker in tracker._resting:
+        for ticker in tracker.resting_tickers:
             top_of_market[ticker] = {
                 "resting_price": tracker.resting_price(ticker),
                 "book_top": tracker.book_top_price(ticker),
@@ -234,6 +238,11 @@ class TalosApp(App):
     async def _poll_trades(self) -> None:
         if self._engine is not None:
             await self._engine.refresh_trades()
+
+    @work(thread=False)
+    async def _refresh_game_status(self) -> None:
+        if self._engine is not None:
+            await self._engine.refresh_game_status()
 
     def refresh_opportunities(self) -> None:
         """Update the opportunities table from scanner state."""
