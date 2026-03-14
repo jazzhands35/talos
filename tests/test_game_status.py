@@ -91,13 +91,13 @@ class TestEspnProvider:
             "events": [
                 {
                     "date": "2026-03-14T19:00:00Z",
-                    "status": {
-                        "type": {"state": "pre"},
-                        "displayClock": "0:00",
-                        "period": 0,
-                    },
                     "competitions": [
                         {
+                            "status": {
+                                "type": {"state": "pre"},
+                                "displayClock": "0:00",
+                                "period": 0,
+                            },
                             "competitors": [
                                 {
                                     "homeAway": "home",
@@ -134,13 +134,13 @@ class TestEspnProvider:
             "events": [
                 {
                     "date": "2026-03-14T19:00:00Z",
-                    "status": {
-                        "type": {"state": "in"},
-                        "displayClock": "12:12",
-                        "period": 2,
-                    },
                     "competitions": [
                         {
+                            "status": {
+                                "type": {"state": "in"},
+                                "displayClock": "12:12",
+                                "period": 2,
+                            },
                             "competitors": [
                                 {
                                     "homeAway": "home",
@@ -173,13 +173,13 @@ class TestEspnProvider:
             "events": [
                 {
                     "date": "2026-03-14T19:00:00Z",
-                    "status": {
-                        "type": {"state": "post"},
-                        "displayClock": "0:00",
-                        "period": 4,
-                    },
                     "competitions": [
                         {
+                            "status": {
+                                "type": {"state": "post"},
+                                "displayClock": "0:00",
+                                "period": 4,
+                            },
                             "competitors": [
                                 {
                                     "homeAway": "home",

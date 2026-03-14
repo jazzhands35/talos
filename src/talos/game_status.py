@@ -7,7 +7,7 @@ normalizing it into ExternalGame objects for downstream matching.
 from __future__ import annotations
 
 import os
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Protocol, runtime_checkable
 
 import httpx
@@ -72,7 +72,8 @@ class EspnProvider:
         games: list[ExternalGame] = []
         for event in data.get("events", []):
             try:
-                status = event["status"]
+                competition = event["competitions"][0]
+                status = competition["status"]
                 raw_state = status["type"]["state"]
                 state = _ESPN_STATE_MAP.get(raw_state, "unknown")
 
@@ -82,7 +83,7 @@ class EspnProvider:
                     clock = status.get("displayClock", "")
                     detail = f"P{period} {clock}"
 
-                competitors = event["competitions"][0]["competitors"]
+                competitors = competition["competitors"]
                 home_team = ""
                 away_team = ""
                 home_abbr = None
@@ -148,9 +149,10 @@ class OddsApiProvider:
                 completed = item.get("completed", False)
                 scores = item.get("scores")
 
+                now = datetime.now(UTC)
                 if completed:
                     state = "post"
-                elif not completed and scores:
+                elif commence <= now and scores:
                     state = "live"
                 else:
                     state = "pre"
@@ -174,8 +176,9 @@ class OddsApiProvider:
         return games
 
     async def fetch_games(
-        self, sport: str, league: str, game_date: str
+        self, sport: str, league: str, game_date: str  # noqa: ARG002
     ) -> list[ExternalGame]:
+        # sport and game_date unused — Odds API uses league directly, daysFrom=1
         api_key = os.environ.get("ODDS_API_KEY", "")
         if not api_key:
             logger.warning("odds_api_key_missing")
@@ -260,8 +263,9 @@ class PandaScoreProvider:
         return games
 
     async def fetch_games(
-        self, sport: str, league: str, game_date: str
+        self, sport: str, league: str, game_date: str  # noqa: ARG002
     ) -> list[ExternalGame]:
+        # league unused — PandaScore uses sport slug for URL path
         token = os.environ.get("PANDASCORE_TOKEN", "")
         if not token:
             logger.warning("pandascore_token_missing")
