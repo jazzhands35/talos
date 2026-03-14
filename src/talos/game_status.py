@@ -272,8 +272,10 @@ class PandaScoreProvider:
             logger.warning("pandascore_token_missing")
             return []
 
-        # game_date is "YYYYMMDD", convert to "YYYY-MM-DD" for API
-        api_date = f"{game_date[:4]}-{game_date[4:6]}-{game_date[6:8]}"
+        # game_date is "YYYYMMDD" — build ISO range for the full day
+        iso_date = f"{game_date[:4]}-{game_date[4:6]}-{game_date[6:8]}"
+        range_start = f"{iso_date}T00:00:00Z"
+        range_end = f"{iso_date}T23:59:59Z"
 
         url = f"{self.BASE_URL}/{sport}/matches"
         try:
@@ -281,7 +283,7 @@ class PandaScoreProvider:
                 resp = await client.get(
                     url,
                     params={
-                        "filter[scheduled_at]": api_date,
+                        "range[scheduled_at]": f"{range_start},{range_end}",
                         "sort": "scheduled_at",
                         "per_page": "50",
                     },
@@ -307,13 +309,12 @@ SOURCE_MAP: dict[str, tuple[str, str, str]] = {
     "KXCBBGAME": ("espn", "basketball", "mens-college-basketball"),
     "KXMLSGAME": ("espn", "soccer", "usa.1"),
     "KXEPLGAME": ("espn", "soccer", "eng.1"),
-    # ESPN — tennis
-    "KXATPMATCH": ("espn", "tennis", "atp"),
-    "KXATPDOUBLES": ("espn", "tennis", "atp"),
     # The Odds API — minor leagues
     "KXAHLGAME": ("odds-api", "icehockey_ahl", "icehockey_ahl"),
-    "KXATPCHALLENGERMATCH": ("odds-api", "tennis_atp_challenger", "tennis_atp_challenger"),
-    "KXWTACHALLENGERMATCH": ("odds-api", "tennis_wta_challenger", "tennis_wta_challenger"),
+    # Tennis — tournament keys rotate; map active ones here
+    # "KXATPMATCH": ("odds-api", "tennis_atp_indian_wells", "tennis_atp_indian_wells"),
+    # "KXWTAMATCH": ("odds-api", "tennis_wta_indian_wells", "tennis_wta_indian_wells"),
+    # ATP/WTA Challenger not covered by any free API yet
     # PandaScore — esports
     "KXLOLGAME": ("pandascore", "lol", "league-of-legends"),
     "KXCS2GAME": ("pandascore", "csgo", "cs2"),
