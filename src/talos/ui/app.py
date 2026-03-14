@@ -100,7 +100,10 @@ class TalosApp(App):
     def _refresh_proposals(self) -> None:
         """Update the proposal panel from queue state."""
         self.query_one(ProposalPanel).refresh_proposals()
-        if self._auto_accept.active:
+        # WS disconnect takes priority over all other sub_title content
+        if self._engine is not None and not self._engine.ws_connected:
+            self.sub_title = "!!! WEBSOCKET DISCONNECTED — PRICES ARE STALE !!!"
+        elif self._auto_accept.active:
             self.sub_title = (
                 f"AUTO-ACCEPT {self._auto_accept.remaining_str()} remaining "
                 f"({self._auto_accept.accepted_count} accepted)"

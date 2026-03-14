@@ -106,6 +106,7 @@ class TradingEngine:
         self._order_data: list[dict[str, object]] = []
         self._event_positions: dict[str, EventPosition] = {}
         self._paused_markets: set[str] = set()
+        self._ws_connected: bool = False
 
         # Wire portfolio feed callbacks
         if self._portfolio_feed is not None:
@@ -139,6 +140,10 @@ class TradingEngine:
     @property
     def game_manager(self) -> GameManager:
         return self._game_manager
+
+    @property
+    def ws_connected(self) -> bool:
+        return self._ws_connected
 
     @property
     def game_status_resolver(self) -> GameStatusResolver | None:
@@ -204,6 +209,7 @@ class TradingEngine:
         """Connect WebSocket, restore saved games, and listen."""
         try:
             await self._feed.connect()
+            self._ws_connected = True
             self._notify("WebSocket connected")
 
             # Auto-discover events with positions or resting orders
@@ -252,9 +258,14 @@ class TradingEngine:
                     await self._ticker_feed.subscribe(market_tickers)
 
             await self._feed.start()
+            # If we reach here, the WS listen loop exited — connection is dead
+            logger.error("ws_connection_lost")
+            self._ws_connected = False
+            self._notify("WEBSOCKET DISCONNECTED — prices are stale!", "error")
         except Exception as e:
             logger.exception("feed_connection_error")
-            self._notify(f"WebSocket error: {type(e).__name__}: {e}", "error")
+            self._ws_connected = False
+            self._notify(f"WEBSOCKET ERROR: {type(e).__name__}: {e}", "error")
 
     async def refresh_account(self) -> None:
         """Fetch balance + orders, sync ledgers, compute positions."""
