@@ -44,6 +44,7 @@ class TalosApp(App):
         ("y", "approve_proposal", "Approve"),
         ("n", "reject_proposal", "Reject"),
         ("f", "toggle_auto_accept", "Auto-Accept"),
+        ("o", "open_in_browser", "Open"),
         ("q", "quit", "Quit"),
     ]
 
@@ -262,6 +263,21 @@ class TalosApp(App):
         urls = await self.push_screen_wait(AddGamesScreen())
         if urls is not None and self._engine is not None:
             await self._engine.add_games(urls)
+
+    def action_open_in_browser(self) -> None:
+        """Open the highlighted event on Kalshi's website."""
+        import webbrowser
+
+        table = self.query_one(OpportunitiesTable)
+        if table.cursor_row is None or table.row_count == 0:
+            return
+        cell_key = table.coordinate_to_cell_key(table.cursor_coordinate)
+        event_ticker = str(cell_key.row_key.value)
+        if not event_ticker:
+            return
+        series = event_ticker.split("-")[0].lower()
+        url = f"https://kalshi.com/markets/{series}/{event_ticker.lower()}"
+        webbrowser.open(url)
 
     def on_data_table_row_selected(self, event: DataTable.RowSelected) -> None:
         if self._scanner is None:
