@@ -73,6 +73,18 @@ def _fmt_odds(no_price: int) -> str:
 
 DIM_DASH = RichText("—", style="dim", justify="right")
 
+
+def _fmt_vol(volume: int) -> RichText:
+    """Format 24h volume as compact number."""
+    if volume == 0:
+        return DIM_DASH
+    if volume >= 1000:
+        label = f"{volume / 1000:.1f}k"
+    else:
+        label = str(volume)
+    return RichText(label, justify="right")
+
+
 _PT = ZoneInfo("America/Los_Angeles")
 
 
@@ -193,10 +205,15 @@ class OpportunitiesTable(DataTable):
         self._positions: dict[str, EventPositionSummary] = {}
         self._labels: dict[str, str] = {}
         self._resolver: Any = None
+        self._volumes_24h: dict[str, int] = {}
 
     def set_resolver(self, resolver: Any) -> None:
         """Set the game status resolver for Date/Game columns."""
         self._resolver = resolver
+
+    def update_volumes(self, volumes: dict[str, int]) -> None:
+        """Store 24h volume data keyed by market ticker."""
+        self._volumes_24h = volumes
 
     _SEP_STYLE = RichStyle(color=SURFACE2)
 
@@ -208,6 +225,8 @@ class OpportunitiesTable(DataTable):
         self.add_column(RichText("NO-A", justify=r))
         self.add_column(RichText("NO-B", justify=r))
         self.add_column(RichText("Edge", justify=r))
+        self.add_column(RichText("V-A", justify=r), width=6)
+        self.add_column(RichText("V-B", justify=r), width=6)
         self.add_column(RichText("Date", justify=r), width=6)
         self.add_column(RichText("Game", justify=r), width=9)
         self.add_column(RichText("Pos-A", justify=r), width=14)
@@ -348,6 +367,8 @@ class OpportunitiesTable(DataTable):
                         q_b = RichText(f"!! {q_b}", style=YELLOW, justify="right")
 
                 display_name = self._labels.get(opp.event_ticker, opp.event_ticker)
+                vol_a = _fmt_vol(self._volumes_24h.get(opp.ticker_a, 0))
+                vol_b = _fmt_vol(self._volumes_24h.get(opp.ticker_b, 0))
                 game_status = self._resolver.get(opp.event_ticker) if self._resolver else None
                 game_date = _fmt_game_date(game_status.scheduled_start if game_status else None)
                 game_col = _fmt_game_status(game_status)
@@ -356,6 +377,8 @@ class OpportunitiesTable(DataTable):
                     _fmt_cents(opp.no_a),
                     _fmt_cents(opp.no_b),
                     edge_str,
+                    vol_a,
+                    vol_b,
                     game_date,
                     game_col,
                     pos_a,

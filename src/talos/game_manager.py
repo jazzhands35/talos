@@ -56,6 +56,7 @@ class GameManager:
         self._games: dict[str, ArbPair] = {}
         self._labels: dict[str, str] = {}
         self._subtitles: dict[str, str] = {}
+        self._volumes_24h: dict[str, int] = {}  # market_ticker -> 24h volume
         self.on_change: Callable[[], None] | None = None
 
     async def add_game(self, url_or_ticker: str, *, subscribe: bool = True) -> ArbPair:
@@ -129,6 +130,10 @@ class GameManager:
         # Store raw sub_title for game status resolver
         self._subtitles[event.event_ticker] = event.sub_title
 
+        # Store 24h volume per market ticker
+        for m in event.markets:
+            self._volumes_24h[m.ticker] = m.volume_24h or 0
+
         # Build short display label from sub_title
         label = event.sub_title or event.title
         # sub_title is like "WAKE at VT (Mar 10)" — strip date suffix
@@ -172,6 +177,8 @@ class GameManager:
             return
         self._labels.pop(event_ticker, None)
         self._subtitles.pop(event_ticker, None)
+        self._volumes_24h.pop(pair.ticker_a, None)
+        self._volumes_24h.pop(pair.ticker_b, None)
         self._scanner.remove_pair(event_ticker)
         await self._feed.unsubscribe(pair.ticker_a)
         await self._feed.unsubscribe(pair.ticker_b)
@@ -186,6 +193,8 @@ class GameManager:
             pair = self._games.pop(ticker)
             self._labels.pop(ticker, None)
             self._subtitles.pop(ticker, None)
+            self._volumes_24h.pop(pair.ticker_a, None)
+            self._volumes_24h.pop(pair.ticker_b, None)
             self._scanner.remove_pair(ticker)
             await self._feed.unsubscribe(pair.ticker_a)
             await self._feed.unsubscribe(pair.ticker_b)
@@ -207,3 +216,8 @@ class GameManager:
     def subtitles(self) -> dict[str, str]:
         """Event ticker -> raw sub_title from Kalshi."""
         return dict(self._subtitles)
+
+    @property
+    def volumes_24h(self) -> dict[str, int]:
+        """Market ticker -> 24h volume in contracts."""
+        return dict(self._volumes_24h)

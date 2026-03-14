@@ -6,19 +6,8 @@ from typing import Any
 
 from pydantic import BaseModel, model_validator
 
-
-def _dollars_to_cents(val: Any) -> int | None:
-    """Convert a _dollars string/float to integer cents. '0.52' → 52."""
-    if val is None:
-        return None
-    return round(float(val) * 100)
-
-
-def _fp_to_int(val: Any) -> int | None:
-    """Convert an _fp string to integer. '10.00' → 10."""
-    if val is None:
-        return None
-    return int(float(val))
+from talos.models._converters import dollars_to_cents as _dollars_to_cents
+from talos.models._converters import fp_to_int as _fp_to_int
 
 
 class OrderBookLevel(BaseModel):
@@ -44,6 +33,7 @@ class Market(BaseModel):
     no_bid: int | None = None
     no_ask: int | None = None
     volume: int | None = None
+    volume_24h: int | None = None
     open_interest: int | None = None
     last_price: int | None = None
     settlement_ts: str | None = None
@@ -70,6 +60,7 @@ class Market(BaseModel):
         # FP → int
         for old, new in [
             ("volume", "volume_fp"),
+            ("volume_24h", "volume_24h_fp"),
             ("open_interest", "open_interest_fp"),
         ]:
             if new in data and data[new] is not None:
