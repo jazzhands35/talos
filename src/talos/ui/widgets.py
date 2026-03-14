@@ -272,9 +272,8 @@ class OpportunitiesTable(DataTable):
             result.append(scrollable[i])
         return fixed, result
 
-    def on_data_table_header_selected(self, event: DataTable.HeaderSelected) -> None:
-        """Toggle sort column/direction on header click."""
-        col_idx = event.column_index
+    def toggle_sort(self, col_idx: int) -> None:
+        """Toggle sort column/direction."""
         if col_idx == self._sort_col:
             self._sort_reverse = not self._sort_reverse
         else:

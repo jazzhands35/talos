@@ -268,6 +268,10 @@ class TalosApp(App):
         tracker = self._engine.tracker if self._engine else None
         table.refresh_from_scanner(self._scanner, tracker)
 
+    def on_data_table_header_selected(self, event: DataTable.HeaderSelected) -> None:
+        """Forward header clicks to the opportunities table for sorting."""
+        self.query_one(OpportunitiesTable).toggle_sort(event.column_index)
+
     # ── Actions ───────────────────────────────────────────────────
 
     def action_add_games(self) -> None:
