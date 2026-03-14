@@ -224,6 +224,12 @@ class TradingEngine:
                 if restored:
                     self._notify(f"Loaded {restored} game(s)")
                 self._initial_games.clear()
+
+            # Resolve game status for all loaded games
+            if self._game_status_resolver is not None:
+                for pair in self._game_manager.active_games:
+                    sub = self._game_manager.subtitles.get(pair.event_ticker, "")
+                    await self._game_status_resolver.resolve(pair.event_ticker, sub)
             # Subscribe to portfolio events globally (all markets)
             if self._portfolio_feed is not None:
                 await self._portfolio_feed.subscribe()
