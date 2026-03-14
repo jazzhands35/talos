@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 from typing import Any
+from zoneinfo import ZoneInfo
 
 from rich.segment import Segment
 from rich.style import Style as RichStyle
@@ -12,6 +13,7 @@ from textual.widgets import DataTable, Static
 
 from talos.cpm import format_cpm, format_eta
 from talos.fees import american_from_win_risk, american_odds, fee_adjusted_cost, scenario_pnl
+from talos.game_status import GameStatus
 from talos.models.position import EventPositionSummary
 from talos.scanner import ArbitrageScanner
 from talos.top_of_market import TopOfMarketTracker
@@ -71,32 +73,37 @@ def _fmt_odds(no_price: int) -> str:
 
 DIM_DASH = RichText("—", style="dim", justify="right")
 
+_PT = ZoneInfo("America/Los_Angeles")
 
-def _fmt_closes(close_time: str | None) -> RichText:
-    """Format close_time as a human-readable countdown."""
-    if not close_time:
+
+def _fmt_game_date(scheduled_start: datetime | None) -> RichText:
+    """Format game date as MM/DD in Pacific Time."""
+    if scheduled_start is None:
         return DIM_DASH
-    try:
-        close_dt = datetime.fromisoformat(close_time.replace("Z", "+00:00"))
-        now = datetime.now(UTC)
-        delta = close_dt - now
-        total_seconds = int(delta.total_seconds())
-        if total_seconds <= 0:
-            return RichText("closed", style=RED, justify="right")
-        hours, remainder = divmod(total_seconds, 3600)
-        minutes = remainder // 60
-        if hours >= 24:
-            days = hours // 24
-            label = f"{days}d {hours % 24}h"
-            return RichText(label, justify="right")
-        if hours >= 1:
-            label = f"{hours}h {minutes:02d}m"
-            style = YELLOW if hours < 2 else ""
-            return RichText(label, style=style, justify="right")
-        label = f"{minutes}m"
-        return RichText(label, style=RED, justify="right")
-    except (ValueError, TypeError):
+    pt = scheduled_start.astimezone(_PT)
+    return RichText(pt.strftime("%m/%d"), justify="right")
+
+
+def _fmt_game_status(status: GameStatus | None) -> RichText:
+    """Format game state for the Game column."""
+    if status is None or status.state == "unknown":
         return DIM_DASH
+    if status.state == "post":
+        return RichText("FINAL", style="dim", justify="right")
+    if status.state == "live":
+        label = f"LIVE {status.detail}".strip()
+        return RichText(label, style=GREEN, justify="right")
+    # state == "pre"
+    if status.scheduled_start is None:
+        return DIM_DASH
+    now = datetime.now(UTC)
+    delta = status.scheduled_start - now
+    minutes_left = int(delta.total_seconds() / 60)
+    if minutes_left <= 15:
+        return RichText(f"in {minutes_left}m", style=YELLOW, justify="right")
+    pt = status.scheduled_start.astimezone(_PT)
+    time_str = pt.strftime("%I:%M %p").lstrip("0")  # Windows-compatible, no leading zero
+    return RichText(time_str, justify="right")
 
 
 def _fmt_status(status: str) -> RichText:
@@ -185,6 +192,11 @@ class OpportunitiesTable(DataTable):
         super().__init__(**kwargs)
         self._positions: dict[str, EventPositionSummary] = {}
         self._labels: dict[str, str] = {}
+        self._resolver: Any = None
+
+    def set_resolver(self, resolver: Any) -> None:
+        """Set the game status resolver for Date/Game columns."""
+        self._resolver = resolver
 
     _SEP_STYLE = RichStyle(color=SURFACE2)
 
@@ -196,7 +208,8 @@ class OpportunitiesTable(DataTable):
         self.add_column(RichText("NO-A", justify=r))
         self.add_column(RichText("NO-B", justify=r))
         self.add_column(RichText("Edge", justify=r))
-        self.add_column(RichText("Closes", justify=r), width=8)
+        self.add_column(RichText("Date", justify=r), width=6)
+        self.add_column(RichText("Game", justify=r), width=9)
         self.add_column(RichText("Pos-A", justify=r), width=14)
         self.add_column(RichText("Pos-B", justify=r), width=14)
         self.add_column(RichText("Q-A", justify=r), width=10)
@@ -335,13 +348,16 @@ class OpportunitiesTable(DataTable):
                         q_b = RichText(f"!! {q_b}", style=YELLOW, justify="right")
 
                 display_name = self._labels.get(opp.event_ticker, opp.event_ticker)
-                closes = _fmt_closes(opp.close_time)
+                game_status = self._resolver.get(opp.event_ticker) if self._resolver else None
+                game_date = _fmt_game_date(game_status.scheduled_start if game_status else None)
+                game_col = _fmt_game_status(game_status)
                 row_data = (
                     display_name,
                     _fmt_cents(opp.no_a),
                     _fmt_cents(opp.no_b),
                     edge_str,
-                    closes,
+                    game_date,
+                    game_col,
                     pos_a,
                     pos_b,
                     q_a,

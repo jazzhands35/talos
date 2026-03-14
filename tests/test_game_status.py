@@ -3,13 +3,18 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from unittest.mock import AsyncMock
+
+import pytest
 
 from talos.game_status import (
     EspnProvider,
     ExternalGame,
     GameStatus,
+    GameStatusResolver,
     OddsApiProvider,
     PandaScoreProvider,
+    _extract_date_from_ticker,
 )
 
 # ── GameStatus Model ───────────────────────────────────────────────
@@ -350,3 +355,351 @@ class TestPandaScoreProvider:
     def test_parse_empty_response(self) -> None:
         games = PandaScoreProvider._parse_response([])
         assert games == []
+
+
+# ── Team Extraction ───────────────────────────────────────────────
+
+
+class TestTeamExtraction:
+    def test_standard_ticker(self) -> None:
+        result = GameStatusResolver.extract_team_codes("KXNHL-26MAR14-BOS-NYR")
+        assert result == ("BOS", "NYR")
+
+    def test_short_ticker(self) -> None:
+        result = GameStatusResolver.extract_team_codes("KXNHL-26MAR14")
+        assert result is None
+
+    def test_non_team_suffix(self) -> None:
+        result = GameStatusResolver.extract_team_codes("KXBTC-26MAR-T50000")
+        assert result is None
+
+    def test_three_letter_codes(self) -> None:
+        result = GameStatusResolver.extract_team_codes("KXNBA-26MAR14-LAL-GSW")
+        assert result == ("LAL", "GSW")
+
+    def test_two_letter_codes(self) -> None:
+        result = GameStatusResolver.extract_team_codes("KXCBB-26MAR14-VT-UK")
+        assert result == ("VT", "UK")
+
+
+# ── Subtitle Extraction ──────────────────────────────────────────
+
+
+class TestSubtitleExtraction:
+    def test_at_separator(self) -> None:
+        result = GameStatusResolver.extract_from_subtitle("WAKE at VT (Mar 10)")
+        assert result == ("WAKE", "VT")
+
+    def test_vs_separator(self) -> None:
+        result = GameStatusResolver.extract_from_subtitle("T1 vs Gen.G")
+        assert result == ("T1", "GEN.G")
+
+    def test_no_separator(self) -> None:
+        result = GameStatusResolver.extract_from_subtitle("Something else")
+        assert result is None
+
+
+# ── Game Matching ─────────────────────────────────────────────────
+
+
+class TestGameMatching:
+    def test_abbr_match(self) -> None:
+        t = datetime(2026, 3, 14, 19, 0, tzinfo=UTC)
+        games = [
+            ExternalGame(
+                home_team="Los Angeles Lakers",
+                away_team="Boston Celtics",
+                home_abbr="LAL",
+                away_abbr="BOS",
+                scheduled_start=t,
+                state="pre",
+            ),
+            ExternalGame(
+                home_team="New York Rangers",
+                away_team="Montreal Canadiens",
+                home_abbr="NYR",
+                away_abbr="MTL",
+                scheduled_start=t,
+                state="pre",
+            ),
+        ]
+        result = GameStatusResolver.match_game(("BOS", "LAL"), games)
+        assert result is not None
+        assert result.home_team == "Los Angeles Lakers"
+
+    def test_abbr_match_order_independent(self) -> None:
+        t = datetime(2026, 3, 14, 19, 0, tzinfo=UTC)
+        games = [
+            ExternalGame(
+                home_team="Los Angeles Lakers",
+                away_team="Boston Celtics",
+                home_abbr="LAL",
+                away_abbr="BOS",
+                scheduled_start=t,
+                state="pre",
+            ),
+        ]
+        result = GameStatusResolver.match_game(("LAL", "BOS"), games)
+        assert result is not None
+        assert result.home_team == "Los Angeles Lakers"
+
+    def test_substring_fallback(self) -> None:
+        t = datetime(2026, 3, 14, 19, 0, tzinfo=UTC)
+        games = [
+            ExternalGame(
+                home_team="Los Angeles Lakers",
+                away_team="Boston Celtics",
+                scheduled_start=t,
+                state="pre",
+            ),
+        ]
+        result = GameStatusResolver.match_game(("LAKER", "CELTIC"), games)
+        assert result is not None
+        assert result.home_team == "Los Angeles Lakers"
+
+    def test_no_match(self) -> None:
+        t = datetime(2026, 3, 14, 19, 0, tzinfo=UTC)
+        games = [
+            ExternalGame(
+                home_team="Los Angeles Lakers",
+                away_team="Boston Celtics",
+                home_abbr="LAL",
+                away_abbr="BOS",
+                scheduled_start=t,
+                state="pre",
+            ),
+        ]
+        result = GameStatusResolver.match_game(("NYR", "MTL"), games)
+        assert result is None
+
+
+# ── Date Extraction ───────────────────────────────────────────────
+
+
+class TestDateExtraction:
+    def test_standard(self) -> None:
+        result = _extract_date_from_ticker("KXNHL-26MAR14-BOS-NYR")
+        assert result == "20260314"
+
+    def test_single_digit_day(self) -> None:
+        result = _extract_date_from_ticker("KXNBA-26MAR5-LAL-GSW")
+        assert result == "20260305"
+
+    def test_no_date(self) -> None:
+        result = _extract_date_from_ticker("KXBTC")
+        assert result is None
+
+    def test_non_date(self) -> None:
+        result = _extract_date_from_ticker("KXBTC-T50000")
+        assert result is None
+
+
+# ── Resolver Integration ─────────────────────────────────────────
+
+
+class TestResolverIntegration:
+    @pytest.mark.asyncio
+    async def test_resolve_espn_game(self) -> None:
+        t = datetime(2026, 3, 14, 19, 0, tzinfo=UTC)
+        mock_provider = AsyncMock()
+        mock_provider.fetch_games.return_value = [
+            ExternalGame(
+                home_team="Boston Bruins",
+                away_team="New York Rangers",
+                home_abbr="BOS",
+                away_abbr="NYR",
+                scheduled_start=t,
+                state="pre",
+            ),
+        ]
+        resolver = GameStatusResolver()
+        resolver._providers["espn"] = mock_provider
+
+        status = await resolver.resolve("KXNHL-26MAR14-BOS-NYR")
+        assert status.state == "pre"
+        assert status.scheduled_start == t
+
+    @pytest.mark.asyncio
+    async def test_resolve_unmapped_series(self) -> None:
+        resolver = GameStatusResolver()
+        status = await resolver.resolve("KXFOO-26MAR14-AAA-BBB")
+        assert status.state == "unknown"
+
+    @pytest.mark.asyncio
+    async def test_resolve_no_match(self) -> None:
+        mock_provider = AsyncMock()
+        mock_provider.fetch_games.return_value = []
+        resolver = GameStatusResolver()
+        resolver._providers["espn"] = mock_provider
+
+        status = await resolver.resolve("KXNHL-26MAR14-BOS-NYR")
+        assert status.state == "unknown"
+
+    @pytest.mark.asyncio
+    async def test_get_cached(self) -> None:
+        t = datetime(2026, 3, 14, 19, 0, tzinfo=UTC)
+        mock_provider = AsyncMock()
+        mock_provider.fetch_games.return_value = [
+            ExternalGame(
+                home_team="Boston Bruins",
+                away_team="New York Rangers",
+                home_abbr="BOS",
+                away_abbr="NYR",
+                scheduled_start=t,
+                state="pre",
+            ),
+        ]
+        resolver = GameStatusResolver()
+        resolver._providers["espn"] = mock_provider
+
+        await resolver.resolve("KXNHL-26MAR14-BOS-NYR")
+        cached = resolver.get("KXNHL-26MAR14-BOS-NYR")
+        assert cached is not None
+        assert cached.state == "pre"
+
+    @pytest.mark.asyncio
+    async def test_refresh_all_updates_cache(self) -> None:
+        t = datetime(2026, 3, 14, 19, 0, tzinfo=UTC)
+        pre_game = ExternalGame(
+            home_team="Boston Bruins",
+            away_team="New York Rangers",
+            home_abbr="BOS",
+            away_abbr="NYR",
+            scheduled_start=t,
+            state="pre",
+        )
+        live_game = ExternalGame(
+            home_team="Boston Bruins",
+            away_team="New York Rangers",
+            home_abbr="BOS",
+            away_abbr="NYR",
+            scheduled_start=t,
+            state="live",
+            detail="P1 15:00",
+        )
+        mock_provider = AsyncMock()
+        mock_provider.fetch_games.return_value = [pre_game]
+        resolver = GameStatusResolver()
+        resolver._providers["espn"] = mock_provider
+
+        await resolver.resolve("KXNHL-26MAR14-BOS-NYR")
+        assert resolver.get("KXNHL-26MAR14-BOS-NYR") is not None
+        assert resolver.get("KXNHL-26MAR14-BOS-NYR").state == "pre"  # type: ignore[union-attr]
+
+        # Now refresh returns live game
+        mock_provider.fetch_games.return_value = [live_game]
+        await resolver.refresh_all()
+        cached = resolver.get("KXNHL-26MAR14-BOS-NYR")
+        assert cached is not None
+        assert cached.state == "live"
+        assert cached.detail == "P1 15:00"
+
+    @pytest.mark.asyncio
+    async def test_refresh_keeps_stale_on_failure(self) -> None:
+        t = datetime(2026, 3, 14, 19, 0, tzinfo=UTC)
+        mock_provider = AsyncMock()
+        mock_provider.fetch_games.return_value = [
+            ExternalGame(
+                home_team="Boston Bruins",
+                away_team="New York Rangers",
+                home_abbr="BOS",
+                away_abbr="NYR",
+                scheduled_start=t,
+                state="pre",
+            ),
+        ]
+        resolver = GameStatusResolver()
+        resolver._providers["espn"] = mock_provider
+
+        await resolver.resolve("KXNHL-26MAR14-BOS-NYR")
+
+        # Refresh returns empty list -> keep stale
+        mock_provider.fetch_games.return_value = []
+        await resolver.refresh_all()
+        cached = resolver.get("KXNHL-26MAR14-BOS-NYR")
+        assert cached is not None
+        assert cached.state == "pre"
+
+    @pytest.mark.asyncio
+    async def test_remove(self) -> None:
+        t = datetime(2026, 3, 14, 19, 0, tzinfo=UTC)
+        mock_provider = AsyncMock()
+        mock_provider.fetch_games.return_value = [
+            ExternalGame(
+                home_team="Boston Bruins",
+                away_team="New York Rangers",
+                home_abbr="BOS",
+                away_abbr="NYR",
+                scheduled_start=t,
+                state="pre",
+            ),
+        ]
+        resolver = GameStatusResolver()
+        resolver._providers["espn"] = mock_provider
+
+        await resolver.resolve("KXNHL-26MAR14-BOS-NYR")
+        assert resolver.get("KXNHL-26MAR14-BOS-NYR") is not None
+
+        resolver.remove("KXNHL-26MAR14-BOS-NYR")
+        assert resolver.get("KXNHL-26MAR14-BOS-NYR") is None
+
+
+# ── UI Formatter Tests ───────────────────────────────────────────
+
+
+from datetime import timedelta
+from zoneinfo import ZoneInfo
+
+from talos.ui.widgets import _fmt_game_date, _fmt_game_status
+
+PT = ZoneInfo("America/Los_Angeles")
+
+
+class TestFmtGameDate:
+    def test_with_datetime(self) -> None:
+        dt = datetime(2026, 3, 14, 20, 0, tzinfo=UTC)
+        result = _fmt_game_date(dt)
+        assert "03/14" in str(result)
+
+    def test_none(self) -> None:
+        result = _fmt_game_date(None)
+        assert "\u2014" in str(result)
+
+
+class TestFmtGameStatus:
+    def test_unknown(self) -> None:
+        gs = GameStatus(state="unknown")
+        result = _fmt_game_status(gs)
+        assert "\u2014" in str(result)
+
+    def test_pre_far_out(self) -> None:
+        future = datetime.now(UTC) + timedelta(hours=3)
+        gs = GameStatus(state="pre", scheduled_start=future)
+        result = str(_fmt_game_status(gs))
+        assert "M" in result  # AM or PM
+
+    def test_pre_imminent(self) -> None:
+        soon = datetime.now(UTC) + timedelta(minutes=10)
+        gs = GameStatus(state="pre", scheduled_start=soon)
+        result = str(_fmt_game_status(gs))
+        assert "in " in result
+
+    def test_live_with_detail(self) -> None:
+        gs = GameStatus(state="live", detail="P2 12:34")
+        result = str(_fmt_game_status(gs))
+        assert "LIVE" in result
+        assert "P2" in result
+
+    def test_live_no_detail(self) -> None:
+        gs = GameStatus(state="live")
+        result = str(_fmt_game_status(gs))
+        assert "LIVE" in result
+
+    def test_post(self) -> None:
+        gs = GameStatus(state="post")
+        result = str(_fmt_game_status(gs))
+        assert "FINAL" in result
+
+    def test_none_status(self) -> None:
+        result = _fmt_game_status(None)
+        assert "\u2014" in str(result)
