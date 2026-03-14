@@ -200,12 +200,26 @@ class OpportunitiesTable(DataTable):
     }
     """
 
+    # Column index -> sort key extractor from (opp, positions, volumes, resolver, labels)
+    _SORT_KEYS: dict[int, str] = {
+        0: "label",      # Event name
+        1: "no_a",       # NO-A price
+        2: "no_b",       # NO-B price
+        3: "fee_edge",   # Edge
+        4: "vol_a",      # V-A (24h volume)
+        5: "vol_b",      # V-B (24h volume)
+        6: "start",      # Date
+        7: "state",      # Game status
+    }
+
     def __init__(self, **kwargs: Any) -> None:
         super().__init__(**kwargs)
         self._positions: dict[str, EventPositionSummary] = {}
         self._labels: dict[str, str] = {}
         self._resolver: Any = None
         self._volumes_24h: dict[str, int] = {}
+        self._sort_col: int | None = None
+        self._sort_reverse: bool = True  # default descending
 
     def set_resolver(self, resolver: Any) -> None:
         """Set the game status resolver for Date/Game columns."""
@@ -258,6 +272,45 @@ class OpportunitiesTable(DataTable):
             result.append(scrollable[i])
         return fixed, result
 
+    def on_data_table_header_selected(self, event: DataTable.HeaderSelected) -> None:
+        """Toggle sort column/direction on header click."""
+        col_idx = event.column_index
+        if col_idx == self._sort_col:
+            self._sort_reverse = not self._sort_reverse
+        else:
+            self._sort_col = col_idx
+            self._sort_reverse = True  # start descending
+
+    def _sort_key(self, opp: Any) -> Any:
+        """Return a comparable sort value for the current sort column."""
+        col = self._sort_col
+        if col is None:
+            return opp.raw_edge  # default sort; reverse=True gives descending
+        key_name = self._SORT_KEYS.get(col)
+        if key_name == "label":
+            return self._labels.get(opp.event_ticker, opp.event_ticker).lower()
+        if key_name == "no_a":
+            return opp.no_a
+        if key_name == "no_b":
+            return opp.no_b
+        if key_name == "fee_edge":
+            return opp.fee_edge
+        if key_name == "vol_a":
+            return self._volumes_24h.get(opp.ticker_a, 0)
+        if key_name == "vol_b":
+            return self._volumes_24h.get(opp.ticker_b, 0)
+        if key_name == "start":
+            gs = self._resolver.get(opp.event_ticker) if self._resolver else None
+            if gs and gs.scheduled_start:
+                return gs.scheduled_start.timestamp()
+            return 0.0
+        if key_name == "state":
+            gs = self._resolver.get(opp.event_ticker) if self._resolver else None
+            order = {"live": 0, "pre": 1, "post": 2, "unknown": 3}
+            return order.get(gs.state, 3) if gs else 3
+        # Unsupported column — fall back to edge
+        return opp.raw_edge
+
     def update_positions(self, summaries: list[EventPositionSummary]) -> None:
         """Store latest position summaries for next table refresh."""
         self._positions = {s.event_ticker: s for s in summaries}
@@ -285,8 +338,12 @@ class OpportunitiesTable(DataTable):
                 if key is not None:
                     self.remove_row(key)
 
-            # Add or update rows (positive edge first, then rest)
-            sorted_opps = sorted(all_snaps.values(), key=lambda o: o.raw_edge, reverse=True)
+            # Sort by selected column (default: edge descending)
+            sorted_opps = sorted(
+                all_snaps.values(),
+                key=self._sort_key,
+                reverse=self._sort_reverse,
+            )
             for opp in sorted_opps:
                 edge_str = _fmt_edge(opp.fee_edge)
 
