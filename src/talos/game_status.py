@@ -7,6 +7,7 @@ normalizing it into ExternalGame objects for downstream matching.
 from __future__ import annotations
 
 import os
+import re
 from datetime import UTC, datetime
 from typing import Protocol, runtime_checkable
 
@@ -291,3 +292,268 @@ class PandaScoreProvider:
         except httpx.HTTPError:
             logger.warning("pandascore_fetch_failed", sport=sport)
             return []
+
+
+# ── Source Map & Resolver ─────────────────────────────────────────
+
+SOURCE_MAP: dict[str, tuple[str, str, str]] = {
+    "KXNHL": ("espn", "hockey", "nhl"),
+    "KXNBA": ("espn", "basketball", "nba"),
+    "KXMLB": ("espn", "baseball", "mlb"),
+    "KXNFL": ("espn", "football", "nfl"),
+    "KXWNBA": ("espn", "basketball", "wnba"),
+    "KXCFB": ("espn", "football", "college-football"),
+    "KXCBB": ("espn", "basketball", "mens-college-basketball"),
+    "KXMLS": ("espn", "soccer", "usa.1"),
+    "KXEPL": ("espn", "soccer", "eng.1"),
+    "KXAHL": ("odds-api", "icehockey_ahl", "icehockey_ahl"),
+    "KXLOL": ("pandascore", "lol", "league-of-legends"),
+    "KXCS2": ("pandascore", "csgo", "cs2"),
+    "KXVAL": ("pandascore", "valorant", "valorant"),
+    "KXDOTA": ("pandascore", "dota2", "dota-2"),
+}
+
+_MONTH_MAP: dict[str, str] = {
+    "JAN": "01",
+    "FEB": "02",
+    "MAR": "03",
+    "APR": "04",
+    "MAY": "05",
+    "JUN": "06",
+    "JUL": "07",
+    "AUG": "08",
+    "SEP": "09",
+    "OCT": "10",
+    "NOV": "11",
+    "DEC": "12",
+}
+
+
+def _extract_date_from_ticker(event_ticker: str) -> str | None:
+    """Parse 'KXNHL-26MAR14-BOS-NYR' -> '20260314'."""
+    parts = event_ticker.split("-")
+    if len(parts) < 2:
+        return None
+    segment = parts[1]
+    m = re.match(r"(\d{2})([A-Z]{3})(\d{1,2})", segment)
+    if not m:
+        return None
+    year_suffix, month_abbr, day = m.group(1), m.group(2), m.group(3)
+    month_num = _MONTH_MAP.get(month_abbr)
+    if month_num is None:
+        return None
+    return f"20{year_suffix}{month_num}{int(day):02d}"
+
+
+class GameStatusResolver:
+    """Resolves Kalshi event tickers to live game status via external providers."""
+
+    def __init__(self, http: httpx.AsyncClient | None = None) -> None:
+        self._providers: dict[str, GameStatusProvider] = {
+            "espn": EspnProvider(),
+            "odds-api": OddsApiProvider(),
+            "pandascore": PandaScoreProvider(),
+        }
+        self._http = http
+        # Cache: event_ticker -> (status, team_codes, source_key)
+        self._cache: dict[str, tuple[GameStatus, tuple[str, str] | None, str]] = {}
+
+    @staticmethod
+    def extract_team_codes(event_ticker: str) -> tuple[str, str] | None:
+        """Extract team codes from ticker: 'KXNHL-26MAR14-BOS-NYR' -> ('BOS', 'NYR')."""
+        parts = event_ticker.split("-")
+        if len(parts) < 4:
+            return None
+        code_a, code_b = parts[-2], parts[-1]
+        pattern = re.compile(r"^[A-Z]{2,4}$")
+        if pattern.match(code_a) and pattern.match(code_b):
+            return (code_a, code_b)
+        return None
+
+    @staticmethod
+    def extract_from_subtitle(sub_title: str) -> tuple[str, str] | None:
+        """Extract team names from subtitle: 'WAKE at VT (Mar 10)' -> ('WAKE', 'VT')."""
+        # Strip date suffix in parens
+        stripped = re.sub(r"\s*\([^)]*\)\s*$", "", sub_title).strip()
+        for sep in (" at ", " vs ", " vs. "):
+            if sep in stripped:
+                team_a, team_b = stripped.split(sep, 1)
+                return (team_a.strip().upper(), team_b.strip().upper())
+        return None
+
+    @staticmethod
+    def match_game(
+        team_codes: tuple[str, str], games: list[ExternalGame]
+    ) -> ExternalGame | None:
+        """Match team codes to an ExternalGame, first by abbreviation then by substring."""
+        code_set = {team_codes[0].upper(), team_codes[1].upper()}
+
+        # Strategy 1: abbreviation match
+        for game in games:
+            abbrs = set()
+            if game.home_abbr:
+                abbrs.add(game.home_abbr.upper())
+            if game.away_abbr:
+                abbrs.add(game.away_abbr.upper())
+            if code_set == abbrs:
+                return game
+
+        # Strategy 2: substring fallback
+        for game in games:
+            combined = f"{game.home_team} {game.away_team}".upper()
+            if all(code in combined for code in code_set):
+                return game
+
+        return None
+
+    def _prepare_entry(
+        self, event_ticker: str, sub_title: str = ""
+    ) -> tuple[str, str, str, tuple[str, str] | None, str] | None:
+        """Extract source info and team codes for an event ticker.
+
+        Returns (prefix, sport, league, team_codes, game_date) or None.
+        """
+        prefix = event_ticker.split("-")[0]
+        source = SOURCE_MAP.get(prefix)
+        if source is None:
+            logger.warning(
+                "unmapped_series_ticker", prefix=prefix, ticker=event_ticker
+            )
+            self._cache[event_ticker] = (GameStatus(state="unknown"), None, "")
+            return None
+
+        _, sport, league = source
+        team_codes = self.extract_team_codes(event_ticker)
+        if team_codes is None and sub_title:
+            team_codes = self.extract_from_subtitle(sub_title)
+
+        game_date = _extract_date_from_ticker(event_ticker)
+        if game_date is None:
+            game_date = datetime.now(UTC).strftime("%Y%m%d")
+
+        return (prefix, sport, league, team_codes, game_date)
+
+    async def resolve(
+        self, event_ticker: str, sub_title: str = ""
+    ) -> GameStatus:
+        """Resolve a single Kalshi event ticker to a GameStatus."""
+        result = await self.resolve_batch([(event_ticker, sub_title)])
+        return result.get(event_ticker, GameStatus(state="unknown"))
+
+    async def resolve_batch(
+        self, items: list[tuple[str, str]]
+    ) -> dict[str, GameStatus]:
+        """Resolve multiple event tickers, batching API calls by source.
+
+        Each unique (provider, sport, league, date) combination makes
+        exactly one API call, regardless of how many games share that source.
+        """
+        # Group events by their API source key
+        # source_key = (prefix, sport, league, game_date)
+        groups: dict[tuple[str, str, str, str], list[tuple[str, tuple[str, str] | None]]] = {}
+        results: dict[str, GameStatus] = {}
+
+        for event_ticker, sub_title in items:
+            entry = self._prepare_entry(event_ticker, sub_title)
+            if entry is None:
+                results[event_ticker] = GameStatus(state="unknown")
+                continue
+            prefix, sport, league, team_codes, game_date = entry
+            source_key = (prefix, sport, league, game_date)
+            groups.setdefault(source_key, []).append((event_ticker, team_codes))
+
+        # One API call per unique source
+        for (prefix, sport, league, game_date), event_list in groups.items():
+            source = SOURCE_MAP.get(prefix)
+            if source is None:
+                continue
+            provider_name = source[0]
+            provider = self._providers.get(provider_name)
+            if provider is None:
+                continue
+
+            try:
+                games = await provider.fetch_games(sport, league, game_date)
+            except Exception:
+                logger.warning("batch_fetch_failed", prefix=prefix)
+                for event_ticker, team_codes in event_list:
+                    if event_ticker not in self._cache:
+                        status = GameStatus(state="unknown")
+                        self._cache[event_ticker] = (status, team_codes, prefix)
+                        results[event_ticker] = status
+                continue
+
+            # Match each event against the fetched games
+            for event_ticker, team_codes in event_list:
+                if not games or team_codes is None:
+                    status = GameStatus(state="unknown")
+                else:
+                    matched = self.match_game(team_codes, games)
+                    if matched is None:
+                        status = GameStatus(state="unknown")
+                    else:
+                        status = GameStatus(
+                            state=matched.state,
+                            scheduled_start=matched.scheduled_start,
+                            detail=matched.detail,
+                        )
+                self._cache[event_ticker] = (status, team_codes, prefix)
+                results[event_ticker] = status
+
+        return results
+
+    async def refresh_all(self) -> None:
+        """Re-fetch all cached entries, batched by source."""
+        # Group cached entries by source
+        groups: dict[tuple[str, str, str, str], list[tuple[str, tuple[str, str]]]] = {}
+        for event_ticker, (_, team_codes, prefix) in list(self._cache.items()):
+            source = SOURCE_MAP.get(prefix)
+            if source is None or team_codes is None:
+                continue
+            _, sport, league = source
+            game_date = _extract_date_from_ticker(event_ticker)
+            if game_date is None:
+                game_date = datetime.now(UTC).strftime("%Y%m%d")
+            key = (prefix, sport, league, game_date)
+            groups.setdefault(key, []).append((event_ticker, team_codes))
+
+        # One API call per unique source
+        for (prefix, sport, league, game_date), event_list in groups.items():
+            source = SOURCE_MAP.get(prefix)
+            if source is None:
+                continue
+            provider_name = source[0]
+            provider = self._providers.get(provider_name)
+            if provider is None:
+                continue
+
+            try:
+                games = await provider.fetch_games(sport, league, game_date)
+            except Exception:
+                logger.warning("refresh_fetch_failed", prefix=prefix)
+                continue
+
+            if not games:
+                continue  # Keep stale cached values
+
+            for event_ticker, team_codes in event_list:
+                matched = self.match_game(team_codes, games)
+                if matched is not None:
+                    new_status = GameStatus(
+                        state=matched.state,
+                        scheduled_start=matched.scheduled_start,
+                        detail=matched.detail,
+                    )
+                    self._cache[event_ticker] = (new_status, team_codes, prefix)
+                # If no match, keep stale cached value
+
+    def get(self, event_ticker: str) -> GameStatus | None:
+        """Read cached status for an event ticker."""
+        entry = self._cache.get(event_ticker)
+        if entry is None:
+            return None
+        return entry[0]
+
+    def remove(self, event_ticker: str) -> None:
+        """Remove an event ticker from cache."""
+        self._cache.pop(event_ticker, None)

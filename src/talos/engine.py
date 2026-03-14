@@ -225,11 +225,14 @@ class TradingEngine:
                     self._notify(f"Loaded {restored} game(s)")
                 self._initial_games.clear()
 
-            # Resolve game status for all loaded games
+            # Resolve game status for all loaded games (batched by source)
             if self._game_status_resolver is not None:
-                for pair in self._game_manager.active_games:
-                    sub = self._game_manager.subtitles.get(pair.event_ticker, "")
-                    await self._game_status_resolver.resolve(pair.event_ticker, sub)
+                batch = [
+                    (p.event_ticker, self._game_manager.subtitles.get(p.event_ticker, ""))
+                    for p in self._game_manager.active_games
+                ]
+                if batch:
+                    await self._game_status_resolver.resolve_batch(batch)
             # Subscribe to portfolio events globally (all markets)
             if self._portfolio_feed is not None:
                 await self._portfolio_feed.subscribe()
@@ -952,9 +955,12 @@ class TradingEngine:
             for pair in pairs:
                 self._adjuster.add_event(pair)
             if self._game_status_resolver is not None:
-                for pair in self._game_manager.active_games:
-                    sub_title = self._game_manager.subtitles.get(pair.event_ticker, "")
-                    await self._game_status_resolver.resolve(pair.event_ticker, sub_title)
+                batch = [
+                    (p.event_ticker, self._game_manager.subtitles.get(p.event_ticker, ""))
+                    for p in pairs
+                ]
+                if batch:
+                    await self._game_status_resolver.resolve_batch(batch)
             self._notify(f"Added {len(urls)} game(s)")
         except Exception as e:
             self._notify(f"Error: {e}", "error")
