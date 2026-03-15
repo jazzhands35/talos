@@ -242,3 +242,27 @@ Key changes:
 **Context:** Kalshi provides no explicit "game start time" field. The "Closes" column (market close time) was useless for trading decisions.
 **Decision:** Built `GameStatusResolver` with three external sources: ESPN (NHL, NBA, MLB, NFL, college sports — free, no auth), The Odds API (AHL, minor leagues — free tier), PandaScore (esports — free tier). Maps Kalshi series tickers to sources via `SOURCE_MAP`. Matches games by team codes extracted from `Event.sub_title`. Batched by source to avoid N+1 API calls.
 **Key gotchas:** Kalshi series tickers use `KXNHLGAME` not `KXNHL`. Event tickers concatenate teams (`KXNHLGAME-26MAR14BOSWSH`) — team extraction must use `sub_title`. PandaScore rejects `filter[scheduled_at]`, requires `range[scheduled_at]`. ESPN status lives inside `competitions[0].status`, not `event.status`. Tennis has no good free API for individual matches.
+
+## 2026-03-14 — HTTP timeout prevents permanent freeze
+
+**Context:** Talos froze permanently under load (146+ games). `httpx.AsyncClient()` had no timeout. When Kalshi's API hung on a response (common — balance calls took 7+ seconds), the `await` blocked forever. With auto-accept placing orders (4 REST calls per approval), one hung call backed up the entire event loop.
+**Decision:** Added `httpx.Timeout(15.0)` to the REST client and `Timeout(10.0)` to game status providers. Timeout exceptions propagate as regular errors, caught by existing `except Exception` handlers.
+**Rationale:** A 15-second timeout is generous — Kalshi normally responds in 200ms-3s. Anything over 15s is effectively dead. The timeout converts a permanent hang into a recoverable error.
+
+## 2026-03-14 — WS-primary data architecture
+
+**Context:** `refresh_account` polled Kalshi REST API every 10 seconds, taking 5-10 seconds per cycle (balance 1-7s, orders 1-5s, positions 1-3s). With 146+ games, this consumed >50% of event loop time.
+**Decision:** Made WS channels (`user_orders`, `market_positions`, `fill`) the primary data source. Slowed REST polling to 30s backup. Split balance into its own 10s poll (no WS channel for balance). Unknown orders from WS now added to cache instead of ignored.
+**Rationale:** WS already delivers the same data in milliseconds. REST polling was redundant but consumed the event loop. 30s backup catches any missed WS messages without blocking.
+
+## 2026-03-14 — Cached startup for instant game restore
+
+**Context:** Startup re-fetched 196 events via REST (392 API calls, 40 seconds). Persistence only saved event tickers.
+**Decision:** Save full pair data (`games_full.json`: event_ticker, ticker_a, ticker_b, fee_type, fee_rate, close_time, label, sub_title). On startup, restore from cache with zero API calls. Fallback to REST if cache missing.
+**Rationale:** All data needed to create ArbPairs is available at save time. No reason to re-fetch from Kalshi on every restart.
+
+## 2026-03-14 — Disable websockets client-side keepalive pings
+
+**Context:** WS disconnected with code 1011 "keepalive ping timeout". The `websockets` library sends client-side pings every 20s with 20s timeout. When `refresh_account` blocked the event loop for 5-8s, pong responses couldn't process in time, so the library killed its own connection.
+**Decision:** Set `ping_interval=None, ping_timeout=None` on `websockets.connect()`. Kalshi already sends server-side pings every 10s with body "heartbeat".
+**Rationale:** Client pings are redundant when the server provides keepalive. Disabling them eliminates self-inflicted disconnects. The Kalshi API research skill identified this during investigation.

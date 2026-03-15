@@ -174,6 +174,14 @@ Applied in: `ws_client.py` `_dispatch()` — catches parse errors and callback e
 
 **Why not fail-fast:** Unlike REST (where one bad response means one failed operation), a crashed WS loop means ALL channels die — orderbook deltas stop, ticker updates freeze, portfolio notifications halt. The blast radius of one bad message type is disproportionate. Log and skip is correct here.
 
+## Always set HTTP timeouts
+
+Every `httpx.AsyncClient()` MUST have an explicit timeout. Without one, a single hung API response blocks the event loop forever. With auto-accept placing orders (4 REST calls per approval), one hung call = permanent freeze of the entire application.
+
+Applied in: `rest_client.py` — `httpx.Timeout(15.0)` for Kalshi REST. `game_status.py` — `httpx.Timeout(10.0)` for external APIs (ESPN, OddsAPI, PandaScore).
+
+**Why 15 seconds:** Kalshi normally responds in 200ms-3s. Anything over 15s is effectively dead. The timeout converts a permanent hang into a recoverable `TimeoutException` caught by existing error handlers.
+
 ## Order-specific APIs need order-specific data
 
 When calling an API that acts on a single order (amend, cancel, get), use data from that specific order — not aggregates from the position ledger. The ledger aggregates fills across all orders (including archived ones augmented by the positions API), but the amend API needs `count = order.fill_count + desired_remaining` for *that* order.

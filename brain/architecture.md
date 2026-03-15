@@ -59,7 +59,9 @@ Single source of truth for both UI display and bid adjustment safety gates. `com
    `AutomationConfig`: settings dataclass (edge threshold, stability seconds, cooldown, unit size, enabled flag). Off by default, explicit opt-in.
    Graduation path: manual → assisted → **supervised** (current) → autonomous. See [[principles#2. Human in the Loop]].
 
-7. **Game Status** (Layer 7) — **ACTIVE**
+7. **Event Scanner** (Layer 7) — **ACTIVE**
+   `GameManager.scan_events()` discovers open arb-eligible events from 20 Kalshi series (`SCAN_SERIES`). Fetches concurrently with semaphore(10). `ScanScreen` modal shows results with Sport/League/Date/Volume columns. Press `c` to scan, Space to toggle, Enter to add selected, `a` to add all. Filters out already-monitored events and non-2-market events.
+8. **Game Status** (Layer 8) — **ACTIVE**
    `GameStatusResolver`: multi-source live game status via ESPN (major leagues), The Odds API (AHL, minor leagues), PandaScore (esports). Maps Kalshi series tickers (e.g., `KXNHLGAME`) to external APIs, matches games by team codes extracted from `Event.sub_title`. Cached per event_ticker, refreshed hourly. Replaces "Closes" column with Date + Game Status columns (Pacific Time). Also provides per-leg 24h volume (`Market.volume_24h`). Tennis coverage incomplete (no free API for individual challenger matches).
 
 See [[codebase/index]] for the full module map and gotchas.
