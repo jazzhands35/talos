@@ -139,6 +139,43 @@ class OddsApiProvider:
 
     BASE_URL = "https://api.the-odds-api.com/v4/sports"
 
+    # Cache active tennis keys — refreshed hourly
+    _tennis_keys: list[str] = []
+    _tennis_keys_ts: float = 0
+
+    @classmethod
+    async def get_active_tennis_keys(cls) -> list[str]:
+        """Discover active tennis tournament keys from /sports endpoint.
+
+        This endpoint is free — doesn't count against usage quota.
+        Cached for 1 hour to avoid excessive calls.
+        """
+        import time
+        if cls._tennis_keys and (time.monotonic() - cls._tennis_keys_ts) < 3600:
+            return cls._tennis_keys
+
+        api_key = os.environ.get("ODDS_API_KEY", "")
+        if not api_key:
+            return []
+        try:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(10.0)) as client:
+                resp = await client.get(
+                    f"{cls.BASE_URL}/",
+                    params={"apiKey": api_key},
+                )
+                resp.raise_for_status()
+                sports = resp.json()
+                cls._tennis_keys = [
+                    s["key"] for s in sports
+                    if "tennis" in s.get("key", "") and s.get("active")
+                ]
+                cls._tennis_keys_ts = time.monotonic()
+                logger.info("odds_api_tennis_keys", keys=cls._tennis_keys)
+                return cls._tennis_keys
+        except Exception:
+            logger.warning("odds_api_tennis_discovery_failed", exc_info=True)
+            return cls._tennis_keys  # return stale cache
+
     @staticmethod
     def _parse_response(data: list) -> list[ExternalGame]:
         games: list[ExternalGame] = []
@@ -176,6 +213,29 @@ class OddsApiProvider:
                 logger.warning("odds_api_parse_event_failed", item=item)
         return games
 
+    @staticmethod
+    def _parse_events_response(data: list) -> list[ExternalGame]:
+        """Parse the /events endpoint (free, no quota) — has commence_time but no scores."""
+        games: list[ExternalGame] = []
+        for item in data:
+            try:
+                commence = datetime.fromisoformat(
+                    item["commence_time"].replace("Z", "+00:00")
+                )
+                now = datetime.now(UTC)
+                state = "pre" if commence > now else "live"
+                games.append(
+                    ExternalGame(
+                        home_team=item["home_team"],
+                        away_team=item["away_team"],
+                        scheduled_start=commence,
+                        state=state,
+                    )
+                )
+            except (KeyError, ValueError):
+                pass
+        return games
+
     async def fetch_games(
         self, sport: str, league: str, game_date: str  # noqa: ARG002
     ) -> list[ExternalGame]:
@@ -184,6 +244,18 @@ class OddsApiProvider:
         if not api_key:
             logger.warning("odds_api_key_missing")
             return []
+
+        # For tennis, use the /events endpoint (free, no quota cost)
+        if "tennis" in league:
+            url = f"{self.BASE_URL}/{league}/events/"
+            try:
+                async with httpx.AsyncClient(timeout=httpx.Timeout(10.0)) as client:
+                    resp = await client.get(url, params={"apiKey": api_key})
+                    resp.raise_for_status()
+                    return self._parse_events_response(resp.json())
+            except httpx.HTTPError:
+                logger.warning("odds_api_fetch_failed", league=league)
+                return []
 
         url = f"{self.BASE_URL}/{league}/scores/"
         try:
@@ -321,16 +393,29 @@ SOURCE_MAP: dict[str, tuple[str, str, str]] = {
     # The Odds API — minor/international leagues
     "KXAHLGAME": ("odds-api", "icehockey_ahl", "icehockey_ahl"),
     "KXSHLGAME": ("odds-api", "icehockey_sweden_hockey_league", "icehockey_sweden_hockey_league"),
-    # Tennis — tournament keys rotate; map active ones here
-    # "KXATPMATCH": ("odds-api", "tennis_atp_indian_wells", "tennis_atp_indian_wells"),
-    # "KXWTAMATCH": ("odds-api", "tennis_wta_indian_wells", "tennis_wta_indian_wells"),
-    # ATP/WTA Challenger not covered by any free API yet
+    # Tennis — resolved dynamically via OddsApiProvider.get_active_tennis_keys()
+    # Not in SOURCE_MAP — handled by TENNIS_SERIES set below
     # PandaScore — esports
     "KXLOLGAME": ("pandascore", "lol", "league-of-legends"),
     "KXCS2GAME": ("pandascore", "csgo", "cs2"),
     "KXVALGAME": ("pandascore", "valorant", "valorant"),
     "KXDOTA2GAME": ("pandascore", "dota2", "dota-2"),
     "KXCODGAME": ("pandascore", "codmw", "cod-mw"),
+}
+
+# Tennis series resolved dynamically — tournament keys rotate
+TENNIS_SERIES = {
+    "KXATPMATCH", "KXWTAMATCH", "KXATPCHALLENGERMATCH",
+    "KXWTACHALLENGERMATCH", "KXATPDOUBLES",
+}
+
+# Map Kalshi tennis prefix hints to Odds API key patterns
+_TENNIS_KEY_HINTS = {
+    "KXATPMATCH": "tennis_atp_",
+    "KXWTAMATCH": "tennis_wta_",
+    "KXATPCHALLENGERMATCH": "tennis_atp_",  # challengers mixed with main draw
+    "KXWTACHALLENGERMATCH": "tennis_wta_",
+    "KXATPDOUBLES": "tennis_atp_",
 }
 
 _MONTH_MAP: dict[str, str] = {
@@ -435,14 +520,19 @@ class GameStatusResolver:
         """
         prefix = event_ticker.split("-")[0]
         source = SOURCE_MAP.get(prefix)
-        if source is None:
+        if source is None and prefix not in TENNIS_SERIES:
             logger.warning(
                 "unmapped_series_ticker", prefix=prefix, ticker=event_ticker
             )
             self._cache[event_ticker] = (GameStatus(state="unknown"), None, "")
             return None
 
-        _, sport, league = source
+        if source is not None:
+            _, sport, league = source
+        else:
+            # Tennis — use placeholder, resolved dynamically in resolve_batch
+            sport = "tennis"
+            league = "tennis_dynamic"
         team_codes = self.extract_team_codes(event_ticker)
         if team_codes is None and sub_title:
             team_codes = self.extract_from_subtitle(sub_title)
@@ -484,6 +574,40 @@ class GameStatusResolver:
 
         # One API call per unique source
         for (prefix, sport, league, game_date), event_list in groups.items():
+            # Dynamic tennis resolution
+            if league == "tennis_dynamic":
+                provider = self._providers.get("odds-api")
+                if provider is None:
+                    continue
+                tennis_keys = await OddsApiProvider.get_active_tennis_keys()
+                hint = _TENNIS_KEY_HINTS.get(prefix, "tennis_")
+                matching_keys = [k for k in tennis_keys if k.startswith(hint)]
+                if not matching_keys:
+                    matching_keys = tennis_keys  # fallback: search all
+                all_games: list[ExternalGame] = []
+                for tkey in matching_keys:
+                    try:
+                        tgames = await provider.fetch_games(sport, tkey, game_date)
+                        all_games.extend(tgames)
+                    except Exception:
+                        pass
+                for event_ticker, team_codes in event_list:
+                    if not all_games or team_codes is None:
+                        status = GameStatus(state="unknown")
+                    else:
+                        matched = self.match_game(team_codes, all_games)
+                        if matched is None:
+                            status = GameStatus(state="unknown")
+                        else:
+                            status = GameStatus(
+                                state=matched.state,
+                                scheduled_start=matched.scheduled_start,
+                                detail=matched.detail,
+                            )
+                    self._cache[event_ticker] = (status, team_codes, prefix)
+                    results[event_ticker] = status
+                continue
+
             source = SOURCE_MAP.get(prefix)
             if source is None:
                 continue
