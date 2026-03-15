@@ -297,15 +297,18 @@ class KalshiWSClient:
                 logger.debug("ws_message", type=data.get("type"), sid=data.get("sid"))
                 await self._dispatch(data)
         except websockets.ConnectionClosed as e:
-            logger.error(
-                "ws_connection_closed",
-                code=e.code,
-                reason=e.reason,
+            from pathlib import Path
+            Path("talos_perf.log").open("a").write(
+                f"WS_DISCONNECTED: code={e.code} reason={e.reason}\n"
             )
             raise
         except Exception as e:
-            logger.error("ws_listen_error", error=str(e), error_type=type(e).__name__)
+            from pathlib import Path
+            Path("talos_perf.log").open("a").write(
+                f"WS_ERROR: {type(e).__name__}: {e}\n"
+            )
             raise
         finally:
-            logger.error("ws_listen_loop_exited")
+            from pathlib import Path
+            Path("talos_perf.log").open("a").write("WS_LISTEN_LOOP_EXITED\n")
             self._ws = None
