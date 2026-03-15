@@ -256,7 +256,7 @@ class ScanScreen(ModalScreen[list[str] | None]):
         ("escape", "cancel", "Cancel"),
         ("space", "toggle_selection", "Toggle"),
         ("enter", "confirm", "Add Selected"),
-        ("a", "toggle_all", "Select All"),
+        ("a", "toggle_all", "Add All"),
     ]
 
     def __init__(
@@ -369,20 +369,9 @@ class ScanScreen(ModalScreen[list[str] | None]):
             table.update_cell(ticker, check_col, "✓")
 
     def action_toggle_all(self) -> None:
-        table = self.query_one("#scan-table", DataTable)
-        check_col = table.ordered_columns[0].key
-        if self._all_selected:
-            # Deselect all
-            self._selected.clear()
-            for ticker in self._row_tickers:
-                table.update_cell(ticker, check_col, "")
-            self._all_selected = False
-        else:
-            # Select all
-            self._selected = set(self._row_tickers)
-            for ticker in self._row_tickers:
-                table.update_cell(ticker, check_col, "✓")
-            self._all_selected = True
+        """Add ALL events immediately."""
+        if self._row_tickers:
+            self.dismiss(list(self._row_tickers))
 
     def action_confirm(self) -> None:
         if self._selected:
