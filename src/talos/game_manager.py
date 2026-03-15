@@ -170,10 +170,10 @@ class GameManager:
         """Set up monitoring for multiple games concurrently.
 
         Defers feed subscriptions and does a single bulk subscribe at the end,
-        reducing WS roundtrips from 2N to 1. Semaphore-limited to avoid
-        overwhelming the API with hundreds of concurrent requests.
+        reducing WS roundtrips from 2N to 1. Semaphore-limited to stay under
+        Kalshi's 20 reads/sec rate limit.
         """
-        sem = asyncio.Semaphore(4)
+        sem = asyncio.Semaphore(10)
 
         async def _add(url: str) -> ArbPair | None:
             async with sem:
