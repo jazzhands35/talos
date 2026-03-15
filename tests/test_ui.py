@@ -72,9 +72,9 @@ class TestOpportunitiesTable:
             # Row 0 should have formatted price data
             row_data = table.get_row_at(0)
             # NO-A=38¢, NO-B=55¢, Edge=6.2¢ (quadratic fee-adjusted)
-            assert "38¢" in str(row_data[1])
-            assert "55¢" in str(row_data[2])
-            assert "6.2" in str(row_data[3])  # fee_edge ≈ 6.2¢
+            assert "38¢" in str(row_data[3])
+            assert "55¢" in str(row_data[4])
+            assert "6.2" in str(row_data[5])  # fee_edge ≈ 6.2¢
 
     async def test_short_event_label_displayed(self) -> None:
         """Table should show short label, not full event ticker."""
@@ -132,7 +132,7 @@ class TestOpportunitiesTable:
             await pilot.pause()
             assert table.row_count == 1  # still visible
             row = table.get_row_at(0)
-            assert "-" in str(row[3])  # fee_edge column shows negative
+            assert "-" in str(row[5])  # fee_edge column shows negative
 
 
 class TestAccountPanel:
@@ -192,19 +192,19 @@ class TestTablePositions:
             row = table.get_row_at(0)
             # Pos-A: 3/5 at fee_adjusted_cost(31) = 31 + 31*69*0.0175/100 = 31.4¢
             # Pos-B: 3/5 at fee_adjusted_cost(67) = 67 + 67*33*0.0175/100 = 67.4¢
-            assert "3/5 31.4" in str(row[8])  # Pos-A with fee-adjusted avg
-            assert "3/5 67.4" in str(row[9])  # Pos-B with fee-adjusted avg
-            assert "8" in str(row[10])  # Q-A column
-            assert "15" in str(row[13])  # Q-B column
-            assert "12.5" in str(row[11])  # CPM-A
-            assert "6.00*" in str(row[14])  # CPM-B (partial)
-            assert "1m" in str(row[12])  # ETA-A (0.64 min rounds to 1m)
-            assert "2m*" in str(row[15])  # ETA-B (2.5 rounds to 2m via banker's rounding, partial)
-            assert "0.02" in str(row[17])  # P&L (locked_profit_cents=2.38, no exposure)
+            assert "3/5 31.4" in str(row[10])  # Pos-A with fee-adjusted avg
+            assert "3/5 67.4" in str(row[11])  # Pos-B with fee-adjusted avg
+            assert "8" in str(row[12])  # Q-A column
+            assert "15" in str(row[15])  # Q-B column
+            assert "12.5" in str(row[13])  # CPM-A
+            assert "6.00*" in str(row[16])  # CPM-B (partial)
+            assert "1m" in str(row[14])  # ETA-A (0.64 min rounds to 1m)
+            assert "2m*" in str(row[17])  # ETA-B (2.5 rounds to 2m via banker's rounding, partial)
+            assert "0.02" in str(row[19])  # P&L (locked_profit_cents=2.38, no exposure)
             # Net/Odds: both scenarios positive → guaranteed profit
             # 3 fills each at 31¢/67¢ (total costs 93/201, fees=0 in test):
             # total_outlay = 294, net = 300 - 294 = 6 → GTD $0.06
-            assert "GTD $0.06" in str(row[18])
+            assert "GTD $0.06" in str(row[20])
 
     async def test_table_shows_odds_without_positions(self) -> None:
         scanner = _make_scanner_with_opportunity()
@@ -214,10 +214,10 @@ class TestTablePositions:
             await pilot.pause()
             table = app.query_one(OpportunitiesTable)
             row = table.get_row_at(0)
-            assert str(row[8]) == "—"  # Pos-A shows dim dash
-            assert str(row[9]) == "—"  # Pos-B shows dim dash
+            assert str(row[10]) == "—"  # Pos-A shows dim dash
+            assert str(row[11]) == "—"  # Pos-B shows dim dash
             # Net/Odds shows per-leg odds only when no positions
-            assert "+160/-124" in str(row[18])
+            assert "+160/-124" in str(row[20])
 
 
 class TestRichTextCells:
@@ -230,8 +230,8 @@ class TestRichTextCells:
             await pilot.pause()
             table = app.query_one(OpportunitiesTable)
             row = table.get_row_at(0)
-            # Pos-A (index 8) should be a dim Rich Text em-dash (no positions loaded)
-            pos_a = row[8]
+            # Pos-A (index 10) should be a dim Rich Text em-dash (no positions loaded)
+            pos_a = row[10]
             assert isinstance(pos_a, RichText)
             assert str(pos_a) == "—"
 
@@ -245,7 +245,7 @@ class TestRichTextCells:
             table = app.query_one(OpportunitiesTable)
             row = table.get_row_at(0)
             # NO-A (index 1) should be right-aligned
-            no_a = row[1]
+            no_a = row[3]
             assert isinstance(no_a, RichText)
             assert no_a.justify == "right"
             assert "38¢" in str(no_a)
@@ -259,7 +259,7 @@ class TestRichTextCells:
             await pilot.pause()
             table = app.query_one(OpportunitiesTable)
             row = table.get_row_at(0)
-            edge = row[3]  # Edge column
+            edge = row[5]  # Edge column
             assert isinstance(edge, RichText)
             # Scanner has positive edge (NO-A=38, NO-B=55, fee_edge≈6.2)
             assert edge.style is not None
@@ -302,7 +302,7 @@ class TestRichTextCells:
             table.refresh_from_scanner(scanner, tracker)
             await pilot.pause()
             row = table.get_row_at(0)
-            q_a = row[10]  # Q-A column
+            q_a = row[12]  # Q-A column
             assert isinstance(q_a, RichText)
             assert "!!" in str(q_a)
 
@@ -343,8 +343,8 @@ class TestRichTextCells:
             app.refresh_opportunities()
             await pilot.pause()
             row = table.get_row_at(0)
-            pos_a = row[8]  # Pos-A: 3 filled (behind — fewer fills)
-            pos_b = row[9]  # Pos-B: 5 filled (ahead)
+            pos_a = row[10]  # Pos-A: 3 filled (behind — fewer fills)
+            pos_b = row[11]  # Pos-B: 5 filled (ahead)
             # Behind side (A) should show yellow styling
             assert isinstance(pos_a, RichText)
             assert isinstance(pos_b, RichText)

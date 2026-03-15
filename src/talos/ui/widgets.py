@@ -73,6 +73,29 @@ def _fmt_odds(no_price: int) -> str:
 
 DIM_DASH = RichText("—", style="dim", justify="right")
 
+# Series prefix -> (Sport abbr, League abbr)
+_SPORT_LEAGUE: dict[str, tuple[str, str]] = {
+    "KXNHLGAME": ("HOC", "NHL"),
+    "KXNBAGAME": ("BKB", "NBA"),
+    "KXMLBGAME": ("BSB", "MLB"),
+    "KXNFLGAME": ("FTB", "NFL"),
+    "KXWNBAGAME": ("BKB", "WNBA"),
+    "KXCFBGAME": ("FTB", "NCAAF"),
+    "KXCBBGAME": ("BKB", "NCAAB"),
+    "KXMLSGAME": ("SOC", "MLS"),
+    "KXEPLGAME": ("SOC", "EPL"),
+    "KXAHLGAME": ("HOC", "AHL"),
+    "KXLOLGAME": ("ESP", "LoL"),
+    "KXCS2GAME": ("ESP", "CS2"),
+    "KXVALGAME": ("ESP", "VAL"),
+    "KXDOTA2GAME": ("ESP", "DOTA"),
+    "KXCODGAME": ("ESP", "COD"),
+    "KXATPMATCH": ("TEN", "ATP"),
+    "KXATPDOUBLES": ("TEN", "ATP"),
+    "KXATPCHALLENGERMATCH": ("TEN", "ATPC"),
+    "KXWTACHALLENGERMATCH": ("TEN", "WTAC"),
+}
+
 
 def _fmt_vol(volume: int) -> RichText:
     """Format 24h volume as compact number."""
@@ -203,13 +226,15 @@ class OpportunitiesTable(DataTable):
     # Column index -> sort key extractor from (opp, positions, volumes, resolver, labels)
     _SORT_KEYS: dict[int, str] = {
         0: "label",      # Event name
-        1: "no_a",       # NO-A price
-        2: "no_b",       # NO-B price
-        3: "fee_edge",   # Edge
-        4: "vol_a",      # V-A (24h volume)
-        5: "vol_b",      # V-B (24h volume)
-        6: "start",      # Date
-        7: "state",      # Game status
+        1: "sport",      # Sport
+        2: "league",     # League
+        3: "no_a",       # NO-A price
+        4: "no_b",       # NO-B price
+        5: "fee_edge",   # Edge
+        6: "vol_a",      # V-A (24h volume)
+        7: "vol_b",      # V-B (24h volume)
+        8: "start",      # Date
+        9: "state",      # Game status
     }
 
     def __init__(self, **kwargs: Any) -> None:
@@ -237,6 +262,8 @@ class OpportunitiesTable(DataTable):
         self.zebra_stripes = True
         r = "right"
         self.add_column("Event")
+        self.add_column("Spt", width=4)
+        self.add_column("Lg", width=5)
         self.add_column(RichText("NO-A", justify=r))
         self.add_column(RichText("NO-B", justify=r))
         self.add_column(RichText("Edge", justify=r))
@@ -289,7 +316,11 @@ class OpportunitiesTable(DataTable):
             return opp.raw_edge  # default sort; reverse=True gives descending
         key_name = self._SORT_KEYS.get(col)
         if key_name == "label":
-            return self._labels.get(opp.event_ticker, opp.event_ticker).lower()
+            return (self._labels.get(opp.event_ticker) or opp.event_ticker).lower()
+        if key_name == "sport" or key_name == "league":
+            prefix = opp.event_ticker.split("-")[0]
+            pair = _SPORT_LEAGUE.get(prefix, ("~", "~"))
+            return pair[0].lower() if key_name == "sport" else pair[1].lower()
         if key_name == "no_a":
             return opp.no_a
         if key_name == "no_b":
@@ -419,13 +450,16 @@ class OpportunitiesTable(DataTable):
                 q_b = RichText(f"!! {q_b}", style=YELLOW, justify="right")
 
         display_name = self._labels.get(opp.event_ticker, opp.event_ticker)
+        prefix = opp.event_ticker.split("-")[0]
+        sport, league = _SPORT_LEAGUE.get(prefix, ("—", "—"))
         vol_a = _fmt_vol(self._volumes_24h.get(opp.ticker_a, 0))
         vol_b = _fmt_vol(self._volumes_24h.get(opp.ticker_b, 0))
         game_status = self._resolver.get(opp.event_ticker) if self._resolver else None
         game_date = _fmt_game_date(game_status.scheduled_start if game_status else None)
         game_col = _fmt_game_status(game_status)
         return (
-            display_name, _fmt_cents(opp.no_a), _fmt_cents(opp.no_b), edge_str,
+            display_name, sport, league,
+            _fmt_cents(opp.no_a), _fmt_cents(opp.no_b), edge_str,
             vol_a, vol_b, game_date, game_col,
             pos_a, pos_b, q_a, cpm_a, eta_a, q_b, cpm_b, eta_b,
             status, pnl, net_odds,
