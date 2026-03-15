@@ -12,4 +12,4 @@ class AutomationConfig:
     staleness_grace_seconds: float = 5.0
     rejection_cooldown_seconds: float = 30.0
     unit_size: int = 10
-    enabled: bool = False
+    enabled: bool = True
