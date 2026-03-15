@@ -93,6 +93,8 @@ class TalosApp(App):
             if self._engine.game_status_resolver is not None:
                 table = self.query_one(OpportunitiesTable)
                 table.set_resolver(self._engine.game_status_resolver)
+            # Auto-accept on by default (24h), press F to toggle off
+            self._start_auto_accept(24.0)
             self._start_feed()
 
     # ── Engine callbacks ──────────────────────────────────────────
