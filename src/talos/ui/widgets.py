@@ -197,6 +197,8 @@ class OpportunitiesTable(DataTable):
         self._sort_col: int | None = None
         self._sort_reverse: bool = True
         self._needs_resort: bool = False
+        self._dirty_events: set[str] = set()  # event tickers with changes since last render
+        self._all_dirty: bool = True  # first render rebuilds everything
 
     def set_resolver(self, resolver: Any) -> None:
         """Set the game status resolver for Date/Game columns."""
@@ -209,6 +211,10 @@ class OpportunitiesTable(DataTable):
     def update_statuses(self, statuses: dict[str, str]) -> None:
         """Store event status strings for all monitored events."""
         self._event_statuses = statuses
+
+    def mark_dirty(self, event_ticker: str) -> None:
+        """Mark an event as needing a table row refresh."""
+        self._dirty_events.add(event_ticker)
 
     _SEP_STYLE = RichStyle(color=SURFACE2)
 
@@ -338,18 +344,28 @@ class OpportunitiesTable(DataTable):
         # Normal refresh: update in place, preserving row order and highlight
         sorted_opps = sorted(all_snaps.values(), key=lambda o: o.raw_edge, reverse=True)
 
+        dirty = self._dirty_events
+        all_dirty = self._all_dirty
+        self._dirty_events = set()
+        self._all_dirty = False
+
         with self.app.batch_update():
             for key in current_keys - new_keys:
                 if key is not None:
                     self.remove_row(key)
             for opp in sorted_opps:
-                row_data = self._build_row(opp, tracker)
-                if opp.event_ticker in current_keys:
+                is_new = opp.event_ticker not in current_keys
+                if is_new:
+                    self.add_row(*self._build_row(opp, tracker), key=opp.event_ticker)
+                elif all_dirty or opp.event_ticker in dirty:
+                    # Only rebuild rows that changed — skip unchanged cells
+                    row_data = self._build_row(opp, tracker)
+                    old_row = self.get_row(opp.event_ticker)
                     for col_idx, value in enumerate(row_data):
+                        if col_idx < len(old_row) and str(old_row[col_idx]) == str(value):
+                            continue
                         col_key = self.ordered_columns[col_idx].key
                         self.update_cell(opp.event_ticker, col_key, value)
-                else:
-                    self.add_row(*row_data, key=opp.event_ticker)
 
         _elapsed = (_time.monotonic() - _t0) * 1000
         if _elapsed > 50:

@@ -80,9 +80,15 @@ def main() -> None:
     game_status_resolver = GameStatusResolver()
 
     # Wire scanner + tracker to book updates
+    _app_ref: list[TalosApp] = []  # populated after app creation
+
     def on_book_update(ticker: str) -> None:
         scanner.scan(ticker)
         tracker.check(ticker)
+        # Mark affected events dirty for table refresh
+        if _app_ref:
+            for pair in scanner._pairs_by_ticker.get(ticker, []):
+                _app_ref[0].mark_event_dirty(pair.event_ticker)
 
     feed.on_book_update = on_book_update
 
@@ -138,6 +144,7 @@ def main() -> None:
     engine.proposal_queue.on_lifecycle = suggestion_log.log
 
     app = TalosApp(engine=engine)
+    _app_ref.append(app)
     app.run()
 
 

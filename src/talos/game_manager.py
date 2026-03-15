@@ -251,6 +251,33 @@ class GameManager:
             self.on_change()
         logger.info("all_games_cleared", count=len(tickers))
 
+    async def refresh_volumes(self) -> None:
+        """Re-fetch 24h volume for all monitored markets, batched by series."""
+        # Group active games by series prefix
+        series_tickers: set[str] = set()
+        for pair in self.active_games:
+            prefix = pair.event_ticker.split("-")[0]
+            series_tickers.add(prefix)
+
+        sem = asyncio.Semaphore(4)
+
+        async def _fetch(series: str) -> list[Event]:
+            async with sem:
+                try:
+                    return await self._rest.get_events(
+                        series_ticker=series, status="open",
+                        with_nested_markets=True, limit=200,
+                    )
+                except Exception:
+                    return []
+
+        results = await asyncio.gather(*(_fetch(s) for s in series_tickers))
+        for batch in results:
+            for event in batch:
+                for m in event.markets:
+                    if m.volume_24h is not None:
+                        self._volumes_24h[m.ticker] = m.volume_24h
+
     async def scan_events(self) -> list[Event]:
         """Discover all open arb-eligible events not already monitored."""
         active_tickers = {p.event_ticker for p in self.active_games}

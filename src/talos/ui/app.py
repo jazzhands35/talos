@@ -44,6 +44,7 @@ class TalosApp(App):
         ("y", "approve_proposal", "Approve"),
         ("n", "reject_proposal", "Reject"),
         ("f", "toggle_auto_accept", "Auto-Accept"),
+        ("p", "show_proposals", "Proposals"),
         ("c", "scan", "Scan"),
         ("o", "open_in_browser", "Open"),
         ("q", "quit", "Quit"),
@@ -70,10 +71,6 @@ class TalosApp(App):
             id="ws-disconnect-banner",
         )
         yield OpportunitiesTable(id="opportunities-table")
-        yield ProposalPanel(
-            self._engine.proposal_queue if self._engine else ProposalQueue(),
-            id="proposal-panel",
-        )
         with Horizontal(id="bottom-panels"):
             yield AccountPanel(id="account-panel")
             yield OrderLog(id="order-log")
@@ -82,7 +79,7 @@ class TalosApp(App):
     def on_mount(self) -> None:
         """Start polling timers and wire engine callbacks."""
         if self._scanner is not None:
-            self.set_interval(1.0, self.refresh_opportunities)
+            self.set_interval(2.0, self.refresh_opportunities)
         if self._engine is not None:
             self.set_interval(10.0, self._poll_balance)
             self.set_interval(30.0, self._poll_account)  # backup sync — WS is primary
@@ -91,6 +88,7 @@ class TalosApp(App):
             self.set_interval(1.0, self._refresh_proposals)
             self.set_interval(1.0, self._auto_accept_tick)
             self.set_interval(3600.0, self._refresh_game_status)
+            self.set_interval(300.0, self._refresh_volumes)
             self._engine.on_notification = self._on_engine_notification
             self._engine.tracker.on_change = self._engine.on_top_of_market_change
             if self._engine.game_status_resolver is not None:
@@ -107,8 +105,7 @@ class TalosApp(App):
         self.notify(message, severity=cast(SeverityLevel, severity), markup=False)
 
     def _refresh_proposals(self) -> None:
-        """Update the proposal panel from queue state."""
-        self.query_one(ProposalPanel).refresh_proposals()
+        """Update subtitle and WS disconnect banner."""
         # WS disconnect: show red banner and title bar warning
         banner = self.query_one("#ws-disconnect-banner", Static)
         ws_dead = self._engine is not None and not self._engine.ws_connected
@@ -213,6 +210,19 @@ class TalosApp(App):
             "scanner_opportunities": opportunities,
         }
 
+    def action_show_proposals(self) -> None:
+        """Show pending proposals in a popup."""
+        if self._engine is None:
+            return
+        pending = self._engine.proposal_queue.pending()
+        if not pending:
+            self.notify("No pending proposals", severity="information")
+            return
+        lines = [f"{len(pending)} pending proposal(s):"]
+        for p in pending[:10]:
+            lines.append(f"  {p.summary}")
+        self.notify("\n".join(lines), severity="information")
+
     def on_proposal_panel_approved(self, event: ProposalPanel.Approved) -> None:
         """Handle operator approving a proposal."""
         self._execute_approval(event.key)
@@ -221,13 +231,11 @@ class TalosApp(App):
     async def _execute_approval(self, key: ProposalKey) -> None:
         if self._engine is not None:
             await self._engine.approve_proposal(key)
-        self.query_one(ProposalPanel).refresh_proposals()
 
     def on_proposal_panel_rejected(self, event: ProposalPanel.Rejected) -> None:
         """Handle operator rejecting a proposal."""
         if self._engine is not None:
             self._engine.reject_proposal(event.key)
-        self.query_one(ProposalPanel).refresh_proposals()
 
     # ── Polling delegations ───────────────────────────────────────
 
@@ -258,7 +266,9 @@ class TalosApp(App):
             await self._engine.refresh_account()
         finally:
             self._poll_in_progress = False
-        self.query_one(OpportunitiesTable).update_positions(self._engine.position_summaries)
+        table = self.query_one(OpportunitiesTable)
+        table.update_positions(self._engine.position_summaries)
+        table._all_dirty = True  # position data changed, rebuild all rows
         self.query_one(OrderLog).update_orders(self._engine.order_data)
 
     @work(thread=False)
@@ -274,13 +284,28 @@ class TalosApp(App):
             await self._engine.refresh_trades()
 
     @work(thread=False)
+    async def _refresh_volumes(self) -> None:
+        if self._engine is not None:
+            await self._engine.game_manager.refresh_volumes()
+
+    @work(thread=False)
     async def _refresh_game_status(self) -> None:
         if self._engine is not None:
             await self._engine.refresh_game_status()
 
+    def mark_event_dirty(self, event_ticker: str) -> None:
+        """Mark an event for table refresh on next cycle."""
+        self.query_one(OpportunitiesTable).mark_dirty(event_ticker)
+
     def refresh_opportunities(self) -> None:
-        """Update the opportunities table from scanner state."""
+        """Update the opportunities table from scanner state.
+
+        In production, dirty tracking limits which rows rebuild.
+        In test mode (no engine), mark all dirty each cycle.
+        """
         table = self.query_one(OpportunitiesTable)
+        if self._engine is None:
+            table._all_dirty = True  # test mode — no WS dirty tracking
         if self._engine is not None:
             table.update_labels(self._engine.game_manager.labels)
             table.update_volumes(self._engine.game_manager.volumes_24h)
