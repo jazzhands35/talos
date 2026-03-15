@@ -177,7 +177,7 @@ class TestPolling:
     async def test_refresh_account_updates_balance(self):
         engine, rest = _engine_with_pair()
         rest.get_balance.return_value = Balance(balance=50000, portfolio_value=60000)
-        rest.get_all_orders.return_value = []
+        rest.get_all_orders.side_effect = [[], []]
         rest.get_queue_positions.return_value = {}
 
         await engine.refresh_account()
@@ -189,12 +189,12 @@ class TestPolling:
     async def test_refresh_account_fetches_all_orders(self):
         engine, rest = _engine_with_pair()
         rest.get_balance.return_value = Balance(balance=1000, portfolio_value=1000)
-        rest.get_all_orders.return_value = []
+        rest.get_all_orders.side_effect = [[], []]
         rest.get_queue_positions.return_value = {}
 
         await engine.refresh_account()
 
-        rest.get_all_orders.assert_called_once()
+        assert rest.get_all_orders.call_count == 2  # resting + executed
 
     @pytest.mark.asyncio
     async def test_refresh_account_stores_orders(self):
@@ -203,7 +203,8 @@ class TestPolling:
             _make_order("TK-A", order_id="ord-a", fill_count=5, remaining_count=5),
         ]
         rest.get_balance.return_value = Balance(balance=1000, portfolio_value=1000)
-        rest.get_all_orders.return_value = orders
+        # First call (resting) returns the order, second call (executed) returns empty
+        rest.get_all_orders.side_effect = [orders, []]
         rest.get_queue_positions.return_value = {}
 
         await engine.refresh_account()
@@ -226,7 +227,7 @@ class TestPolling:
             _make_order("TK-B", order_id="ord-b", fill_count=5, remaining_count=5, no_price=47),
         ]
         rest.get_balance.return_value = Balance(balance=1000, portfolio_value=1000)
-        rest.get_all_orders.return_value = orders
+        rest.get_all_orders.side_effect = [orders, []]
         rest.get_queue_positions.return_value = {}
 
         await engine.refresh_account()
@@ -243,7 +244,7 @@ class TestPolling:
             _make_order("TK-A", order_id="ord-a", fill_count=3, remaining_count=7),
         ]
         rest.get_balance.return_value = Balance(balance=1000, portfolio_value=1000)
-        rest.get_all_orders.return_value = orders
+        rest.get_all_orders.side_effect = [orders, []]
         rest.get_queue_positions.return_value = {}
 
         await engine.refresh_account()
@@ -260,7 +261,7 @@ class TestPolling:
             _make_order("TK-A", order_id="ord-a", fill_count=0, remaining_count=10),
         ]
         rest.get_balance.return_value = Balance(balance=1000, portfolio_value=1000)
-        rest.get_all_orders.return_value = orders
+        rest.get_all_orders.side_effect = [orders, []]
         rest.get_queue_positions.return_value = {"ord-a": 50}
         await engine.refresh_account()
 
@@ -294,8 +295,9 @@ class TestPolling:
         engine._queue_cache["old-order"] = 10
 
         rest.get_balance.return_value = Balance(balance=1000, portfolio_value=1000)
-        rest.get_all_orders.return_value = [
-            _make_order("TK-A", order_id="new-order", remaining_count=10),
+        rest.get_all_orders.side_effect = [
+            [_make_order("TK-A", order_id="new-order", remaining_count=10)],
+            [],
         ]
         rest.get_queue_positions.return_value = {}
 
@@ -311,7 +313,7 @@ class TestPolling:
             _make_order("TK-A", order_id="ord-a", fill_count=0, remaining_count=10, no_price=45),
         ]
         rest.get_balance.return_value = Balance(balance=1000, portfolio_value=1000)
-        rest.get_all_orders.return_value = orders
+        rest.get_all_orders.side_effect = [orders, []]
         rest.get_queue_positions.return_value = {}
 
         await engine.refresh_account()
@@ -327,7 +329,7 @@ class TestPolling:
         engine, rest = _engine_with_pair()
         # Orders API returns nothing (orders archived)
         rest.get_balance.return_value = Balance(balance=1000, portfolio_value=1000)
-        rest.get_all_orders.return_value = []
+        rest.get_all_orders.side_effect = [[], []]
         rest.get_queue_positions.return_value = {}
         # Positions API shows actual holdings
         rest.get_positions.return_value = [
@@ -347,7 +349,7 @@ class TestPolling:
         """If positions API fails, sync_from_orders still works."""
         engine, rest = _engine_with_pair()
         rest.get_balance.return_value = Balance(balance=1000, portfolio_value=1000)
-        rest.get_all_orders.return_value = []
+        rest.get_all_orders.side_effect = [[], []]
         rest.get_queue_positions.return_value = {}
         rest.get_positions.side_effect = RuntimeError("API error")
 
@@ -781,7 +783,7 @@ class TestOpportunityProposerIntegration:
         """refresh_account calls evaluate_opportunities at end of cycle."""
         engine, rest = _engine_with_automation()
         rest.get_balance.return_value = Balance(balance=1000, portfolio_value=1000)
-        rest.get_all_orders.return_value = []
+        rest.get_all_orders.side_effect = [[], []]
         rest.get_queue_positions.return_value = {}
 
         await engine.refresh_account()
@@ -824,15 +826,15 @@ class TestCheckImbalances:
         key = engine.proposal_queue.pending()[0].key
 
         rest.cancel_order = AsyncMock()
-        # Verification sync happens after step 1
-        rest.get_all_orders = AsyncMock(return_value=[])
+        # Verification sync happens after step 1 (per-ticker fetches)
+        rest.get_orders = AsyncMock(return_value=[])
         rest.get_positions = AsyncMock(return_value=[])
 
         await engine.approve_proposal(key)
 
         rest.cancel_order.assert_called_once_with("ord-a")
         # Post-action verification did run
-        rest.get_all_orders.assert_called_once()
+        assert rest.get_orders.call_count == 2  # one per ticker
         rest.get_positions.assert_called_once()
 
     @pytest.mark.asyncio
@@ -850,7 +852,7 @@ class TestCheckImbalances:
 
         rest.cancel_order = AsyncMock()
         # Verify fails — API unreachable after action
-        rest.get_all_orders = AsyncMock(side_effect=RuntimeError("API down"))
+        rest.get_orders = AsyncMock(side_effect=RuntimeError("API down"))
 
         notifications: list[tuple[str, str]] = []
         engine.on_notification = lambda msg, sev: notifications.append((msg, sev))
@@ -1102,7 +1104,7 @@ class TestStaleBookRecovery:
         books.get_book("TK-A").stale = True
 
         rest.get_balance.return_value = Balance(balance=1000, portfolio_value=1000)
-        rest.get_all_orders.return_value = []
+        rest.get_all_orders.side_effect = [[], []]
         rest.get_queue_positions.return_value = {}
 
         await engine.refresh_account()

@@ -298,7 +298,11 @@ class TradingEngine:
             self._portfolio_value = balance.portfolio_value
 
             _t2 = _time.monotonic()
-            orders = await self._rest.get_all_orders()
+            # Fetch only resting/executed orders — not all 1800+ historical.
+            # Fill data comes from the positions API (below).
+            orders = await self._rest.get_all_orders(status="resting")
+            executed = await self._rest.get_all_orders(status="executed")
+            orders.extend(executed)
             _t3 = _time.monotonic()
             self._orders_cache = orders
 
@@ -1157,7 +1161,9 @@ class TradingEngine:
         if pair is None:
             return
         try:
-            orders = await self._rest.get_all_orders()
+            orders_a = await self._rest.get_orders(ticker=pair.ticker_a, limit=200)
+            orders_b = await self._rest.get_orders(ticker=pair.ticker_b, limit=200)
+            orders = orders_a + orders_b
             ledger = self._adjuster.get_ledger(event_ticker)
             ledger.sync_from_orders(orders, ticker_a=pair.ticker_a, ticker_b=pair.ticker_b)
             positions = await self._rest.get_positions(limit=200)

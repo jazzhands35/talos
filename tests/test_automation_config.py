@@ -24,9 +24,9 @@ class TestAutomationConfigDefaults:
         cfg = AutomationConfig()
         assert cfg.unit_size == 10
 
-    def test_enabled_off_by_default(self) -> None:
+    def test_enabled_on_by_default(self) -> None:
         cfg = AutomationConfig()
-        assert cfg.enabled is False
+        assert cfg.enabled is True
 
 
 class TestAutomationConfigCustom:
