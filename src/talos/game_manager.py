@@ -10,11 +10,21 @@ import structlog
 
 from talos.errors import KalshiAPIError
 from talos.market_feed import MarketFeed
+from talos.models.market import Event
 from talos.models.strategy import ArbPair
 from talos.rest_client import KalshiRESTClient
 from talos.scanner import ArbitrageScanner
 
 logger = structlog.get_logger()
+
+SCAN_SERIES = [
+    "KXNHLGAME", "KXNBAGAME", "KXMLBGAME", "KXNFLGAME", "KXWNBAGAME",
+    "KXCFBGAME", "KXCBBGAME", "KXMLSGAME", "KXEPLGAME",
+    "KXAHLGAME",
+    "KXLOLGAME", "KXCS2GAME", "KXVALGAME", "KXDOTA2GAME", "KXCODGAME",
+    "KXATPMATCH", "KXWTAMATCH", "KXATPCHALLENGERMATCH", "KXWTACHALLENGERMATCH",
+    "KXATPDOUBLES",
+]
 
 
 def parse_kalshi_url(url_or_ticker: str) -> str:
@@ -201,6 +211,36 @@ class GameManager:
         if self.on_change:
             self.on_change()
         logger.info("all_games_cleared", count=len(tickers))
+
+    async def scan_events(self) -> list[Event]:
+        """Discover all open arb-eligible events not already monitored."""
+        active_tickers = {p.event_ticker for p in self.active_games}
+        sem = asyncio.Semaphore(4)
+
+        async def fetch_series(series: str) -> list[Event]:
+            async with sem:
+                try:
+                    return await self._rest.get_events(
+                        series_ticker=series, status="open",
+                        with_nested_markets=True, limit=200,
+                    )
+                except Exception:
+                    logger.warning("scan_series_failed", series=series, exc_info=True)
+                    return []
+
+        all_results = await asyncio.gather(*(fetch_series(s) for s in SCAN_SERIES))
+
+        events: list[Event] = []
+        for batch in all_results:
+            for event in batch:
+                if event.event_ticker in active_tickers:
+                    continue
+                if len(event.markets) != 2:
+                    continue
+                if all(m.status in ("settled", "determined") for m in event.markets):
+                    continue
+                events.append(event)
+        return events
 
     @property
     def active_games(self) -> list[ArbPair]:
