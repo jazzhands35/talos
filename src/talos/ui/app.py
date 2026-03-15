@@ -60,6 +60,7 @@ class TalosApp(App):
         # Test mode: scanner-only for table tests without a full engine
         self._scanner = scanner or (engine.scanner if engine else None)
         self._auto_accept = AutoAcceptState()
+        self._poll_in_progress = False
         self._auto_accept_logger: AutoAcceptLogger | None = None
 
     def compose(self) -> ComposeResult:
@@ -81,7 +82,7 @@ class TalosApp(App):
     def on_mount(self) -> None:
         """Start polling timers and wire engine callbacks."""
         if self._scanner is not None:
-            self.set_interval(0.5, self.refresh_opportunities)
+            self.set_interval(1.0, self.refresh_opportunities)
         if self._engine is not None:
             self.set_interval(10.0, self._poll_account)
             self.set_interval(3.0, self._poll_queue)
@@ -238,7 +239,13 @@ class TalosApp(App):
     async def _poll_account(self) -> None:
         if self._engine is None:
             return
-        await self._engine.refresh_account()
+        if self._poll_in_progress:
+            return  # Previous poll still running — skip this cycle
+        self._poll_in_progress = True
+        try:
+            await self._engine.refresh_account()
+        finally:
+            self._poll_in_progress = False
         self.query_one(AccountPanel).update_balance(
             self._engine.balance, self._engine.portfolio_value
         )
