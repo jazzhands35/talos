@@ -91,13 +91,24 @@ class MarketFeed:
         logger.info("market_feed_subscribe", ticker=ticker)
 
     async def subscribe_bulk(self, tickers: list[str]) -> None:
-        """Subscribe to orderbook updates for multiple tickers in one command."""
+        """Subscribe to orderbook updates for multiple tickers in batches.
+
+        Subscribing 292 tickers at once triggers 292 orderbook snapshots
+        back-to-back, which freezes the event loop during processing.
+        Batching with yields lets the UI stay responsive.
+        """
+        import asyncio
+
         new_tickers = [t for t in tickers if t not in self._subscribed_tickers]
         if not new_tickers:
             return
-        await self._ws.subscribe(_ORDERBOOK_CHANNEL, market_tickers=new_tickers)
-        self._subscribed_tickers.update(new_tickers)
-        logger.info("market_feed_subscribe_bulk", count=len(new_tickers), tickers=new_tickers)
+        batch_size = 20
+        for i in range(0, len(new_tickers), batch_size):
+            batch = new_tickers[i : i + batch_size]
+            await self._ws.subscribe(_ORDERBOOK_CHANNEL, market_tickers=batch)
+            self._subscribed_tickers.update(batch)
+            await asyncio.sleep(0.1)  # yield to event loop between batches
+        logger.info("market_feed_subscribe_bulk", count=len(new_tickers))
 
     async def unsubscribe(self, ticker: str) -> None:
         """Unsubscribe and remove from book manager."""
