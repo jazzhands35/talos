@@ -34,7 +34,11 @@ SCAN_SERIES = [
     # MMA / Boxing
     "KXUFCFIGHT", "KXBOXING",
     # Cricket
-    "KXT20MATCH", "KXIPL",
+    "KXT20MATCH", "KXIPL", "KXCRICKETODIMATCH",
+    # Rugby
+    "KXRUGBYNRLMATCH",
+    # Aussie Rules
+    "KXAFLGAME",
     # Motorsport (tournament — works at finals)
     "KXF1", "KXNASCARRACE", "KXINDYCARRACE",
     # Golf (tournament — works at finals)
