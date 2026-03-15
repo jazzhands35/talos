@@ -235,12 +235,14 @@ class TradingEngine:
             if self._initial_games_full:
                 _perf.write(f"STARTUP: fast-restoring {len(self._initial_games_full)} games from cache...\n")
                 _perf.flush()
+                cached_tickers = set()
                 pairs = []
                 for data in self._initial_games_full:
                     try:
                         pair = self._game_manager.restore_game(data)
                         self._adjuster.add_event(pair)
                         pairs.append(pair)
+                        cached_tickers.add(pair.event_ticker)
                     except Exception:
                         logger.warning("restore_game_failed", event=data.get("event_ticker"))
                 # Bulk subscribe all market tickers at once
@@ -250,7 +252,8 @@ class TradingEngine:
                 if pairs:
                     self._notify(f"Loaded {len(pairs)} game(s)")
                 self._initial_games_full = None
-                all_tickers = []  # skip REST fallback
+                # Only REST-fetch discovered events not already in cache
+                all_tickers = [t for t in all_tickers if t not in cached_tickers]
 
             if all_tickers:
                 _perf.write(f"STARTUP: adding {len(all_tickers)} games via REST...\n")
