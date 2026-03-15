@@ -175,11 +175,16 @@ class GameManager:
         """
         sem = asyncio.Semaphore(4)
 
-        async def _add(url: str) -> ArbPair:
+        async def _add(url: str) -> ArbPair | None:
             async with sem:
-                return await self.add_game(url, subscribe=False)
+                try:
+                    return await self.add_game(url, subscribe=False)
+                except Exception:
+                    logger.warning("add_game_failed", url=url, exc_info=True)
+                    return None
 
-        pairs = list(await asyncio.gather(*(_add(url) for url in urls)))
+        results = await asyncio.gather(*(_add(url) for url in urls))
+        pairs = [p for p in results if p is not None]
         tickers = [t for p in pairs for t in (p.ticker_a, p.ticker_b)]
         if tickers:
             await self._feed.subscribe_bulk(tickers)

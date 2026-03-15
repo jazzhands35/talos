@@ -224,16 +224,11 @@ class TradingEngine:
             all_tickers = list(dict.fromkeys(discovered + self._initial_games))
 
             if all_tickers:
-                restored = 0
-                for ticker in all_tickers:
-                    try:
-                        pair = await self._game_manager.add_game(ticker)
-                        self._adjuster.add_event(pair)
-                        restored += 1
-                    except Exception:
-                        logger.warning("restore_game_failed", game=ticker)
-                if restored:
-                    self._notify(f"Loaded {restored} game(s)")
+                pairs = await self._game_manager.add_games(all_tickers)
+                for pair in pairs:
+                    self._adjuster.add_event(pair)
+                if pairs:
+                    self._notify(f"Loaded {len(pairs)} game(s)")
                 self._initial_games.clear()
 
             # Resolve game status for all loaded games (batched by source)
