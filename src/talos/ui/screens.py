@@ -276,9 +276,10 @@ class ScanScreen(ModalScreen[list[str] | None]):
         count = len(self._events)
         with Vertical(id="scan-dialog"):
             yield Label(
-                f"Scan Results — {count} events found "
-                "[Space=Toggle Enter=Add Esc=Cancel]",
+                f"Scan Results — {count} events found  "
+                "Space:Toggle  Enter:Add  Esc:Cancel",
                 classes="modal-title",
+                markup=False,
             )
             yield DataTable(id="scan-table")
 
