@@ -162,6 +162,43 @@ Logged when: lifecycle feed fires `on_determined` or `on_settled`
 | `settlement_value` | INTEGER | Settlement price in cents |
 | `total_pnl` | INTEGER | P&L for this event in cents (NULL if not calculable) |
 
+### `event_outcomes` — one row per event when it completes
+
+Logged when: both markets in an event have been determined/settled. Records the full position, P&L, and trap analysis for the event.
+
+| Column | Type | Description |
+|--------|------|-------------|
+| `event_ticker` | TEXT | Kalshi event ticker |
+| `sport` | TEXT | Sport abbreviation |
+| `league` | TEXT | League abbreviation |
+| `filled_a` | INTEGER | Total contracts filled on leg A |
+| `filled_b` | INTEGER | Total contracts filled on leg B |
+| `avg_price_a` | REAL | Average NO fill price on A in cents |
+| `avg_price_b` | REAL | Average NO fill price on B in cents |
+| `total_cost_a` | INTEGER | Total cost on A in cents |
+| `total_cost_b` | INTEGER | Total cost on B in cents |
+| `total_fees_a` | INTEGER | Total fees on A in cents |
+| `total_fees_b` | INTEGER | Total fees on B in cents |
+| `result_a` | TEXT | "yes" or "no" — which side won on A |
+| `result_b` | TEXT | "yes" or "no" — which side won on B |
+| `revenue` | INTEGER | Settlement payout in cents |
+| `total_pnl` | INTEGER | Net P&L in cents (revenue - costs - fees) |
+| `trapped` | INTEGER | 1 if filled_a != filled_b at settlement, 0 if balanced |
+| `trap_side` | TEXT | Which side was over-exposed: "A", "B", or NULL if balanced |
+| `trap_delta` | INTEGER | abs(filled_a - filled_b) — size of the imbalance |
+| `trap_loss` | INTEGER | P&L attributable to the imbalance in cents (NULL if balanced) |
+| `game_state_at_fill` | TEXT | Was the game "pre", "live", or "post" when last fill happened |
+| `time_to_start` | REAL | Seconds between first order and game start (NULL if unknown) |
+| `fill_duration` | REAL | Seconds between first fill and last fill |
+
+**Trap analysis fields explained:**
+- `trapped=1` means filled_a != filled_b at settlement — naked directional exposure
+- `trap_side` tells you which side was over-exposed (had more fills than the other)
+- `trap_delta` is how many extra contracts were on the exposed side
+- `trap_loss` isolates the P&L impact of the imbalance vs what a balanced position would have earned
+- `game_state_at_fill` helps correlate traps with game timing (pre-game traps vs live traps)
+- `fill_duration` shows how long between first and last fill — fast fills are less likely to get trapped
+
 ## Architecture
 
 ### DataCollector class
@@ -175,6 +212,7 @@ class DataCollector:
     def log_fill(self, event_ticker, fill_msg, queue_position=None, order_placed_at=None) -> None: ...
     def log_market_snapshots(self, scanner, positions, statuses, tracker, resolver) -> None: ...
     def log_settlement(self, event_ticker, ticker, event_type, result, settlement_value, total_pnl=None) -> None: ...
+    def log_event_outcome(self, event_ticker, ledger, results, resolver=None) -> None: ...
     def close(self) -> None: ...
 ```
 
@@ -192,7 +230,7 @@ class DataCollector:
   - `_on_order_update()` → `collector.log_order()`
   - `_on_fill()` → `collector.log_fill()`
   - `_on_market_determined()` → `collector.log_settlement()`
-  - `_on_market_settled()` → `collector.log_settlement()`
+  - `_on_market_settled()` → `collector.log_settlement()` + `collector.log_event_outcome()` (when both legs settled)
 
 - **App:**
   - `_run_scan()` → `collector.log_scan()`
@@ -203,6 +241,7 @@ class DataCollector:
 
 - Unit test: create DataCollector with temp DB, call each log method, verify rows inserted
 - Schema test: verify all tables exist after init
+- Trap detection test: verify `trapped`, `trap_side`, `trap_delta` are computed correctly for balanced and imbalanced positions
 - No integration tests needed — collector is pure I/O, no business logic
 
 ## Out of Scope
