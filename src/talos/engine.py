@@ -112,6 +112,7 @@ class TradingEngine:
         self._paused_markets: set[str] = set()
         self._ws_connected: bool = False
         self._settled_markets: dict[str, dict[str, str]] = {}  # event_ticker -> {ticker: result}
+        self._order_placed_at: dict[str, float] = {}  # order_id -> monotonic timestamp
 
         # Wire portfolio feed callbacks
         if self._portfolio_feed is not None:
@@ -648,6 +649,10 @@ class TradingEngine:
                 if msg.market_ticker in (pair.ticker_a, pair.ticker_b):
                     event_ticker = pair.event_ticker
                     break
+            import time as _ft
+            placed_at = self._order_placed_at.get(msg.order_id)
+            time_since = _ft.monotonic() - placed_at if placed_at else None
+            qp = self._queue_cache.get(msg.order_id)
             self._data_collector.log_fill(
                 event_ticker=event_ticker,
                 trade_id=msg.trade_id,
@@ -659,6 +664,8 @@ class TradingEngine:
                 fee_cost=msg.fee_cost if hasattr(msg, "fee_cost") else 0,
                 is_taker=msg.is_taker,
                 post_position=msg.post_position,
+                queue_position=qp,
+                time_since_order=time_since,
             )
 
     # ── Lifecycle event handlers ────────────────────────────────
@@ -1197,6 +1204,11 @@ class TradingEngine:
                 ledger.record_placement(
                     Side.B, order_b.order_id, order_b.remaining_count, bid.no_b,
                 )
+            # Track placement time for fill latency calculation
+            import time as _pt
+            _now = _pt.monotonic()
+            self._order_placed_at[order_a.order_id] = _now
+            self._order_placed_at[order_b.order_id] = _now
             # Add to orders cache so WS handler can match future updates
             self._orders_cache.extend([order_a, order_b])
             # Log to data collector
