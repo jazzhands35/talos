@@ -24,7 +24,7 @@ class KalshiRESTClient:
     def __init__(self, auth: KalshiAuth, config: KalshiConfig) -> None:
         self._auth = auth
         self._base_url = config.rest_base_url
-        self._http = httpx.AsyncClient()
+        self._http = httpx.AsyncClient(timeout=httpx.Timeout(15.0))
 
     async def close(self) -> None:
         await self._http.aclose()

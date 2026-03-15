@@ -297,15 +297,10 @@ class KalshiWSClient:
             raise RuntimeError(msg)
 
         try:
-            import asyncio
-            _msg_count = 0
             async for raw_msg in self._ws:
                 data = json.loads(raw_msg)
                 logger.debug("ws_message", type=data.get("type"), sid=data.get("sid"))
                 await self._dispatch(data)
-                _msg_count += 1
-                if _msg_count % 20 == 0:
-                    await asyncio.sleep(0)  # yield to event loop for UI
         except websockets.ConnectionClosed as e:
             from pathlib import Path
             Path("talos_perf.log").open("a").write(

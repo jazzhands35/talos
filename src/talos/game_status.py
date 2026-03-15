@@ -122,7 +122,7 @@ class EspnProvider:
     ) -> list[ExternalGame]:
         url = f"{self.BASE_URL}/{sport}/{league}/scoreboard"
         try:
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(10.0)) as client:
                 resp = await client.get(url, params={"dates": game_date})
                 resp.raise_for_status()
                 return self._parse_response(resp.json())
@@ -187,7 +187,7 @@ class OddsApiProvider:
 
         url = f"{self.BASE_URL}/{league}/scores/"
         try:
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(10.0)) as client:
                 resp = await client.get(
                     url, params={"apiKey": api_key, "daysFrom": "1"}
                 )
@@ -279,7 +279,7 @@ class PandaScoreProvider:
 
         url = f"{self.BASE_URL}/{sport}/matches"
         try:
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(10.0)) as client:
                 resp = await client.get(
                     url,
                     params={
