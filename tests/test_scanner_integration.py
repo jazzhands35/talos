@@ -24,7 +24,7 @@ def _make_event(
     event_ticker: str,
     *,
     num_markets: int = 2,
-    market_status: str = "open",
+    market_status: str = "active",
 ) -> Event:
     markets = [
         _make_market(f"{event_ticker}-M{i}", status=market_status)
@@ -102,7 +102,7 @@ class TestScanEvents:
     async def test_scan_excludes_settled_events(self, gm: GameManager) -> None:
         settled = _make_event("EVT-SETTLED", market_status="settled")
         determined = _make_event("EVT-DET", market_status="determined")
-        active = _make_event("EVT-ACTIVE", market_status="open")
+        active = _make_event("EVT-ACTIVE", market_status="active")
 
         gm._rest.get_events = AsyncMock(
             return_value=[settled, determined, active],

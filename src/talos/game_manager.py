@@ -24,6 +24,8 @@ SCAN_SERIES = [
     "KXLOLGAME", "KXCS2GAME", "KXVALGAME", "KXDOTA2GAME", "KXCODGAME",
     "KXATPMATCH", "KXWTAMATCH", "KXATPCHALLENGERMATCH", "KXWTACHALLENGERMATCH",
     "KXATPDOUBLES",
+    # Tournament winner (only shows when down to 2 active markets / finals)
+    "KXIWMEN", "KXIWWMN",
 ]
 
 
@@ -86,14 +88,19 @@ class GameManager:
             market = await self._rest.get_market(ticker)
             event = await self._rest.get_event(market.event_ticker, with_nested_markets=True)
 
-        if len(event.markets) != 2:
-            raise ValueError(f"Event {ticker} has {len(event.markets)} markets, expected exactly 2")
+        # Filter to active markets only (tournament events have many finalized markets)
+        active_markets = [m for m in event.markets if m.status == "active"]
+        if len(active_markets) != 2:
+            raise ValueError(
+                f"Event {ticker} has {len(active_markets)} active markets "
+                f"({len(event.markets)} total), expected exactly 2"
+            )
 
-        ticker_a = event.markets[0].ticker
-        ticker_b = event.markets[1].ticker
+        ticker_a = active_markets[0].ticker
+        ticker_b = active_markets[1].ticker
 
-        # Extract earliest close_time from the two markets
-        close_times = [m.close_time for m in event.markets if m.close_time]
+        # Extract earliest close_time from the active markets
+        close_times = [m.close_time for m in active_markets if m.close_time]
         close_time = min(close_times) if close_times else None
 
         # Fetch series for fee metadata (non-critical — default if it fails)
@@ -140,8 +147,8 @@ class GameManager:
         # Store raw sub_title for game status resolver
         self._subtitles[event.event_ticker] = event.sub_title
 
-        # Store 24h volume per market ticker
-        for m in event.markets:
+        # Store 24h volume per active market ticker
+        for m in active_markets:
             self._volumes_24h[m.ticker] = m.volume_24h or 0
 
         # Build short display label from sub_title
@@ -301,9 +308,8 @@ class GameManager:
             for event in batch:
                 if event.event_ticker in active_tickers:
                     continue
-                if len(event.markets) != 2:
-                    continue
-                if all(m.status in ("settled", "determined") for m in event.markets):
+                active_mkts = [m for m in event.markets if m.status == "active"]
+                if len(active_mkts) != 2:
                     continue
                 events.append(event)
         return events

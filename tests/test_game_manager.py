@@ -77,7 +77,7 @@ class TestGameManager:
 
     def _make_event(self, event_ticker: str, tickers: list[str]) -> Event:
         markets = [
-            Market(ticker=t, event_ticker=event_ticker, title=f"Team {i}", status="open")
+            Market(ticker=t, event_ticker=event_ticker, title=f"Team {i}", status="active")
             for i, t in enumerate(tickers)
         ]
         return Event(

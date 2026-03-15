@@ -36,6 +36,8 @@ _SPORT_LEAGUE: dict[str, tuple[str, str]] = {
     "KXATPCHALLENGERMATCH": ("TEN", "ATPC"),
     "KXWTACHALLENGERMATCH": ("TEN", "WTAC"),
     "KXWTAMATCH": ("TEN", "WTA"),
+    "KXIWMEN": ("TEN", "IW-M"),
+    "KXIWWMN": ("TEN", "IW-W"),
 }
 
 _PT = ZoneInfo("America/Los_Angeles")
