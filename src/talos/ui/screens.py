@@ -52,6 +52,12 @@ _SPORT_LEAGUE: dict[str, tuple[str, str]] = {
     "KXKLEAGUEGAME": ("SOC", "KLG"),
     "KXUFCFIGHT": ("MMA", "UFC"),
     "KXBOXING": ("BOX", "BOX"),
+    "KXT20MATCH": ("CRK", "T20"),
+    "KXIPL": ("CRK", "IPL"),
+    "KXF1": ("MOT", "F1"),
+    "KXNASCARRACE": ("MOT", "NASC"),
+    "KXINDYCARRACE": ("MOT", "INDY"),
+    "KXPGATOUR": ("GLF", "PGA"),
     "KXIWMEN": ("TEN", "IW-M"),
     "KXIWWMN": ("TEN", "IW-W"),
 }

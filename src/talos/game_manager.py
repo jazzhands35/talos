@@ -33,6 +33,12 @@ SCAN_SERIES = [
     "KXEUROLEAGUEGAME", "KXNBLGAME", "KXBBLGAME", "KXCBAGAME", "KXKBLGAME",
     # MMA / Boxing
     "KXUFCFIGHT", "KXBOXING",
+    # Cricket
+    "KXT20MATCH", "KXIPL",
+    # Motorsport (tournament — works at finals)
+    "KXF1", "KXNASCARRACE", "KXINDYCARRACE",
+    # Golf (tournament — works at finals)
+    "KXPGATOUR",
     # Tournament winner (only shows when down to 2 active markets / finals)
     "KXIWMEN", "KXIWWMN",
 ]
