@@ -23,7 +23,6 @@ from talos.models.strategy import BidConfirmation
 from talos.proposal_queue import ProposalQueue
 from talos.scanner import ArbitrageScanner
 from talos.ui.proposal_panel import ProposalPanel
-from talos.game_status import GameStatus
 from talos.ui.screens import AddGamesScreen, AutoAcceptScreen, BidScreen, ScanScreen, UnitSizeScreen
 from talos.ui.theme import APP_CSS
 from talos.ui.widgets import AccountPanel, OpportunitiesTable, OrderLog
@@ -297,22 +296,17 @@ class TalosApp(App):
         if self._engine is None:
             return
         self.notify("Scanning for events...")
-        events = await self._engine.game_manager.scan_events()
+        try:
+            events = await self._engine.game_manager.scan_events()
+        except Exception as e:
+            self.notify(f"Scan failed: {e}", severity="error")
+            return
         if not events:
             self.notify("No new events found", severity="information")
             return
 
-        statuses: dict[str, GameStatus] = {}
-        resolver = self._engine.game_status_resolver
-        if resolver is not None:
-            batch = [(e.event_ticker, e.sub_title or "") for e in events]
-            await resolver.resolve_batch(batch)
-            for e in events:
-                gs = resolver.get(e.event_ticker)
-                if gs is not None:
-                    statuses[e.event_ticker] = gs
-
-        selected = await self.push_screen_wait(ScanScreen(events, statuses))
+        self.notify(f"Found {len(events)} events")
+        selected = await self.push_screen_wait(ScanScreen(events))
         if selected and self._engine is not None:
             await self._engine.add_games(selected)
             self.notify(f"Added {len(selected)} event(s)")

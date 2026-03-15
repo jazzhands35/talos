@@ -94,6 +94,7 @@ _SPORT_LEAGUE: dict[str, tuple[str, str]] = {
     "KXATPDOUBLES": ("TEN", "ATP"),
     "KXATPCHALLENGERMATCH": ("TEN", "ATPC"),
     "KXWTACHALLENGERMATCH": ("TEN", "WTAC"),
+    "KXWTAMATCH": ("TEN", "WTA"),
 }
 
 
