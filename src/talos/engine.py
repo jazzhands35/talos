@@ -223,10 +223,15 @@ class TradingEngine:
             # Merge with saved games (union, deduplicate)
             all_tickers = list(dict.fromkeys(discovered + self._initial_games))
 
+            from pathlib import Path as _PP
             import time as _st
+            _perf = _PP("talos_perf.log").open("a")
+
             _s0 = _st.monotonic()
 
             if all_tickers:
+                _perf.write(f"STARTUP: adding {len(all_tickers)} games...\n")
+                _perf.flush()
                 pairs = await self._game_manager.add_games(all_tickers)
                 for pair in pairs:
                     self._adjuster.add_event(pair)
@@ -235,6 +240,8 @@ class TradingEngine:
                 self._initial_games.clear()
 
             _s1 = _st.monotonic()
+            _perf.write(f"STARTUP: add_games done in {round((_s1 - _s0) * 1000)}ms\n")
+            _perf.flush()
 
             # Resolve game status — run in background, don't block startup
             if self._game_status_resolver is not None:
@@ -247,38 +254,34 @@ class TradingEngine:
                     import asyncio as _aio
                     _aio.create_task(self._game_status_resolver.resolve_batch(batch))
 
-            _s2 = _st.monotonic()
+            _perf.write(f"STARTUP: game_status fired as background task\n")
+            _perf.flush()
 
             # Subscribe to portfolio events globally (all markets)
             if self._portfolio_feed is not None:
                 await self._portfolio_feed.subscribe()
-
-            # Subscribe to lifecycle events globally
             if self._lifecycle_feed is not None:
                 await self._lifecycle_feed.subscribe()
-
-            # Subscribe to position updates globally
             if self._position_feed is not None:
                 await self._position_feed.subscribe()
 
             _s3 = _st.monotonic()
+            _perf.write(f"STARTUP: ws_subs done in {round((_s3 - _s1) * 1000)}ms\n")
+            _perf.flush()
 
             # Subscribe to ticker updates for all active markets
             if self._ticker_feed is not None:
                 market_tickers = self._active_market_tickers()
+                _perf.write(f"STARTUP: subscribing to {len(market_tickers)} ticker markets...\n")
+                _perf.flush()
                 if market_tickers:
                     await self._ticker_feed.subscribe(market_tickers)
 
             _s4 = _st.monotonic()
-
-            from pathlib import Path as _PP
-            _PP("talos_perf.log").open("a").write(
-                f"STARTUP: add_games={round((_s1 - _s0) * 1000)}ms "
-                f"game_status={round((_s2 - _s1) * 1000)}ms "
-                f"ws_subs={round((_s3 - _s2) * 1000)}ms "
-                f"ticker_sub={round((_s4 - _s3) * 1000)}ms "
-                f"pairs={len(self._game_manager.active_games)}\n"
-            )
+            _perf.write(f"STARTUP: ticker_sub done in {round((_s4 - _s3) * 1000)}ms\n")
+            _perf.write(f"STARTUP: total={round((_s4 - _s0) * 1000)}ms pairs={len(self._game_manager.active_games)}\n")
+            _perf.write(f"STARTUP: entering WS listen loop\n")
+            _perf.flush()
 
             await self._feed.start()
             # If we reach here without exception, the WS exited cleanly
