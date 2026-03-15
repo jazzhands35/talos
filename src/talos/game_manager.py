@@ -39,6 +39,12 @@ SCAN_SERIES = [
     "KXRUGBYNRLMATCH",
     # Aussie Rules
     "KXAFLGAME",
+    # Lacrosse
+    "KXNCAAMLAXGAME",
+    # Darts (tournament — works at finals)
+    "KXPREMDARTS",
+    # Chess (tournament — works at finals)
+    "KXCHESSWORLDCHAMPION", "KXCHESSCANDIDATES",
     # Motorsport (tournament — works at finals)
     "KXF1", "KXNASCARRACE", "KXINDYCARRACE",
     # Golf (tournament — works at finals)
