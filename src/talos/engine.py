@@ -287,8 +287,20 @@ class TradingEngine:
             await _aio.sleep(5)
             await self.start_feed()
 
+    async def refresh_balance(self) -> None:
+        """Fetch balance only — fast, independent of order/position sync."""
+        try:
+            balance = await self._rest.get_balance()
+            self._balance = balance.balance
+            self._portfolio_value = balance.portfolio_value
+        except Exception:
+            logger.debug("balance_fetch_failed")
+
     async def refresh_account(self) -> None:
-        """Fetch balance + orders, sync ledgers, compute positions."""
+        """Backup REST sync for orders + positions. WS is primary data source.
+
+        Runs every 30s as a safety net — catches anything WS missed.
+        """
         import time as _time
         _t0 = _time.monotonic()
 
@@ -303,11 +315,6 @@ class TradingEngine:
                 pass
 
         try:
-            _t1 = _time.monotonic()
-            balance = await self._rest.get_balance()
-            self._balance = balance.balance
-            self._portfolio_value = balance.portfolio_value
-
             _t2 = _time.monotonic()
             # Only fetch resting orders — fill data comes from positions API.
             # "executed" (1500+) and "canceled" (250+) are historical noise.
@@ -396,7 +403,6 @@ class TradingEngine:
 
             _timing = (
                 f"refresh_account: total={round((_t6 - _t0) * 1000)}ms "
-                f"balance={round((_t2 - _t1) * 1000)}ms "
                 f"orders={round((_t3 - _t2) * 1000)}ms({len(orders)}) "
                 f"sync={round((_t4 - _t3) * 1000)}ms "
                 f"positions={round((_t5 - _t4) * 1000)}ms "
@@ -529,13 +535,44 @@ class TradingEngine:
                 self._recompute_positions()
                 return
 
-        # Order not in cache — will be picked up by next REST poll
-        logger.debug(
-            "ws_order_update_unknown",
-            order_id=msg.order_id,
-            ticker=msg.ticker,
-            status=msg.status,
-        )
+        # Order not in cache — add it so WS is self-sufficient
+        if msg.side == "no" and msg.status in ("resting", "executed"):
+            new_order = Order(
+                order_id=msg.order_id,
+                ticker=msg.ticker,
+                action="buy",
+                side=msg.side,
+                status=msg.status,
+                no_price=msg.no_price,
+                yes_price=msg.yes_price,
+                fill_count=msg.fill_count,
+                remaining_count=msg.remaining_count,
+                initial_count=msg.fill_count + msg.remaining_count,
+                maker_fill_cost=msg.maker_fill_cost,
+                taker_fill_cost=msg.taker_fill_cost,
+                maker_fees=msg.maker_fees,
+            )
+            self._orders_cache.append(new_order)
+            logger.info(
+                "ws_order_added_to_cache",
+                order_id=msg.order_id,
+                ticker=msg.ticker,
+                status=msg.status,
+            )
+            # Sync the affected pair
+            for pair in self._scanner.pairs:
+                if msg.ticker in (pair.ticker_a, pair.ticker_b):
+                    try:
+                        ledger = self._adjuster.get_ledger(pair.event_ticker)
+                        ledger.sync_from_orders(
+                            self._orders_cache,
+                            ticker_a=pair.ticker_a,
+                            ticker_b=pair.ticker_b,
+                        )
+                    except KeyError:
+                        pass
+            self._tracker.update_orders(self._orders_cache, self._scanner.pairs)
+            self._recompute_positions()
 
     def _on_fill(self, msg: FillMessage) -> None:
         """Handle a real-time fill from the fill WS channel.

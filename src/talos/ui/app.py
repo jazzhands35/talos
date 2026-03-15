@@ -84,9 +84,10 @@ class TalosApp(App):
         if self._scanner is not None:
             self.set_interval(1.0, self.refresh_opportunities)
         if self._engine is not None:
-            self.set_interval(10.0, self._poll_account)
+            self.set_interval(10.0, self._poll_balance)
+            self.set_interval(30.0, self._poll_account)  # backup sync — WS is primary
             self.set_interval(3.0, self._poll_queue)
-            self.set_interval(10.0, self._poll_trades)
+            self.set_interval(30.0, self._poll_trades)
             self.set_interval(1.0, self._refresh_proposals)
             self.set_interval(1.0, self._auto_accept_tick)
             self.set_interval(3600.0, self._refresh_game_status)
@@ -236,7 +237,18 @@ class TalosApp(App):
             await self._engine.start_feed()
 
     @work(thread=False)
+    async def _poll_balance(self) -> None:
+        """Fast balance poll — no WS channel for balance."""
+        if self._engine is None:
+            return
+        await self._engine.refresh_balance()
+        self.query_one(AccountPanel).update_balance(
+            self._engine.balance, self._engine.portfolio_value
+        )
+
+    @work(thread=False)
     async def _poll_account(self) -> None:
+        """Backup REST sync every 30s — WS handles real-time updates."""
         if self._engine is None:
             return
         if self._poll_in_progress:
@@ -246,9 +258,6 @@ class TalosApp(App):
             await self._engine.refresh_account()
         finally:
             self._poll_in_progress = False
-        self.query_one(AccountPanel).update_balance(
-            self._engine.balance, self._engine.portfolio_value
-        )
         self.query_one(OpportunitiesTable).update_positions(self._engine.position_summaries)
         self.query_one(OrderLog).update_orders(self._engine.order_data)
 

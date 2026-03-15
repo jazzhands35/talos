@@ -174,13 +174,11 @@ def _engine_with_pair_and_books(
 
 class TestPolling:
     @pytest.mark.asyncio
-    async def test_refresh_account_updates_balance(self):
+    async def test_refresh_balance_updates_balance(self):
         engine, rest = _engine_with_pair()
         rest.get_balance.return_value = Balance(balance=50000, portfolio_value=60000)
-        rest.get_all_orders.return_value = []
-        rest.get_queue_positions.return_value = {}
 
-        await engine.refresh_account()
+        await engine.refresh_balance()
 
         assert engine.balance == 50000
         assert engine.portfolio_value == 60000
@@ -347,14 +345,12 @@ class TestPolling:
     async def test_refresh_account_positions_failure_is_non_fatal(self):
         """If positions API fails, sync_from_orders still works."""
         engine, rest = _engine_with_pair()
-        rest.get_balance.return_value = Balance(balance=1000, portfolio_value=1000)
         rest.get_all_orders.return_value = []
         rest.get_queue_positions.return_value = {}
         rest.get_positions.side_effect = RuntimeError("API error")
 
         # Should not raise — positions failure is logged, not fatal
         await engine.refresh_account()
-        assert engine.balance == 1000
 
 
 class TestActions:
