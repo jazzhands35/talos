@@ -328,21 +328,17 @@ class OpportunitiesTable(DataTable):
             return
 
         all_snaps = scanner.all_snapshots
-        current_keys = {row_key.value for row_key in self.rows}
-        new_keys = set(all_snaps.keys())
+
+        # Sort by selected column (default: edge descending)
+        sorted_opps = sorted(
+            all_snaps.values(),
+            key=self._sort_key,
+            reverse=self._sort_reverse,
+        )
 
         with self.app.batch_update():
-            # Remove vanished rows
-            for key in current_keys - new_keys:
-                if key is not None:
-                    self.remove_row(key)
-
-            # Sort by selected column (default: edge descending)
-            sorted_opps = sorted(
-                all_snaps.values(),
-                key=self._sort_key,
-                reverse=self._sort_reverse,
-            )
+            # Clear and re-add in sorted order (update_cell can't reorder)
+            self.clear()
             for opp in sorted_opps:
                 edge_str = _fmt_edge(opp.fee_edge)
 
@@ -449,12 +445,7 @@ class OpportunitiesTable(DataTable):
                     pnl,
                     net_odds,
                 )
-                if opp.event_ticker in current_keys:
-                    for col_idx, value in enumerate(row_data):
-                        col_key = self.ordered_columns[col_idx].key
-                        self.update_cell(opp.event_ticker, col_key, value)
-                else:
-                    self.add_row(*row_data, key=opp.event_ticker)
+                self.add_row(*row_data, key=opp.event_ticker)
 
 
 class AccountPanel(Static):
