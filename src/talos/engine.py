@@ -255,6 +255,23 @@ class TradingEngine:
                     await self._feed.subscribe_bulk(tickers)
                 if pairs:
                     self._notify(f"Loaded {len(pairs)} game(s)")
+                # Log startup restores
+                if self._data_collector is not None:
+                    for pair in pairs:
+                        prefix = pair.event_ticker.split("-")[0]
+                        from talos.ui.widgets import _SPORT_LEAGUE
+                        sport, league = _SPORT_LEAGUE.get(prefix, ("", ""))
+                        self._data_collector.log_game_add(
+                            event_ticker=pair.event_ticker,
+                            series_ticker=prefix,
+                            sport=sport,
+                            league=league,
+                            source="startup",
+                            ticker_a=pair.ticker_a,
+                            ticker_b=pair.ticker_b,
+                            fee_type=pair.fee_type,
+                            fee_rate=pair.fee_rate,
+                        )
                 self._initial_games_full = None
                 # Only REST-fetch discovered events not already in cache
                 all_tickers = [t for t in all_tickers if t not in cached_tickers]
@@ -584,6 +601,27 @@ class TradingEngine:
 
                 self._tracker.update_orders(self._orders_cache, self._scanner.pairs)
                 self._recompute_positions()
+                # Log order state change
+                if self._data_collector is not None:
+                    event_ticker = ""
+                    for pair in self._scanner.pairs:
+                        if msg.ticker in (pair.ticker_a, pair.ticker_b):
+                            event_ticker = pair.event_ticker
+                            break
+                    self._data_collector.log_order(
+                        event_ticker=event_ticker,
+                        order_id=msg.order_id,
+                        ticker=msg.ticker,
+                        side=msg.side,
+                        status=msg.status,
+                        price=msg.no_price,
+                        initial_count=msg.fill_count + msg.remaining_count,
+                        fill_count=msg.fill_count,
+                        remaining_count=msg.remaining_count,
+                        maker_fill_cost=msg.maker_fill_cost,
+                        maker_fees=msg.maker_fees,
+                        source="ws_update",
+                    )
                 return
 
         # Order not in cache — add it so WS is self-sufficient
@@ -722,6 +760,17 @@ class TradingEngine:
         if self._is_our_market(ticker):
             self._notify(f"Market settled: {ticker}")
             asyncio.create_task(self._fetch_settlement(ticker))
+            if self._data_collector is not None:
+                event_ticker = ""
+                for pair in self._scanner.pairs:
+                    if ticker in (pair.ticker_a, pair.ticker_b):
+                        event_ticker = pair.event_ticker
+                        break
+                self._data_collector.log_settlement(
+                    event_ticker=event_ticker,
+                    ticker=ticker,
+                    event_type="settled",
+                )
 
     async def _fetch_settlement(self, ticker: str) -> None:
         """Fetch settlement details from Kalshi after a market settles."""
@@ -1230,7 +1279,7 @@ class TradingEngine:
             self._notify(f"Order error: {type(e).__name__}: {e}", "error")
             logger.exception("place_bids_error")
 
-    async def add_games(self, urls: list[str]) -> None:
+    async def add_games(self, urls: list[str], source: str = "scan") -> None:
         """Add games by URL."""
         try:
             pairs = await self._game_manager.add_games(urls)
@@ -1255,7 +1304,7 @@ class TradingEngine:
                         series_ticker=prefix,
                         sport=sport,
                         league=league,
-                        source="scan",
+                        source=source,
                         ticker_a=pair.ticker_a,
                         ticker_b=pair.ticker_b,
                         volume_a=self._game_manager.volumes_24h.get(pair.ticker_a, 0),

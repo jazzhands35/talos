@@ -363,7 +363,7 @@ class TalosApp(App):
     async def _open_add_games(self) -> None:
         urls = await self.push_screen_wait(AddGamesScreen())
         if urls is not None and self._engine is not None:
-            await self._engine.add_games(urls)
+            await self._engine.add_games(urls, source="manual")
 
     def action_scan(self) -> None:
         if self._engine is not None:
