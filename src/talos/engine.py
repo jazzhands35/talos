@@ -223,6 +223,9 @@ class TradingEngine:
             # Merge with saved games (union, deduplicate)
             all_tickers = list(dict.fromkeys(discovered + self._initial_games))
 
+            import time as _st
+            _s0 = _st.monotonic()
+
             if all_tickers:
                 pairs = await self._game_manager.add_games(all_tickers)
                 for pair in pairs:
@@ -231,14 +234,21 @@ class TradingEngine:
                     self._notify(f"Loaded {len(pairs)} game(s)")
                 self._initial_games.clear()
 
-            # Resolve game status for all loaded games (batched by source)
+            _s1 = _st.monotonic()
+
+            # Resolve game status — run in background, don't block startup
             if self._game_status_resolver is not None:
                 batch = [
                     (p.event_ticker, self._game_manager.subtitles.get(p.event_ticker, ""))
                     for p in self._game_manager.active_games
                 ]
                 if batch:
-                    await self._game_status_resolver.resolve_batch(batch)
+                    # Don't await — let it run while WS starts listening
+                    import asyncio as _aio
+                    _aio.create_task(self._game_status_resolver.resolve_batch(batch))
+
+            _s2 = _st.monotonic()
+
             # Subscribe to portfolio events globally (all markets)
             if self._portfolio_feed is not None:
                 await self._portfolio_feed.subscribe()
@@ -251,11 +261,24 @@ class TradingEngine:
             if self._position_feed is not None:
                 await self._position_feed.subscribe()
 
+            _s3 = _st.monotonic()
+
             # Subscribe to ticker updates for all active markets
             if self._ticker_feed is not None:
                 market_tickers = self._active_market_tickers()
                 if market_tickers:
                     await self._ticker_feed.subscribe(market_tickers)
+
+            _s4 = _st.monotonic()
+
+            from pathlib import Path as _PP
+            _PP("talos_perf.log").open("a").write(
+                f"STARTUP: add_games={round((_s1 - _s0) * 1000)}ms "
+                f"game_status={round((_s2 - _s1) * 1000)}ms "
+                f"ws_subs={round((_s3 - _s2) * 1000)}ms "
+                f"ticker_sub={round((_s4 - _s3) * 1000)}ms "
+                f"pairs={len(self._game_manager.active_games)}\n"
+            )
 
             await self._feed.start()
             # If we reach here without exception, the WS exited cleanly
