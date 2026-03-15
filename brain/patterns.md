@@ -117,6 +117,31 @@ Without this, the sequence is: approve → place order → proposer sees stale s
 
 Applied in: `OpportunityProposer.record_approval()` pops the event from `_stable_since`, requiring `stability_seconds` of fresh observation before the next proposal. See [[decisions#2026-03-10 — Runaway bidding: safety gate wiring and Kalshi-as-truth]].
 
+**Limitation:** Stability reset alone is insufficient when `sync_from_orders` runs within the same `refresh_account` call (using stale data fetched before placement). The generation-based stale-sync guard (below) provides the primary defense; stability reset is a secondary buffer. See [[decisions#2026-03-13 — Optimistic ledger with generation-based stale-sync guard]].
+
+## Generation-based stale-sync protection
+
+When an async orchestrator method (`refresh_account`) has multiple yield points, concurrent tasks (auto-accept) can mutate shared state between fetching data and acting on it. A generation counter prevents stale fetches from overwriting fresher state.
+
+```
+refresh_account:
+  bump_sync_gen()          # gen = N
+  orders = get_orders()    # stale if placement happens later
+  sync_from_orders(orders) # may overwrite optimistic state
+  await get_positions()    # ← yield point: auto-accept can place orders
+  evaluate_opportunities() # sees whatever sync_from_orders left
+```
+
+The `_placed_at_gen` flag on `_SideState` records which generation the placement happened in. `sync_from_orders` refuses to clear resting when `placed_at_gen >= sync_gen` (stale data). The next `bump_sync_gen()` advances the counter, allowing fresh data to clear resting normally.
+
+Applied in: `PositionLedger._placed_at_gen`, `PositionLedger.bump_sync_gen()`, `PositionLedger.record_placement()`. Engine calls `bump_sync_gen()` at start of `refresh_account` and `record_placement()` after successful order creation. See [[decisions#2026-03-13 — Optimistic ledger with generation-based stale-sync guard]].
+
+**Design properties:**
+- Guard expires after exactly one generation (~10s poll cycle)
+- Fresh syncs that include the order in `resting_list` clear the guard immediately
+- Explicit cancels (`record_cancel`) clear the guard
+- `reset_pair()` clears the guard
+
 ## Monotonic state updates across data sources
 
 When multiple data sources feed the same state, each source should only **increase** values, never decrease. This prevents sources from fighting each other due to gaps, archival, or timing differences.
@@ -137,7 +162,7 @@ Applied in: `_verify_after_action()` in `engine.py` — runs the full two-source
 
 When an action has multiple steps with different risk profiles, order them so each intermediate state is strictly better (or no worse) than before. If any step fails, halt — the partial result is still an improvement.
 
-Applied in: `_execute_rebalance` — step 1 (reduce over-side resting) runs before step 2 (catch-up bid on under-side). If step 1 fails, step 2 is skipped. If step 2 fails, step 1 already reduced the imbalance. The delta never temporarily increases. See [[decisions#2026-03-10 — Position imbalance detection and two-step rebalance]].
+Applied in: `execute_rebalance` in `rebalance.py` — step 1 (reduce over-side resting) runs before step 2 (catch-up bid on under-side). If step 1 fails, step 2 is skipped. If step 2 fails, step 1 already reduced the imbalance. The delta never temporarily increases. See [[decisions#2026-03-10 — Position imbalance detection and two-step rebalance]].
 
 **Why not atomic:** A single API call can't reduce one side and add to another. Sequential steps are inevitable. Fail-safe ordering means we never need rollback — each step is independently valuable.
 
@@ -153,22 +178,28 @@ Applied in: `ws_client.py` `_dispatch()` — catches parse errors and callback e
 
 When calling an API that acts on a single order (amend, cancel, get), use data from that specific order — not aggregates from the position ledger. The ledger aggregates fills across all orders (including archived ones augmented by the positions API), but the amend API needs `count = order.fill_count + desired_remaining` for *that* order.
 
-Applied in: `_execute_rebalance` uses `decrease_order(reduce_to=target)` which sidesteps the issue entirely — `reduce_to` is absolute, not relative to fill count. `BidAdjuster.execute` fetches `get_order(cancel_order_id)` and uses `fresh_order.fill_count + fresh_order.remaining_count` for the amend `count`. See [[decisions#2026-03-12 — Rebalance step 1: decrease_order replaces amend_order]] and [[decisions#2026-03-12 — BidAdjuster.execute: fetch fresh order before amend]].
+Applied in: `execute_rebalance` in `rebalance.py` uses `decrease_order(reduce_to=target)` which sidesteps the issue entirely — `reduce_to` is absolute, not relative to fill count. `BidAdjuster.execute` fetches `get_order(cancel_order_id)` and uses `fresh_order.fill_count + fresh_order.remaining_count` for the amend `count`. See [[decisions#2026-03-12 — Rebalance step 1: decrease_order replaces amend_order]] and [[decisions#2026-03-12 — BidAdjuster.execute: fetch fresh order before amend]].
 
 **Lesson:** Prefer APIs with absolute targets (`reduce_to=N`) over relative ones (`count = fill_count + desired`) when possible. When amend is required (price changes), always fetch the order's own state first — never use ledger aggregates.
 
 **Why not use aggregate:** If old orders were archived and a new one was placed, the aggregate might show 40 fills while the current order has 0. Using aggregate fills in the amend `count` makes `new_total` equal the order's existing total → `AMEND_ORDER_NO_OP`. The aggregate is correct for position display; the order's own state is correct for order-specific actions.
 
+## Extract as functions, not classes
+
+When a god-class method grows past ~200 lines with nested branches, extract it as a pair of standalone functions — not a new class. A pure detection function + async execution function avoids creating state that must stay in sync with the orchestrator's caches. The orchestrator becomes a thin loop calling the pure function and dispatching the result.
+
+Applied in: `rebalance.py` — `compute_rebalance_proposal()` (pure, ~120 lines) + `execute_rebalance()` (async, ~180 lines) extracted from `engine.py`'s `check_imbalances()` + `_execute_rebalance()`. Engine's `check_imbalances` became a 15-line loop. See [[decisions#2026-03-13 — Rebalance extraction from TradingEngine]].
+
+**Why not a class:** A `RebalanceExecutor` class would need injected references to rest_client, adjuster, scanner, and notify callback — making it a mini-engine with its own lifecycle. Functions receive these as parameters, have no state to manage, and can't get out of sync.
+
 ## Batch widget updates in Textual
 
-When mutating multiple cells in a Textual `DataTable`, wrap all `update_cell` / `add_row` / `remove_row` calls in `self.app.batch_update()`. Without this, each call triggers a layout invalidation and repaint. At 20+ rows × 16 columns × 2 refreshes/sec, that's 640+ repaints/sec — causing visible UI lag.
+When mutating multiple cells in a Textual `DataTable`, wrap all `add_row` / `remove_row` calls in `self.app.batch_update()`. Without this, each call triggers a layout invalidation and repaint.
 
-```python
-with self.app.batch_update():
-    for opp in sorted_opps:
-        ...
-        for col_idx, value in enumerate(row_data):
-            self.update_cell(key, col_key, value)
-```
+Applied in: `OpportunitiesTable.refresh_from_scanner()`. Clear + re-add all rows in sorted order each cycle (required because `update_cell` cannot reorder rows).
 
-Applied in: `OpportunitiesTable.refresh_from_scanner()`. Collapsed 320+ per-cell repaints into 1 per refresh cycle.
+## Textual DataTable gotchas
+
+- **`update_cell` doesn't reorder rows** — it changes cell values in place. To re-sort, clear all rows and re-add in the desired order within `batch_update()`.
+- **Widgets don't receive their own messages** — `DataTable.HeaderSelected` must be handled on the parent app, not on the `DataTable` subclass. Forward to the widget via a method call.
+- **Don't use `**kwargs: object` in widget `__init__`** — causes Pyright errors. Use explicit named params: `name`, `id` (with `# noqa: A002`), `classes`.

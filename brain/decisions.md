@@ -201,3 +201,44 @@ Key changes:
 **Decision:** Added `withdraw` action to `evaluate_jump`. When the profitability check fails AND `filled_count(A) == 0 AND filled_count(B) == 0`, return a `withdraw` instead of `hold`. The engine cancels both sides' resting orders at execution time (looking up order IDs fresh from the ledger per P7). When fills exist on either side, `hold` remains correct — the filled side provides a delta anchor and waiting for market return avoids crystallizing a loss.
 
 **Rationale:** With 0 fills, there's no sunk cost and no delta to protect. Holding resting orders in an unprofitable arb just locks capital. Withdrawing frees capital to redeploy when conditions improve. With fills, the calculus reverses — the filled side creates an obligation, and the market often returns to fill the other side. See [[principles#16. Delta Neutral by Construction]].
+
+## 2026-03-13 — Rebalance extraction from TradingEngine
+
+**Context:** `engine.py` was 1,528 lines with 40+ methods. The rebalance logic — `check_imbalances()` (152 lines) + `_execute_rebalance()` (182 lines) — was the largest and most complex code path, with deeply nested conditionals and multiple error branches. This was the highest-risk area for subtle bugs.
+
+**Decision:** Extracted into `rebalance.py` as two standalone functions: `compute_rebalance_proposal()` (pure, no I/O) and `execute_rebalance()` (async). Engine's `check_imbalances()` became a 15-line loop. Also consolidated `_is_no_op()` helper (only used by rebalance). Used functions, not a class — avoids state sync with engine caches.
+
+**Additional improvements in the same session:**
+- Consolidated FP converters (`_dollars_to_cents`, `_fp_to_int`) from 4 model files into `models/_converters.py` — single source of truth for API format conversion
+- Added `log_unknown_fields()` to REST models — DEBUG-level, once-per-session dedup, surfaces schema drift without noise
+- Added toast notification on `_verify_after_action` failure — operator now sees "Verify FAILED" instead of silent swallow (P20)
+- Added `resting_tickers` property to `TopOfMarketTracker` — replaced private `_resting` access from `app.py`
+- Added dedicated tests for `models/strategy.py` (ArbPair, Opportunity, BidConfirmation)
+
+**Rationale:** Engine dropped from 1,528 to 1,222 lines (-20%). Detection tests became purely mock-free (just ledger + pair + function call). Behavioral improvement: `_verify_after_action` now always runs after rebalance from the engine (even on step 2 early returns), fixing a gap where step 1 could succeed but verification was skipped. See [[patterns#Extract as functions, not classes]].
+
+## 2026-03-13 — Optimistic ledger with generation-based stale-sync guard
+
+**Context:** Live double bidding — auto-accept placed 20+20 on both sides, then 19+19 more. The Talos table showed only one row (summed resting) and didn't catch the duplication. Root cause: `refresh_account` has multiple `await` yield points between `get_orders()` and `evaluate_opportunities()`. When auto-accept approves a proposal during one of these yields, the stale orders list (fetched before placement) is used by `sync_from_orders` to overwrite the ledger's resting state to 0. The proposer then sees empty resting and re-proposes.
+
+**Prior approach (reverted 2026-03-10):** Stability-reset-only. After approval, clear the proposer's stability timer so it must re-observe `stability_seconds` before re-proposing. This was insufficient because: (a) with `stability_seconds=0` there's no protection, and (b) the stale sync happens WITHIN a single `refresh_account` call, so stability timing between poll cycles is irrelevant.
+
+**Decision:** Two-part fix:
+1. **Optimistic ledger update** — `place_bids` calls `ledger.record_placement()` (not `record_resting()`) after successful `create_order`. Also appends the returned `Order` objects to `_orders_cache` for WS handler matching.
+2. **Generation-based stale-sync guard** — `PositionLedger` gains a `_sync_gen` counter bumped at the start of each `refresh_account`. `record_placement` tags the side with `_placed_at_gen = sync_gen`. `sync_from_orders` refuses to clear resting when `_placed_at_gen >= sync_gen` (stale data from the same generation). When `resting_list` is found (confirming the order), the guard is cleared. Next generation's fresh data can clear resting normally.
+
+**Why this doesn't violate P7:** The optimistic state is set AFTER `create_order` returns successfully — the order exists on Kalshi. The generation guard doesn't prevent Kalshi-sourced updates from taking effect; it only prevents stale Kalshi data (fetched before the order existed) from erasing confirmed state.
+
+**Supersedes:** The 2026-03-10 "Reverted optimistic ledger update" decision. The old approach (bare `record_resting()`) had no stale-sync protection. The new approach (`record_placement()` + generation guard) prevents both the false-discrepancy problem and the double-bidding race. See [[patterns#Generation-based stale-sync protection]].
+
+## 2026-03-14 — Paginate order fetching (safety-critical)
+
+**Context:** With 50+ games, `get_orders(limit=200)` silently truncated the response. Resting orders beyond the 200th were invisible to the ledger, causing false "Settled" status. The Kalshi API returns most-recent-first, so older resting orders fell off the end. 83 cancelled orders wasted slots.
+**Decision:** Added `get_all_orders()` which paginates via Kalshi's cursor-based API. All callers (`refresh_account`, `_verify_after_action`) switched from `get_orders(limit=200)` to `get_all_orders()`.
+**Rationale:** Principle 15 violation — position accuracy is non-negotiable. A truncated order list means the ledger doesn't reflect Kalshi's actual state. With auto-accept on, this could cause missed second-leg placements (the system thinks the event is "Settled" when it has an active resting order).
+
+## 2026-03-14 — Multi-source game status provider
+
+**Context:** Kalshi provides no explicit "game start time" field. The "Closes" column (market close time) was useless for trading decisions.
+**Decision:** Built `GameStatusResolver` with three external sources: ESPN (NHL, NBA, MLB, NFL, college sports — free, no auth), The Odds API (AHL, minor leagues — free tier), PandaScore (esports — free tier). Maps Kalshi series tickers to sources via `SOURCE_MAP`. Matches games by team codes extracted from `Event.sub_title`. Batched by source to avoid N+1 API calls.
+**Key gotchas:** Kalshi series tickers use `KXNHLGAME` not `KXNHL`. Event tickers concatenate teams (`KXNHLGAME-26MAR14BOSWSH`) — team extraction must use `sub_title`. PandaScore rejects `filter[scheduled_at]`, requires `range[scheduled_at]`. ESPN status lives inside `competitions[0].status`, not `event.status`. Tennis has no good free API for individual matches.

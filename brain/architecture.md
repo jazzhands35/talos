@@ -48,6 +48,7 @@ Single source of truth for both UI display and bid adjustment safety gates. `com
    `TopOfMarketTracker`: detects penny jumps on resting NO bids in real-time via WS deltas. TUI shows toast alerts and `!!` prefix in Q columns.
    `PositionLedger`: per-event single source of truth for filled counts, resting orders, avg prices, and safety gates. Pure state machine (no I/O). Also hosts `compute_display_positions()` for UI display.
    `BidAdjuster`: mixed pure/async — pure decision logic (`evaluate_jump`) that queries ledger, checks profitability gate (P18), enforces most-behind-first tiebreaker (P19), and proposes amend adjustments; async execution (`execute`) that calls `rest_client.amend_order()` for atomic price changes (P17).
+   `rebalance.py`: pure detection (`compute_rebalance_proposal`) + async execution (`execute_rebalance`) for position imbalance correction. Follows the pure/async split — detection is mock-free testable, execution handles the two-step reduce-then-catchup with fresh Kalshi sync.
    `TradingEngine`: central orchestrator owning all subsystem references, mutable caches (queue, orders, CPM), and polling/action methods. Communicates with the UI via `on_notification` callback. Proposals flow through `ProposalQueue` for operator approval. Extracted from `TalosApp` to enable headless testing and future API-driven control.
    Bid modal uses `all_snapshots` fallback so any monitored pair is always selectable.
 5. **UI (Textual TUI)** (Layer 5) — **COMPLETE**
@@ -57,6 +58,9 @@ Single source of truth for both UI display and bid adjustment safety gates. `com
    `OpportunityProposer`: pure decision logic that evaluates scanner output against edge threshold + stability filter + position gate. Emits bid proposals into ProposalQueue.
    `AutomationConfig`: settings dataclass (edge threshold, stability seconds, cooldown, unit size, enabled flag). Off by default, explicit opt-in.
    Graduation path: manual → assisted → **supervised** (current) → autonomous. See [[principles#2. Human in the Loop]].
+
+7. **Game Status** (Layer 7) — **ACTIVE**
+   `GameStatusResolver`: multi-source live game status via ESPN (major leagues), The Odds API (AHL, minor leagues), PandaScore (esports). Maps Kalshi series tickers (e.g., `KXNHLGAME`) to external APIs, matches games by team codes extracted from `Event.sub_title`. Cached per event_ticker, refreshed hourly. Replaces "Closes" column with Date + Game Status columns (Pacific Time). Also provides per-leg 24h volume (`Market.volume_24h`). Tennis coverage incomplete (no free API for individual challenger matches).
 
 See [[codebase/index]] for the full module map and gotchas.
 
