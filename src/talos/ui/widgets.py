@@ -12,7 +12,7 @@ from rich.text import Text as RichText
 from textual.widgets import DataTable, Static
 
 from talos.cpm import format_cpm, format_eta
-from talos.fees import american_from_win_risk, american_odds, fee_adjusted_cost, scenario_pnl
+from talos.fees import fee_adjusted_cost
 from talos.game_status import GameStatus
 from talos.models.position import EventPositionSummary
 from talos.scanner import ArbitrageScanner
@@ -60,15 +60,6 @@ def _fmt_pos(filled: int, total: int, avg_no_price: int) -> RichText:
         return RichText(f"0/{total}", justify="right")
     fee_avg = fee_adjusted_cost(avg_no_price)
     return RichText(f"{filled}/{total} {fee_avg:.1f}¢", justify="right")
-
-
-def _fmt_odds(no_price: int) -> str:
-    """Format fee-adjusted American odds for a NO price."""
-    odds = american_odds(no_price)
-    if odds is None:
-        return "—"
-    r = round(odds)
-    return f"+{r}" if r > 0 else str(r)
 
 
 DIM_DASH = RichText("—", style="dim", justify="right")
@@ -173,48 +164,6 @@ def _fmt_status(status: str) -> RichText:
     return RichText(status)
 
 
-def _fmt_net_odds(
-    no_a: int,
-    no_b: int,
-    filled_a: int = 0,
-    filled_b: int = 0,
-    total_cost_a: int = 0,
-    total_cost_b: int = 0,
-    fees_a: int = 0,
-    fees_b: int = 0,
-) -> RichText:
-    """Format net position as wager amount, side, and American odds.
-
-    With no fills: shows per-leg odds only.
-    With fills: computes scenario P&Ls, shows "$X on [side] [odds]".
-    Base wager = loss if positive odds, win if negative odds.
-    """
-    odds_a = _fmt_odds(no_a)
-    odds_b = _fmt_odds(no_b)
-    odds_str = f"{odds_a}/{odds_b}"
-    if filled_a + filled_b == 0:
-        return RichText(odds_str, justify="right")
-    net_a, net_b = scenario_pnl(filled_a, total_cost_a, filled_b, total_cost_b, fees_a, fees_b)
-    worse = min(net_a, net_b)
-    better = max(net_a, net_b)
-    # Both scenarios profitable → guaranteed profit, no risk
-    if worse > 0:
-        return RichText(f"GTD ${worse / 100:.2f}", style=GREEN, justify="right")
-    # Both scenarios negative → underwater, no meaningful odds
-    if better <= 0:
-        return RichText(f"-${abs(better) / 100:.2f}", style=RED, justify="right")
-    # Mixed: one wins, one loses → directional bet
-    eff = american_from_win_risk(better, abs(worse))
-    if eff is None:
-        return RichText(f"— {odds_str}", justify="right")
-    side = "A" if net_a > net_b else "B"
-    eff_r = round(eff)
-    eff_str = f"+{eff_r}" if eff_r > 0 else str(eff_r)
-    # Base wager: loss if positive odds (underdog), win if negative (favorite)
-    base = abs(worse) if eff_r > 0 else better
-    return RichText(f"${base / 100:.0f} {side} {eff_str}", justify="right")
-
-
 class OpportunitiesTable(DataTable):
     """Live-updating arbitrage opportunities table with position data."""
 
@@ -287,7 +236,6 @@ class OpportunitiesTable(DataTable):
         self.add_column(RichText("ETA-B", justify=r), width=7)
         self.add_column("Status", width=16)
         self.add_column(RichText("P&L", justify=r), width=16)
-        self.add_column(RichText("Net/Odds", justify=r), width=20)
 
     def _render_line_in_row(  # type: ignore[override]
         self, *args: Any, **kwargs: Any
@@ -445,18 +393,11 @@ class OpportunitiesTable(DataTable):
             net = pos.locked_profit_cents - pos.exposure_cents
             pnl = _fmt_pnl(net, pos.kalshi_pnl)
             status = _fmt_status(pos.status)
-            net_odds = _fmt_net_odds(
-                opp.no_a, opp.no_b,
-                pos.leg_a.filled_count, pos.leg_b.filled_count,
-                pos.leg_a.total_fill_cost, pos.leg_b.total_fill_cost,
-                pos.leg_a.total_fees, pos.leg_b.total_fees,
-            )
         else:
             pos_a = pos_b = q_a = q_b = DIM_DASH
             cpm_a = cpm_b = eta_a = eta_b = DIM_DASH
             pnl = DIM_DASH
             status = _fmt_status(self._event_statuses.get(opp.event_ticker, ""))
-            net_odds = _fmt_net_odds(opp.no_a, opp.no_b)
 
         if tracker is not None:
             if tracker.is_at_top(opp.ticker_a) is False:
@@ -477,7 +418,7 @@ class OpportunitiesTable(DataTable):
             _fmt_cents(opp.no_a), _fmt_cents(opp.no_b), edge_str,
             vol_a, vol_b, game_date, game_col,
             pos_a, pos_b, q_a, cpm_a, eta_a, q_b, cpm_b, eta_b,
-            status, pnl, net_odds,
+            status, pnl,
         )
 
 

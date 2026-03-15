@@ -201,10 +201,6 @@ class TestTablePositions:
             assert "1m" in str(row[14])  # ETA-A (0.64 min rounds to 1m)
             assert "2m*" in str(row[17])  # ETA-B (2.5 rounds to 2m via banker's rounding, partial)
             assert "0.02" in str(row[19])  # P&L (locked_profit_cents=2.38, no exposure)
-            # Net/Odds: both scenarios positive → guaranteed profit
-            # 3 fills each at 31¢/67¢ (total costs 93/201, fees=0 in test):
-            # total_outlay = 294, net = 300 - 294 = 6 → GTD $0.06
-            assert "GTD $0.06" in str(row[20])
 
     async def test_table_shows_odds_without_positions(self) -> None:
         scanner = _make_scanner_with_opportunity()
@@ -216,8 +212,6 @@ class TestTablePositions:
             row = table.get_row_at(0)
             assert str(row[10]) == "—"  # Pos-A shows dim dash
             assert str(row[11]) == "—"  # Pos-B shows dim dash
-            # Net/Odds shows per-leg odds only when no positions
-            assert "+160/-124" in str(row[20])
 
 
 class TestRichTextCells:
