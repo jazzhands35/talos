@@ -48,7 +48,10 @@ def main() -> None:
     from talos.lifecycle_feed import LifecycleFeed
     from talos.market_feed import MarketFeed
     from talos.orderbook import OrderBookManager
-    from talos.persistence import load_saved_games, load_settings, save_games, save_settings
+    from talos.persistence import (
+        load_saved_games, load_saved_games_full, load_settings,
+        save_games, save_games_full, save_settings,
+    )
     from talos.portfolio_feed import PortfolioFeed
     from talos.position_feed import PositionFeed
     from talos.rest_client import KalshiRESTClient
@@ -83,9 +86,27 @@ def main() -> None:
 
     feed.on_book_update = on_book_update
 
-    # Wire game persistence
-    saved_games = load_saved_games()
-    game_mgr.on_change = lambda: save_games([p.event_ticker for p in game_mgr.active_games])
+    # Wire game persistence — save full pair data for instant startup
+    saved_games_full = load_saved_games_full()
+    saved_games = load_saved_games() if saved_games_full is None else []
+
+    def _persist_games() -> None:
+        save_games([p.event_ticker for p in game_mgr.active_games])
+        save_games_full([
+            {
+                "event_ticker": p.event_ticker,
+                "ticker_a": p.ticker_a,
+                "ticker_b": p.ticker_b,
+                "fee_type": p.fee_type,
+                "fee_rate": p.fee_rate,
+                "close_time": p.close_time,
+                "label": game_mgr.labels.get(p.event_ticker, ""),
+                "sub_title": game_mgr.subtitles.get(p.event_ticker, ""),
+            }
+            for p in game_mgr.active_games
+        ])
+
+    game_mgr.on_change = _persist_games
 
     engine = TradingEngine(
         scanner=scanner,
@@ -95,6 +116,7 @@ def main() -> None:
         tracker=tracker,
         adjuster=adjuster,
         initial_games=saved_games,
+        initial_games_full=saved_games_full,
         portfolio_feed=portfolio_feed,
         ticker_feed=ticker_feed,
         lifecycle_feed=lifecycle_feed,

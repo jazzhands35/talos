@@ -72,6 +72,7 @@ class TradingEngine:
         tracker: TopOfMarketTracker,
         adjuster: BidAdjuster,
         initial_games: list[str] | None = None,
+        initial_games_full: list[dict] | None = None,
         proposal_queue: ProposalQueue | None = None,
         automation_config: AutomationConfig | None = None,
         portfolio_feed: PortfolioFeed | None = None,
@@ -87,6 +88,7 @@ class TradingEngine:
         self._tracker = tracker
         self._adjuster = adjuster
         self._initial_games = list(initial_games or [])
+        self._initial_games_full = initial_games_full
         self._proposal_queue = proposal_queue or ProposalQueue()
         self._auto_config = automation_config or AutomationConfig()
         self._portfolio_feed = portfolio_feed
@@ -229,8 +231,29 @@ class TradingEngine:
 
             _s0 = _st.monotonic()
 
+            # Fast restore from cached data (no REST calls)
+            if self._initial_games_full:
+                _perf.write(f"STARTUP: fast-restoring {len(self._initial_games_full)} games from cache...\n")
+                _perf.flush()
+                pairs = []
+                for data in self._initial_games_full:
+                    try:
+                        pair = self._game_manager.restore_game(data)
+                        self._adjuster.add_event(pair)
+                        pairs.append(pair)
+                    except Exception:
+                        logger.warning("restore_game_failed", event=data.get("event_ticker"))
+                # Bulk subscribe all market tickers at once
+                tickers = [t for p in pairs for t in (p.ticker_a, p.ticker_b)]
+                if tickers:
+                    await self._feed.subscribe_bulk(tickers)
+                if pairs:
+                    self._notify(f"Loaded {len(pairs)} game(s)")
+                self._initial_games_full = None
+                all_tickers = []  # skip REST fallback
+
             if all_tickers:
-                _perf.write(f"STARTUP: adding {len(all_tickers)} games...\n")
+                _perf.write(f"STARTUP: adding {len(all_tickers)} games via REST...\n")
                 _perf.flush()
                 pairs = await self._game_manager.add_games(all_tickers)
                 for pair in pairs:

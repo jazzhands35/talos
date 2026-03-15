@@ -166,6 +166,35 @@ class GameManager:
         )
         return pair
 
+    def restore_game(self, data: dict[str, str | float]) -> ArbPair:
+        """Restore a game from cached data — no REST calls needed."""
+        event_ticker = str(data["event_ticker"])
+        if event_ticker in self._games:
+            return self._games[event_ticker]
+
+        ticker_a = str(data["ticker_a"])
+        ticker_b = str(data["ticker_b"])
+        pair = ArbPair(
+            event_ticker=event_ticker,
+            ticker_a=ticker_a,
+            ticker_b=ticker_b,
+            fee_type=str(data.get("fee_type", "quadratic_with_maker_fees")),
+            fee_rate=float(data.get("fee_rate", 0.0175)),
+            close_time=str(data["close_time"]) if data.get("close_time") else None,
+        )
+        self._scanner.add_pair(
+            event_ticker, ticker_a, ticker_b,
+            fee_type=pair.fee_type, fee_rate=pair.fee_rate, close_time=pair.close_time,
+        )
+        self._games[event_ticker] = pair
+        if "sub_title" in data:
+            self._subtitles[event_ticker] = str(data["sub_title"])
+        if "label" in data:
+            self._labels[event_ticker] = str(data["label"])
+        if self.on_change:
+            self.on_change()
+        return pair
+
     async def add_games(self, urls: list[str]) -> list[ArbPair]:
         """Set up monitoring for multiple games concurrently.
 
