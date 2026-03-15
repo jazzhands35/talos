@@ -30,7 +30,7 @@ SCAN_SERIES = [
     # Hockey — international
     "KXSHLGAME", "KXKHLGAME",
     # Basketball — international
-    "KXEUROLEAGUEGAME",
+    "KXEUROLEAGUEGAME", "KXNBLGAME", "KXBBLGAME", "KXCBAGAME",
     # MMA / Boxing
     "KXUFCFIGHT", "KXBOXING",
     # Tournament winner (only shows when down to 2 active markets / finals)
