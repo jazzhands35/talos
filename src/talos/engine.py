@@ -80,6 +80,7 @@ class TradingEngine:
         lifecycle_feed: LifecycleFeed | None = None,
         position_feed: PositionFeed | None = None,
         game_status_resolver: GameStatusResolver | None = None,
+        data_collector: object | None = None,
     ) -> None:
         self._scanner = scanner
         self._game_manager = game_manager
@@ -95,6 +96,7 @@ class TradingEngine:
         self._ticker_feed = ticker_feed
         self._lifecycle_feed = lifecycle_feed
         self._game_status_resolver = game_status_resolver
+        self._data_collector = data_collector
         self._position_feed = position_feed
         self._proposer = OpportunityProposer(self._auto_config)
 
@@ -638,6 +640,25 @@ class TradingEngine:
             is_taker=msg.is_taker,
             post_position=msg.post_position,
         )
+        if self._data_collector is not None:
+            # Find event ticker for this market
+            event_ticker = ""
+            for pair in self._scanner.pairs:
+                if msg.market_ticker in (pair.ticker_a, pair.ticker_b):
+                    event_ticker = pair.event_ticker
+                    break
+            self._data_collector.log_fill(
+                event_ticker=event_ticker,
+                trade_id=msg.trade_id,
+                order_id=msg.order_id,
+                ticker=msg.market_ticker,
+                side=msg.side,
+                price=msg.yes_price,
+                count=msg.count,
+                fee_cost=msg.fee_cost if hasattr(msg, "fee_cost") else 0,
+                is_taker=msg.is_taker,
+                post_position=msg.post_position,
+            )
 
     # ── Lifecycle event handlers ────────────────────────────────
 
@@ -655,6 +676,19 @@ class TradingEngine:
         )
         if self._is_our_market(ticker):
             self._notify(f"Market determined: {ticker} → {result}")
+            if self._data_collector is not None:
+                event_ticker = ""
+                for pair in self._scanner.pairs:
+                    if ticker in (pair.ticker_a, pair.ticker_b):
+                        event_ticker = pair.event_ticker
+                        break
+                self._data_collector.log_settlement(
+                    event_ticker=event_ticker,
+                    ticker=ticker,
+                    event_type="determined",
+                    result=result,
+                    settlement_value=settlement_value,
+                )
 
     def _on_market_settled(self, ticker: str) -> None:
         """Handle market settlement (cash distributed)."""
@@ -1083,6 +1117,21 @@ class TradingEngine:
                 )
             # Add to orders cache so WS handler can match future updates
             self._orders_cache.extend([order_a, order_b])
+            # Log to data collector
+            if self._data_collector is not None:
+                for order in (order_a, order_b):
+                    self._data_collector.log_order(
+                        event_ticker=bid.ticker_a.rsplit("-", 1)[0] if "-" in bid.ticker_a else "",
+                        order_id=order.order_id,
+                        ticker=order.ticker,
+                        side=order.side,
+                        status=order.status,
+                        price=order.no_price,
+                        initial_count=order.initial_count,
+                        fill_count=order.fill_count,
+                        remaining_count=order.remaining_count,
+                        source="auto_accept" if self._auto_config.enabled else "manual",
+                    )
         except Exception as e:
             self._notify(f"Order error: {type(e).__name__}: {e}", "error")
             logger.exception("place_bids_error")

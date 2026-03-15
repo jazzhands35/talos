@@ -48,3 +48,4 @@ htmlcov/
 
 # uv
 uv.lock
+talos_data.db

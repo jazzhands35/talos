@@ -89,6 +89,7 @@ class TalosApp(App):
             self.set_interval(1.0, self._auto_accept_tick)
             self.set_interval(3600.0, self._refresh_game_status)
             self.set_interval(300.0, self._refresh_volumes)
+            self.set_interval(10.0, self._log_market_snapshots)
             self._engine.on_notification = self._on_engine_notification
             self._engine.tracker.on_change = self._engine.on_top_of_market_change
             if self._engine.game_status_resolver is not None:
@@ -280,6 +281,44 @@ class TalosApp(App):
     async def _poll_trades(self) -> None:
         if self._engine is not None:
             await self._engine.refresh_trades()
+
+    def _log_market_snapshots(self) -> None:
+        """Log market snapshots every 10s for ML data collection."""
+        if self._engine is None or not hasattr(self._engine, '_data_collector'):
+            return
+        dc = self._engine._data_collector
+        if dc is None:
+            return
+        scanner = self._engine.scanner
+        snapshots = []
+        for opp in scanner.all_snapshots.values():
+            pos = None
+            for s in self._engine.position_summaries:
+                if s.event_ticker == opp.event_ticker:
+                    pos = s
+                    break
+            status = self._engine.event_statuses.get(opp.event_ticker, "")
+            gs = self._engine.game_status_resolver.get(opp.event_ticker) if self._engine.game_status_resolver else None
+            snapshots.append({
+                "event_ticker": opp.event_ticker,
+                "ticker_a": opp.ticker_a,
+                "ticker_b": opp.ticker_b,
+                "no_a": opp.no_a,
+                "no_b": opp.no_b,
+                "edge": opp.fee_edge,
+                "volume_a": 0,  # from ticker feed if available
+                "volume_b": 0,
+                "open_interest_a": 0,
+                "open_interest_b": 0,
+                "game_state": gs.state if gs else "unknown",
+                "status": status,
+                "filled_a": pos.leg_a.filled_count if pos else 0,
+                "filled_b": pos.leg_b.filled_count if pos else 0,
+                "resting_a": pos.leg_a.resting_count if pos else 0,
+                "resting_b": pos.leg_b.resting_count if pos else 0,
+            })
+        if snapshots:
+            dc.log_market_snapshots(snapshots)
 
     @work(thread=False)
     async def _refresh_volumes(self) -> None:
