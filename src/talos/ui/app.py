@@ -23,7 +23,8 @@ from talos.models.strategy import BidConfirmation
 from talos.proposal_queue import ProposalQueue
 from talos.scanner import ArbitrageScanner
 from talos.ui.proposal_panel import ProposalPanel
-from talos.ui.screens import AddGamesScreen, AutoAcceptScreen, BidScreen, UnitSizeScreen
+from talos.game_status import GameStatus
+from talos.ui.screens import AddGamesScreen, AutoAcceptScreen, BidScreen, ScanScreen, UnitSizeScreen
 from talos.ui.theme import APP_CSS
 from talos.ui.widgets import AccountPanel, OpportunitiesTable, OrderLog
 
@@ -44,6 +45,7 @@ class TalosApp(App):
         ("y", "approve_proposal", "Approve"),
         ("n", "reject_proposal", "Reject"),
         ("f", "toggle_auto_accept", "Auto-Accept"),
+        ("c", "scan", "Scan"),
         ("o", "open_in_browser", "Open"),
         ("q", "quit", "Quit"),
     ]
@@ -285,6 +287,35 @@ class TalosApp(App):
         urls = await self.push_screen_wait(AddGamesScreen())
         if urls is not None and self._engine is not None:
             await self._engine.add_games(urls)
+
+    def action_scan(self) -> None:
+        if self._engine is not None:
+            self._run_scan()
+
+    @work(thread=False, exclusive=True, group="scan")
+    async def _run_scan(self) -> None:
+        if self._engine is None:
+            return
+        self.notify("Scanning for events...")
+        events = await self._engine.game_manager.scan_events()
+        if not events:
+            self.notify("No new events found", severity="information")
+            return
+
+        statuses: dict[str, GameStatus] = {}
+        resolver = self._engine.game_status_resolver
+        if resolver is not None:
+            batch = [(e.event_ticker, e.sub_title or "") for e in events]
+            await resolver.resolve_batch(batch)
+            for e in events:
+                gs = resolver.get(e.event_ticker)
+                if gs is not None:
+                    statuses[e.event_ticker] = gs
+
+        selected = await self.push_screen_wait(ScanScreen(events, statuses))
+        if selected and self._engine is not None:
+            await self._engine.add_games(selected)
+            self.notify(f"Added {len(selected)} event(s)")
 
     def action_open_in_browser(self) -> None:
         """Open the highlighted event on Kalshi's website."""

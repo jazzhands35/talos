@@ -2,12 +2,43 @@
 
 from __future__ import annotations
 
+from zoneinfo import ZoneInfo
+
+from rich.text import Text as RichText
 from textual.app import ComposeResult
 from textual.containers import Vertical
 from textual.screen import ModalScreen
-from textual.widgets import Button, Input, Label, TextArea
+from textual.widgets import Button, DataTable, Input, Label, TextArea
 
+from talos.game_status import GameStatus, _extract_date_from_ticker
+from talos.models.market import Event
 from talos.models.strategy import BidConfirmation, Opportunity
+
+# Duplicated from widgets.py to avoid circular imports
+_SPORT_LEAGUE: dict[str, tuple[str, str]] = {
+    "KXNHLGAME": ("HOC", "NHL"),
+    "KXNBAGAME": ("BKB", "NBA"),
+    "KXMLBGAME": ("BSB", "MLB"),
+    "KXNFLGAME": ("FTB", "NFL"),
+    "KXWNBAGAME": ("BKB", "WNBA"),
+    "KXCFBGAME": ("BKB", "NCAAF"),
+    "KXCBBGAME": ("BKB", "NCAAB"),
+    "KXMLSGAME": ("SOC", "MLS"),
+    "KXEPLGAME": ("SOC", "EPL"),
+    "KXAHLGAME": ("HOC", "AHL"),
+    "KXLOLGAME": ("ESP", "LoL"),
+    "KXCS2GAME": ("ESP", "CS2"),
+    "KXVALGAME": ("ESP", "VAL"),
+    "KXDOTA2GAME": ("ESP", "DOTA"),
+    "KXCODGAME": ("ESP", "COD"),
+    "KXATPMATCH": ("TEN", "ATP"),
+    "KXATPDOUBLES": ("TEN", "ATP"),
+    "KXATPCHALLENGERMATCH": ("TEN", "ATPC"),
+    "KXWTACHALLENGERMATCH": ("TEN", "WTAC"),
+    "KXWTAMATCH": ("TEN", "WTA"),
+}
+
+_PT = ZoneInfo("America/Los_Angeles")
 
 
 class AddGamesScreen(ModalScreen[list[str] | None]):
@@ -187,3 +218,175 @@ class AutoAcceptScreen(ModalScreen[float | None]):
                 )
                 return
             self.dismiss(hours)
+
+
+def _fmt_vol_compact(volume: int) -> str:
+    """Format volume as compact string (e.g., '1.2k')."""
+    if volume == 0:
+        return "—"
+    if volume >= 1000:
+        return f"{volume / 1000:.1f}k"
+    return str(volume)
+
+
+class ScanScreen(ModalScreen[list[str] | None]):
+    """Modal showing scan results for event selection."""
+
+    DEFAULT_CSS = """
+    ScanScreen {
+        align: center middle;
+    }
+    #scan-dialog {
+        width: 90%;
+        height: 85%;
+        border: thick $surface;
+        background: $surface;
+        padding: 1 2;
+    }
+    #scan-dialog Label {
+        width: 100%;
+        margin: 0 0 1 0;
+    }
+    #scan-table {
+        height: 1fr;
+    }
+    """
+
+    BINDINGS = [
+        ("escape", "cancel", "Cancel"),
+        ("space", "toggle_selection", "Toggle"),
+        ("enter", "confirm", "Add Selected"),
+        ("a", "toggle_all", "Select All"),
+    ]
+
+    def __init__(
+        self,
+        events: list[Event],
+        statuses: dict[str, GameStatus] | None = None,
+    ) -> None:
+        super().__init__()
+        self._events = events
+        self._statuses = statuses or {}
+        self._selected: set[str] = set()
+        self._all_selected = False
+        # Ordered list of event tickers matching table row order
+        self._row_tickers: list[str] = []
+
+    def compose(self) -> ComposeResult:
+        count = len(self._events)
+        with Vertical(id="scan-dialog"):
+            yield Label(
+                f"Scan Results — {count} events found "
+                "[Space=Toggle Enter=Add Esc=Cancel]",
+                classes="modal-title",
+            )
+            yield DataTable(id="scan-table")
+
+    def on_mount(self) -> None:
+        table = self.query_one("#scan-table", DataTable)
+        table.cursor_type = "row"
+        table.zebra_stripes = True
+
+        r = "right"
+        table.add_column("✓", width=2)
+        table.add_column("Spt", width=4)
+        table.add_column("Lg", width=5)
+        table.add_column(RichText("Date", justify=r), width=6)
+        table.add_column(RichText("Time", justify=r), width=8)
+        table.add_column("Event")
+        table.add_column(RichText("V-A", justify=r), width=7)
+        table.add_column(RichText("V-B", justify=r), width=7)
+
+        # Build sortable row data
+        rows: list[tuple[float, str, tuple[str, ...]]] = []
+        for ev in self._events:
+            ticker = ev.event_ticker
+            prefix = ev.series_ticker or ticker.split("-")[0]
+            sport, league = _SPORT_LEAGUE.get(prefix, ("—", "—"))
+
+            # Date and time from game status
+            gs = self._statuses.get(ticker)
+            sort_ts = 0.0
+            date_str = "—"
+            time_str = "—"
+            if gs is not None and gs.scheduled_start is not None:
+                pt = gs.scheduled_start.astimezone(_PT)
+                date_str = pt.strftime("%m/%d")
+                time_str = pt.strftime("%I:%M %p").lstrip("0")
+                sort_ts = gs.scheduled_start.timestamp()
+            else:
+                raw_date = _extract_date_from_ticker(ticker)
+                if raw_date is not None:
+                    date_str = f"{raw_date[4:6]}/{raw_date[6:8]}"
+
+            # Event label
+            label = ev.sub_title or ev.title
+            if "(" in label:
+                label = label[: label.rfind("(")].strip()
+
+            # Volume
+            vol_a = _fmt_vol_compact(ev.markets[0].volume_24h or 0) if ev.markets else "—"
+            vol_b = _fmt_vol_compact(ev.markets[1].volume_24h or 0) if len(ev.markets) > 1 else "—"
+
+            rows.append((sort_ts, ticker, (sport, league, date_str, time_str, label, vol_a, vol_b)))
+
+        # Sort by date/time ascending (soonest first)
+        rows.sort(key=lambda r: r[0])
+
+        self._row_tickers = []
+        for _, ticker, (sport, league, date_str, time_str, label, vol_a, vol_b) in rows:
+            self._row_tickers.append(ticker)
+            table.add_row(
+                "",  # ✓ column
+                sport,
+                league,
+                RichText(date_str, justify="right"),
+                RichText(time_str, justify="right"),
+                label,
+                RichText(vol_a, justify="right"),
+                RichText(vol_b, justify="right"),
+                key=ticker,
+            )
+
+    def action_cancel(self) -> None:
+        self.dismiss(None)
+
+    def action_toggle_selection(self) -> None:
+        table = self.query_one("#scan-table", DataTable)
+        if table.cursor_row is None or table.row_count == 0:
+            return
+        row_idx = table.cursor_row
+        if row_idx < 0 or row_idx >= len(self._row_tickers):
+            return
+        ticker = self._row_tickers[row_idx]
+        check_col = table.ordered_columns[0].key
+        if ticker in self._selected:
+            self._selected.discard(ticker)
+            table.update_cell(ticker, check_col, "")
+        else:
+            self._selected.add(ticker)
+            table.update_cell(ticker, check_col, "✓")
+
+    def action_toggle_all(self) -> None:
+        table = self.query_one("#scan-table", DataTable)
+        check_col = table.ordered_columns[0].key
+        if self._all_selected:
+            # Deselect all
+            self._selected.clear()
+            for ticker in self._row_tickers:
+                table.update_cell(ticker, check_col, "")
+            self._all_selected = False
+        else:
+            # Select all
+            self._selected = set(self._row_tickers)
+            for ticker in self._row_tickers:
+                table.update_cell(ticker, check_col, "✓")
+            self._all_selected = True
+
+    def action_confirm(self) -> None:
+        if self._selected:
+            # Preserve the display order for selected tickers
+            ordered = [t for t in self._row_tickers if t in self._selected]
+            self.dismiss(ordered)
+        else:
+            self.dismiss(None)
