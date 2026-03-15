@@ -309,8 +309,18 @@ SOURCE_MAP: dict[str, tuple[str, str, str]] = {
     "KXCBBGAME": ("espn", "basketball", "mens-college-basketball"),
     "KXMLSGAME": ("espn", "soccer", "usa.1"),
     "KXEPLGAME": ("espn", "soccer", "eng.1"),
-    # The Odds API — minor leagues
+    # ESPN — European soccer
+    "KXLALIGAGAME": ("espn", "soccer", "esp.1"),
+    "KXBUNDESLIGAGAME": ("espn", "soccer", "ger.1"),
+    "KXSERIEAGAME": ("espn", "soccer", "ita.1"),
+    "KXLIGUE1GAME": ("espn", "soccer", "fra.1"),
+    "KXUCLGAME": ("espn", "soccer", "uefa.champions"),
+    "KXLIGAMXGAME": ("espn", "soccer", "mex.1"),
+    # ESPN — MMA
+    "KXUFCFIGHT": ("espn", "mma", "ufc"),
+    # The Odds API — minor/international leagues
     "KXAHLGAME": ("odds-api", "icehockey_ahl", "icehockey_ahl"),
+    "KXSHLGAME": ("odds-api", "icehockey_sweden_hockey_league", "icehockey_sweden_hockey_league"),
     # Tennis — tournament keys rotate; map active ones here
     # "KXATPMATCH": ("odds-api", "tennis_atp_indian_wells", "tennis_atp_indian_wells"),
     # "KXWTAMATCH": ("odds-api", "tennis_wta_indian_wells", "tennis_wta_indian_wells"),

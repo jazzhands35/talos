@@ -24,6 +24,15 @@ SCAN_SERIES = [
     "KXLOLGAME", "KXCS2GAME", "KXVALGAME", "KXDOTA2GAME", "KXCODGAME",
     "KXATPMATCH", "KXWTAMATCH", "KXATPCHALLENGERMATCH", "KXWTACHALLENGERMATCH",
     "KXATPDOUBLES",
+    # Soccer — European leagues
+    "KXLALIGAGAME", "KXBUNDESLIGAGAME", "KXSERIEAGAME", "KXLIGUE1GAME",
+    "KXUCLGAME", "KXLIGAMXGAME",
+    # Hockey — international
+    "KXSHLGAME", "KXKHLGAME",
+    # Basketball — international
+    "KXEUROLEAGUEGAME",
+    # MMA
+    "KXUFCFIGHT",
     # Tournament winner (only shows when down to 2 active markets / finals)
     "KXIWMEN", "KXIWWMN",
 ]
