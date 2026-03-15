@@ -150,8 +150,6 @@ class TalosApp(App):
             if self._auto_accept_logger:
                 self._auto_accept_logger.log_error(proposal, str(e), snapshot, self._auto_accept)
 
-        self.query_one(ProposalPanel).refresh_proposals()
-
     def _capture_state_snapshot(self) -> dict[str, object]:
         """Capture full trading state for JSONL logging."""
         if self._engine is None:
@@ -404,10 +402,16 @@ class TalosApp(App):
             await self._engine.remove_game(event_ticker)
 
     def action_approve_proposal(self) -> None:
-        self.query_one(ProposalPanel).approve_selected()
+        if self._engine is not None:
+            pending = self._engine.proposal_queue.pending()
+            if pending:
+                self._execute_approval(pending[0].key)
 
     def action_reject_proposal(self) -> None:
-        self.query_one(ProposalPanel).reject_selected()
+        if self._engine is not None:
+            pending = self._engine.proposal_queue.pending()
+            if pending:
+                self._engine.reject_proposal(pending[0].key)
 
     def action_set_unit_size(self) -> None:
         if self._engine is not None:
