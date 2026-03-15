@@ -374,17 +374,57 @@ class TalosApp(App):
         if self._engine is None:
             return
         self.notify("Scanning for events...")
+        import time as _time
+        _t0 = _time.monotonic()
         try:
             events = await self._engine.game_manager.scan_events()
         except Exception as e:
             self.notify(f"Scan failed: {e}", severity="error")
             return
+        _duration = round((_time.monotonic() - _t0) * 1000)
         if not events:
             self.notify("No new events found", severity="information")
             return
 
         self.notify(f"Found {len(events)} events")
         selected = await self.push_screen_wait(ScanScreen(events))
+        selected_tickers = set(selected) if selected else set()
+
+        # Log scan to data collector
+        dc = getattr(self._engine, '_data_collector', None)
+        if dc is not None:
+            from talos.game_manager import SCAN_SERIES
+            scan_events = []
+            for ev in events:
+                prefix = ev.series_ticker or ev.event_ticker.split("-")[0]
+                from talos.ui.widgets import _SPORT_LEAGUE
+                sport, league = _SPORT_LEAGUE.get(prefix, ("", ""))
+                active_mkts = [m for m in ev.markets if m.status == "active"]
+                scan_events.append({
+                    "event_ticker": ev.event_ticker,
+                    "series_ticker": ev.series_ticker,
+                    "sport": sport,
+                    "league": league,
+                    "title": ev.title,
+                    "sub_title": ev.sub_title,
+                    "volume_a": active_mkts[0].volume_24h or 0 if len(active_mkts) > 0 else 0,
+                    "volume_b": active_mkts[1].volume_24h or 0 if len(active_mkts) > 1 else 0,
+                    "no_bid_a": active_mkts[0].no_bid or 0 if len(active_mkts) > 0 else 0,
+                    "no_ask_a": active_mkts[0].no_ask or 0 if len(active_mkts) > 0 else 0,
+                    "no_bid_b": active_mkts[1].no_bid or 0 if len(active_mkts) > 1 else 0,
+                    "no_ask_b": active_mkts[1].no_ask or 0 if len(active_mkts) > 1 else 0,
+                    "edge": 0.0,
+                    "selected": 1 if ev.event_ticker in selected_tickers else 0,
+                })
+            dc.log_scan(
+                events_found=len(events),
+                events_eligible=len(events),
+                events_selected=len(selected_tickers),
+                series_scanned=len(SCAN_SERIES),
+                duration_ms=_duration,
+                events=scan_events,
+            )
+
         if selected and self._engine is not None:
             await self._engine.add_games(selected)
             self.notify(f"Added {len(selected)} event(s)")

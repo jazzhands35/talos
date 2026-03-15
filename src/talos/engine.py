@@ -111,6 +111,7 @@ class TradingEngine:
         self._event_positions: dict[str, EventPosition] = {}
         self._paused_markets: set[str] = set()
         self._ws_connected: bool = False
+        self._settled_markets: dict[str, dict[str, str]] = {}  # event_ticker -> {ticker: result}
 
         # Wire portfolio feed callbacks
         if self._portfolio_feed is not None:
@@ -676,12 +677,16 @@ class TradingEngine:
         )
         if self._is_our_market(ticker):
             self._notify(f"Market determined: {ticker} → {result}")
+            # Find the event this market belongs to
+            event_ticker = ""
+            pair = None
+            for p in self._scanner.pairs:
+                if ticker in (p.ticker_a, p.ticker_b):
+                    event_ticker = p.event_ticker
+                    pair = p
+                    break
+
             if self._data_collector is not None:
-                event_ticker = ""
-                for pair in self._scanner.pairs:
-                    if ticker in (pair.ticker_a, pair.ticker_b):
-                        event_ticker = pair.event_ticker
-                        break
                 self._data_collector.log_settlement(
                     event_ticker=event_ticker,
                     ticker=ticker,
@@ -689,6 +694,20 @@ class TradingEngine:
                     result=result,
                     settlement_value=settlement_value,
                 )
+
+            # Track which markets have been determined for event_outcome
+            if event_ticker and pair:
+                if event_ticker not in self._settled_markets:
+                    self._settled_markets[event_ticker] = {}
+                self._settled_markets[event_ticker][ticker] = result
+
+                # Check if both legs are now determined
+                both_done = (
+                    pair.ticker_a in self._settled_markets[event_ticker]
+                    and pair.ticker_b in self._settled_markets[event_ticker]
+                )
+                if both_done and self._data_collector is not None:
+                    self._log_event_outcome(event_ticker, pair)
 
     def _on_market_settled(self, ticker: str) -> None:
         """Handle market settlement (cash distributed)."""
@@ -723,6 +742,69 @@ class TradingEngine:
             )
         except Exception:
             logger.warning("settlement_fetch_failed", ticker=ticker, exc_info=True)
+
+    def _log_event_outcome(self, event_ticker: str, pair: ArbPair) -> None:
+        """Log the final outcome of an event with trap analysis."""
+        try:
+            ledger = self._adjuster.get_ledger(event_ticker)
+        except KeyError:
+            return
+
+        filled_a = ledger.filled_count(Side.A)
+        filled_b = ledger.filled_count(Side.B)
+        results = self._settled_markets.get(event_ticker, {})
+        result_a = results.get(pair.ticker_a, "")
+        result_b = results.get(pair.ticker_b, "")
+
+        prefix = event_ticker.split("-")[0]
+        from talos.ui.widgets import _SPORT_LEAGUE
+        sport, league = _SPORT_LEAGUE.get(prefix, ("", ""))
+
+        total_cost_a = ledger.filled_total_cost(Side.A)
+        total_cost_b = ledger.filled_total_cost(Side.B)
+        total_fees_a = ledger.filled_fees(Side.A)
+        total_fees_b = ledger.filled_fees(Side.B)
+
+        # Compute revenue: NO side wins → payout = count * 100 cents
+        revenue = 0
+        if result_a == "no":
+            revenue += filled_a * 100
+        if result_b == "no":
+            revenue += filled_b * 100
+
+        total_pnl = revenue - total_cost_a - total_cost_b - total_fees_a - total_fees_b
+
+        avg_a = total_cost_a / filled_a if filled_a > 0 else 0.0
+        avg_b = total_cost_b / filled_b if filled_b > 0 else 0.0
+
+        gs = self._game_status_resolver.get(event_ticker) if self._game_status_resolver else None
+
+        self._data_collector.log_event_outcome(
+            event_ticker=event_ticker,
+            sport=sport,
+            league=league,
+            filled_a=filled_a,
+            filled_b=filled_b,
+            avg_price_a=avg_a,
+            avg_price_b=avg_b,
+            total_cost_a=total_cost_a,
+            total_cost_b=total_cost_b,
+            total_fees_a=total_fees_a,
+            total_fees_b=total_fees_b,
+            result_a=result_a,
+            result_b=result_b,
+            revenue=revenue,
+            total_pnl=total_pnl,
+            game_state_at_fill=gs.state if gs else "",
+        )
+        logger.info(
+            "event_outcome_logged",
+            event_ticker=event_ticker,
+            filled_a=filled_a,
+            filled_b=filled_b,
+            total_pnl=total_pnl,
+            trapped=filled_a != filled_b,
+        )
 
     def _on_market_paused(self, ticker: str, is_deactivated: bool) -> None:
         """Handle market pause/unpause."""
@@ -1149,6 +1231,27 @@ class TradingEngine:
                 ]
                 if batch:
                     await self._game_status_resolver.resolve_batch(batch)
+            # Log game adds to data collector
+            if self._data_collector is not None:
+                for pair in pairs:
+                    prefix = pair.event_ticker.split("-")[0]
+                    from talos.ui.widgets import _SPORT_LEAGUE
+                    sport, league = _SPORT_LEAGUE.get(prefix, ("", ""))
+                    gs = self._game_status_resolver.get(pair.event_ticker) if self._game_status_resolver else None
+                    self._data_collector.log_game_add(
+                        event_ticker=pair.event_ticker,
+                        series_ticker=prefix,
+                        sport=sport,
+                        league=league,
+                        source="scan",
+                        ticker_a=pair.ticker_a,
+                        ticker_b=pair.ticker_b,
+                        volume_a=self._game_manager.volumes_24h.get(pair.ticker_a, 0),
+                        volume_b=self._game_manager.volumes_24h.get(pair.ticker_b, 0),
+                        fee_type=pair.fee_type,
+                        fee_rate=pair.fee_rate,
+                        scheduled_start=gs.scheduled_start.isoformat() if gs and gs.scheduled_start else None,
+                    )
             self._notify(f"Added {len(urls)} game(s)")
         except Exception as e:
             self._notify(f"Error: {e}", "error")
