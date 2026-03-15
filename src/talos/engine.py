@@ -381,17 +381,18 @@ class TradingEngine:
             self._recompute_positions()
             _t6 = _time.monotonic()
 
-            logger.info(
-                "refresh_account_timing",
-                total_ms=round((_t6 - _t0) * 1000),
-                balance_ms=round((_t2 - _t1) * 1000),
-                orders_ms=round((_t3 - _t2) * 1000),
-                order_count=len(orders),
-                sync_ms=round((_t4 - _t3) * 1000),
-                positions_ms=round((_t5 - _t4) * 1000),
-                recompute_ms=round((_t6 - _t5) * 1000),
-                pair_count=len(self._scanner.pairs),
+            _timing = (
+                f"refresh_account: total={round((_t6 - _t0) * 1000)}ms "
+                f"balance={round((_t2 - _t1) * 1000)}ms "
+                f"orders={round((_t3 - _t2) * 1000)}ms({len(orders)}) "
+                f"sync={round((_t4 - _t3) * 1000)}ms "
+                f"positions={round((_t5 - _t4) * 1000)}ms "
+                f"recompute={round((_t6 - _t5) * 1000)}ms "
+                f"pairs={len(self._scanner.pairs)}\n"
             )
+            from pathlib import Path
+            with Path("talos_perf.log").open("a") as _f:
+                _f.write(_timing)
 
             # Build enriched order dicts for the order log
             self._order_data = [

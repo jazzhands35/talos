@@ -404,13 +404,10 @@ class OpportunitiesTable(DataTable):
                     self.add_row(*row_data, key=opp.event_ticker)
 
         _elapsed = (_time.monotonic() - _t0) * 1000
-        if _elapsed > 50:  # Only log if slow (>50ms)
-            import structlog as _sl
-            _sl.get_logger().info(
-                "table_refresh_timing",
-                ms=round(_elapsed),
-                rows=len(all_snaps),
-            )
+        if _elapsed > 50:
+            from pathlib import Path
+            with Path("talos_perf.log").open("a") as _f:
+                _f.write(f"table_refresh: {round(_elapsed)}ms rows={len(all_snaps)}\n")
 
     def _build_row(
         self, opp: Any, tracker: TopOfMarketTracker | None
