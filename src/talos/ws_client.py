@@ -130,7 +130,12 @@ class KalshiWSClient:
     async def connect(self) -> None:
         """Open the WebSocket connection with auth headers."""
         headers = self._auth.headers("GET", "/trade-api/ws/v2")
-        self._ws = await websockets.connect(self._ws_url, additional_headers=headers)
+        self._ws = await websockets.connect(
+            self._ws_url,
+            additional_headers=headers,
+            ping_interval=None,  # disable client pings — Kalshi sends server pings every 10s
+            ping_timeout=None,   # no client-side timeout
+        )
         logger.info("ws_connected", url=self._ws_url)
 
     async def disconnect(self) -> None:
