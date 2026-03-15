@@ -1201,7 +1201,8 @@ class TradingEngine:
         total_b = filled_b + resting_b
 
         if total_a == 0 and total_b == 0:
-            return ""
+            # No position — show why proposer isn't suggesting (fall through)
+            return self._compute_proposer_status(event_ticker)
 
         # Settled — no resting orders and either balanced fills or markets closed
         if resting_a == 0 and resting_b == 0 and (filled_a > 0 or filled_b > 0):
@@ -1245,31 +1246,7 @@ class TradingEngine:
             if "bid" in pending_kinds:
                 return "Proposed"
 
-            if not self._auto_config.enabled:
-                return "Sug. off"
-
-            # Check why proposer isn't suggesting
-            opp = self._scanner.get_opportunity(event_ticker)
-            if opp is None or opp.fee_edge < self._auto_config.edge_threshold_cents:
-                return "Low edge"
-
-            # Check stability timer
-            stability = self._proposer.stability_elapsed(event_ticker)
-            if (
-                stability is not None
-                and self._auto_config.stability_seconds > 0
-                and stability < self._auto_config.stability_seconds
-            ):
-                remaining = self._auto_config.stability_seconds - stability
-                return f"Stable {remaining:.0f}s"
-
-            # Check cooldown
-            cooldown = self._proposer.cooldown_elapsed(event_ticker)
-            if cooldown is not None and cooldown < self._auto_config.rejection_cooldown_seconds:
-                remaining = self._auto_config.rejection_cooldown_seconds - cooldown
-                return f"Cooldown {remaining:.0f}s"
-
-            return "Ready"
+            return self._compute_proposer_status(event_ticker)
 
         # Check for fill imbalance
         if filled_a != filled_b:
@@ -1310,6 +1287,31 @@ class TradingEngine:
                 except KeyError:
                     return None
         return None
+
+    def _compute_proposer_status(self, event_ticker: str) -> str:
+        """Diagnose why the proposer isn't suggesting for this event."""
+        if not self._auto_config.enabled:
+            return "Sug. off"
+
+        opp = self._scanner.get_opportunity(event_ticker)
+        if opp is None or opp.fee_edge < self._auto_config.edge_threshold_cents:
+            return "Low edge"
+
+        stability = self._proposer.stability_elapsed(event_ticker)
+        if (
+            stability is not None
+            and self._auto_config.stability_seconds > 0
+            and stability < self._auto_config.stability_seconds
+        ):
+            remaining = self._auto_config.stability_seconds - stability
+            return f"Stable {remaining:.0f}s"
+
+        cooldown = self._proposer.cooldown_elapsed(event_ticker)
+        if cooldown is not None and cooldown < self._auto_config.rejection_cooldown_seconds:
+            remaining = self._auto_config.rejection_cooldown_seconds - cooldown
+            return f"Cooldown {remaining:.0f}s"
+
+        return "Ready"
 
     def _recompute_positions(self) -> None:
         """Recompute position summaries from ledger state and enrich with status."""
