@@ -368,6 +368,86 @@ class PandaScoreProvider:
             return []
 
 
+# ── API-Tennis Provider (Challengers) ────────────────────────────
+
+_API_TENNIS_BASE = "https://api.api-tennis.com/tennis/"
+
+# event_type_key values
+_CHALLENGER_MEN = "281"
+_CHALLENGER_WOMEN = "275"
+
+
+class ApiTennisProvider:
+    """Fetches tennis match data from api-tennis.com (challengers + all tours)."""
+
+    @staticmethod
+    def _parse_response(data: dict) -> list[ExternalGame]:
+        games: list[ExternalGame] = []
+        for item in data.get("result", []):
+            if not isinstance(item, dict):
+                continue
+            try:
+                date_str = item.get("event_date", "")
+                time_str = item.get("event_time", "00:00")
+                # Parse date + time into datetime (API returns in configured timezone)
+                dt = datetime.fromisoformat(f"{date_str}T{time_str}:00+00:00")
+
+                is_live = item.get("event_live", "0") == "1"
+                status_raw = item.get("event_status", "")
+                if status_raw == "Finished":
+                    state = "post"
+                elif is_live or status_raw.startswith("Set"):
+                    state = "live"
+                else:
+                    state = "pre"
+
+                p1 = item.get("event_first_player", "")
+                p2 = item.get("event_second_player", "")
+
+                games.append(
+                    ExternalGame(
+                        home_team=p1,
+                        away_team=p2,
+                        scheduled_start=dt,
+                        state=state,
+                        detail=status_raw if state == "live" else "",
+                    )
+                )
+            except (ValueError, KeyError):
+                pass
+        return games
+
+    async def fetch_games(
+        self, sport: str, league: str, game_date: str  # noqa: ARG002
+    ) -> list[ExternalGame]:
+        api_key = os.environ.get("API_TENNIS_KEY", "")
+        if not api_key:
+            logger.warning("api_tennis_key_missing")
+            return []
+
+        # game_date is "YYYYMMDD", convert to "YYYY-MM-DD"
+        date_fmt = f"{game_date[:4]}-{game_date[4:6]}-{game_date[6:8]}"
+
+        try:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(10.0)) as client:
+                resp = await client.get(
+                    _API_TENNIS_BASE,
+                    params={
+                        "method": "get_fixtures",
+                        "date_start": date_fmt,
+                        "date_stop": date_fmt,
+                        "event_type_key": league,  # e.g., "281" for challenger men
+                        "APIkey": api_key,
+                        "timezone": "Etc/UTC",
+                    },
+                )
+                resp.raise_for_status()
+                return self._parse_response(resp.json())
+        except Exception:
+            logger.warning("api_tennis_fetch_failed", league=league, exc_info=True)
+            return []
+
+
 # ── Source Map & Resolver ─────────────────────────────────────────
 
 SOURCE_MAP: dict[str, tuple[str, str, str]] = {
@@ -393,7 +473,10 @@ SOURCE_MAP: dict[str, tuple[str, str, str]] = {
     # The Odds API — minor/international leagues
     "KXAHLGAME": ("odds-api", "icehockey_ahl", "icehockey_ahl"),
     "KXSHLGAME": ("odds-api", "icehockey_sweden_hockey_league", "icehockey_sweden_hockey_league"),
-    # Tennis — resolved dynamically via OddsApiProvider.get_active_tennis_keys()
+    # Tennis challengers — API-Tennis (event_type_key 281=men, 275=women)
+    "KXATPCHALLENGERMATCH": ("api-tennis", "tennis", "281"),
+    "KXWTACHALLENGERMATCH": ("api-tennis", "tennis", "272"),
+    # Tennis main draw — resolved dynamically via OddsApiProvider.get_active_tennis_keys()
     # Not in SOURCE_MAP — handled by TENNIS_SERIES set below
     # PandaScore — esports
     "KXLOLGAME": ("pandascore", "lol", "league-of-legends"),
@@ -404,9 +487,9 @@ SOURCE_MAP: dict[str, tuple[str, str, str]] = {
 }
 
 # Tennis series resolved dynamically — tournament keys rotate
+# Main-draw tennis — resolved dynamically (challengers in SOURCE_MAP above)
 TENNIS_SERIES = {
-    "KXATPMATCH", "KXWTAMATCH", "KXATPCHALLENGERMATCH",
-    "KXWTACHALLENGERMATCH", "KXATPDOUBLES",
+    "KXATPMATCH", "KXWTAMATCH", "KXATPDOUBLES",
 }
 
 # Map Kalshi tennis prefix hints to Odds API key patterns
@@ -458,6 +541,7 @@ class GameStatusResolver:
             "espn": EspnProvider(),
             "odds-api": OddsApiProvider(),
             "pandascore": PandaScoreProvider(),
+            "api-tennis": ApiTennisProvider(),
         }
         self._http = http
         # Cache: event_ticker -> (status, team_codes, source_key)
