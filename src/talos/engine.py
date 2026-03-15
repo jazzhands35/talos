@@ -170,6 +170,11 @@ class TradingEngine:
         return self._position_summaries
 
     @property
+    def event_statuses(self) -> dict[str, str]:
+        """Event ticker -> status string for ALL monitored events."""
+        return getattr(self, "_event_statuses", {})
+
+    @property
     def balance(self) -> int:
         return self._balance
 
@@ -1326,6 +1331,21 @@ class TradingEngine:
             ep = self._event_positions.get(summary.event_ticker)
             if ep is not None:
                 summary.kalshi_pnl = ep.realized_pnl
+
+        # Compute status for ALL pairs (including those without positions)
+        self._event_statuses: dict[str, str] = {}
+        for pair in self._scanner.pairs:
+            # Events with position summaries already have status set above
+            existing = next(
+                (s for s in self._position_summaries if s.event_ticker == pair.event_ticker),
+                None,
+            )
+            if existing is not None:
+                self._event_statuses[pair.event_ticker] = existing.status
+            else:
+                self._event_statuses[pair.event_ticker] = self._compute_proposer_status(
+                    pair.event_ticker
+                )
 
     async def _recover_stale_books(self) -> None:
         """Resubscribe to any tickers with stale orderbooks.

@@ -265,6 +265,7 @@ class TalosApp(App):
         if self._engine is not None:
             table.update_labels(self._engine.game_manager.labels)
             table.update_volumes(self._engine.game_manager.volumes_24h)
+            table.update_statuses(self._engine.event_statuses)
         tracker = self._engine.tracker if self._engine else None
         table.refresh_from_scanner(self._scanner, tracker)
 

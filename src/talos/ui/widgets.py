@@ -243,6 +243,7 @@ class OpportunitiesTable(DataTable):
         self._labels: dict[str, str] = {}
         self._resolver: Any = None
         self._volumes_24h: dict[str, int] = {}
+        self._event_statuses: dict[str, str] = {}
         self._sort_col: int | None = None
         self._sort_reverse: bool = True
         self._needs_resort: bool = False
@@ -254,6 +255,10 @@ class OpportunitiesTable(DataTable):
     def update_volumes(self, volumes: dict[str, int]) -> None:
         """Store 24h volume data keyed by market ticker."""
         self._volumes_24h = volumes
+
+    def update_statuses(self, statuses: dict[str, str]) -> None:
+        """Store event status strings for all monitored events."""
+        self._event_statuses = statuses
 
     _SEP_STYLE = RichStyle(color=SURFACE2)
 
@@ -440,7 +445,7 @@ class OpportunitiesTable(DataTable):
             pos_a = pos_b = q_a = q_b = DIM_DASH
             cpm_a = cpm_b = eta_a = eta_b = DIM_DASH
             pnl = DIM_DASH
-            status = _fmt_status("")
+            status = _fmt_status(self._event_statuses.get(opp.event_ticker, ""))
             net_odds = _fmt_net_odds(opp.no_a, opp.no_b)
 
         if tracker is not None:
