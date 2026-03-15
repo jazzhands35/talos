@@ -170,11 +170,16 @@ class GameManager:
         """Set up monitoring for multiple games concurrently.
 
         Defers feed subscriptions and does a single bulk subscribe at the end,
-        reducing WS roundtrips from 2N to 1.
+        reducing WS roundtrips from 2N to 1. Semaphore-limited to avoid
+        overwhelming the API with hundreds of concurrent requests.
         """
-        pairs = list(
-            await asyncio.gather(*(self.add_game(url, subscribe=False) for url in urls))
-        )
+        sem = asyncio.Semaphore(4)
+
+        async def _add(url: str) -> ArbPair:
+            async with sem:
+                return await self.add_game(url, subscribe=False)
+
+        pairs = list(await asyncio.gather(*(_add(url) for url in urls)))
         tickers = [t for p in pairs for t in (p.ticker_a, p.ticker_b)]
         if tickers:
             await self._feed.subscribe_bulk(tickers)
