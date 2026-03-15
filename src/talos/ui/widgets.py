@@ -319,12 +319,9 @@ class OpportunitiesTable(DataTable):
         tracker: TopOfMarketTracker | None = None,
     ) -> None:
         """Rebuild table rows from current scanner state + position data."""
-        import time as _time
-
         if scanner is None:
             return
 
-        _t0 = _time.monotonic()
         all_snaps = scanner.all_snapshots
         current_keys = {row_key.value for row_key in self.rows}
         new_keys = set(all_snaps.keys())
@@ -369,11 +366,6 @@ class OpportunitiesTable(DataTable):
                         col_key = self.ordered_columns[col_idx].key
                         self.update_cell(opp.event_ticker, col_key, value)
 
-        _elapsed = (_time.monotonic() - _t0) * 1000
-        if _elapsed > 50:
-            from pathlib import Path
-            with Path("talos_perf.log").open("a") as _f:
-                _f.write(f"table_refresh: {round(_elapsed)}ms rows={len(all_snaps)}\n")
 
     def _build_row(
         self, opp: Any, tracker: TopOfMarketTracker | None

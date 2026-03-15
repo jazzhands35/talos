@@ -374,14 +374,14 @@ class TalosApp(App):
         if self._engine is None:
             return
         self.notify("Scanning for events...")
-        import time as _time
-        _t0 = _time.monotonic()
+        import time as _scan_time
+        _scan_t0 = _scan_time.monotonic()
         try:
             events = await self._engine.game_manager.scan_events()
         except Exception as e:
             self.notify(f"Scan failed: {e}", severity="error")
             return
-        _duration = round((_time.monotonic() - _t0) * 1000)
+        _duration = round((_scan_time.monotonic() - _scan_t0) * 1000)
         if not events:
             self.notify("No new events found", severity="information")
             return

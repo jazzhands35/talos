@@ -229,16 +229,8 @@ class TradingEngine:
             # Merge with saved games (union, deduplicate)
             all_tickers = list(dict.fromkeys(discovered + self._initial_games))
 
-            from pathlib import Path as _PP
-            import time as _st
-            _perf = _PP("talos_perf.log").open("a")
-
-            _s0 = _st.monotonic()
-
             # Fast restore from cached data (no REST calls)
             if self._initial_games_full:
-                _perf.write(f"STARTUP: fast-restoring {len(self._initial_games_full)} games from cache...\n")
-                _perf.flush()
                 cached_tickers = set()
                 pairs = []
                 for data in self._initial_games_full:
@@ -277,18 +269,12 @@ class TradingEngine:
                 all_tickers = [t for t in all_tickers if t not in cached_tickers]
 
             if all_tickers:
-                _perf.write(f"STARTUP: adding {len(all_tickers)} games via REST...\n")
-                _perf.flush()
                 pairs = await self._game_manager.add_games(all_tickers)
                 for pair in pairs:
                     self._adjuster.add_event(pair)
                 if pairs:
                     self._notify(f"Loaded {len(pairs)} game(s)")
                 self._initial_games.clear()
-
-            _s1 = _st.monotonic()
-            _perf.write(f"STARTUP: add_games done in {round((_s1 - _s0) * 1000)}ms\n")
-            _perf.flush()
 
             # Resolve game status — run in background, don't block startup
             if self._game_status_resolver is not None:
@@ -301,9 +287,6 @@ class TradingEngine:
                     import asyncio as _aio
                     _aio.create_task(self._game_status_resolver.resolve_batch(batch))
 
-            _perf.write(f"STARTUP: game_status fired as background task\n")
-            _perf.flush()
-
             # Subscribe to portfolio events globally (all markets)
             if self._portfolio_feed is not None:
                 await self._portfolio_feed.subscribe()
@@ -312,46 +295,27 @@ class TradingEngine:
             if self._position_feed is not None:
                 await self._position_feed.subscribe()
 
-            _s3 = _st.monotonic()
-            _perf.write(f"STARTUP: ws_subs done in {round((_s3 - _s1) * 1000)}ms\n")
-            _perf.flush()
-
             # Subscribe to ticker updates for all active markets
             if self._ticker_feed is not None:
                 market_tickers = self._active_market_tickers()
-                _perf.write(f"STARTUP: subscribing to {len(market_tickers)} ticker markets...\n")
-                _perf.flush()
                 if market_tickers:
                     await self._ticker_feed.subscribe(market_tickers)
-
-            _s4 = _st.monotonic()
-            _perf.write(f"STARTUP: ticker_sub done in {round((_s4 - _s3) * 1000)}ms\n")
-            _perf.write(f"STARTUP: total={round((_s4 - _s0) * 1000)}ms pairs={len(self._game_manager.active_games)}\n")
-            _perf.write(f"STARTUP: entering WS listen loop\n")
-            _perf.flush()
 
             await self._feed.start()
             # If we reach here without exception, the WS exited cleanly
             self._ws_connected = False
             self._notify("WEBSOCKET DISCONNECTED — prices are stale!", "error")
-            from pathlib import Path
-            Path("talos_perf.log").open("a").write(
-                f"WS_CLEAN_EXIT: listen loop ended without exception\n"
-            )
+            logger.error("ws_connection_lost", reason="listen loop exited cleanly")
         except Exception as e:
             self._ws_connected = False
             self._notify(f"WEBSOCKET DISCONNECTED: {e}", "error")
-            from pathlib import Path
-            Path("talos_perf.log").open("a").write(
-                f"WS_EXCEPTION: {type(e).__name__}: {e}\n"
-            )
+            logger.error("ws_connection_lost", reason=str(e), error_type=type(e).__name__)
 
         # Auto-reconnect after disconnect (wait 5s then retry)
         if not self._ws_connected:
-            import asyncio as _aio
-            from pathlib import Path as _P
-            _P("talos_perf.log").open("a").write("WS_RECONNECTING: waiting 5s...\n")
+            logger.info("ws_reconnecting")
             self._notify("Reconnecting WebSocket in 5s...", "warning")
+            import asyncio as _aio
             await _aio.sleep(5)
             await self.start_feed()
 
@@ -369,9 +333,6 @@ class TradingEngine:
 
         Runs every 30s as a safety net — catches anything WS missed.
         """
-        import time as _time
-        _t0 = _time.monotonic()
-
         await self._recover_stale_books()
 
         # Bump sync generation so optimistic placements from this cycle
@@ -383,11 +344,8 @@ class TradingEngine:
                 pass
 
         try:
-            _t2 = _time.monotonic()
             # Only fetch resting orders — fill data comes from positions API.
-            # "executed" (1500+) and "canceled" (250+) are historical noise.
             orders = await self._rest.get_all_orders(status="resting")
-            _t3 = _time.monotonic()
             self._orders_cache = orders
 
             # Update top-of-market tracker with current orders
@@ -435,7 +393,6 @@ class TradingEngine:
                 except KeyError:
                     pass  # Pair not registered with adjuster yet
 
-            _t4 = _time.monotonic()
             # Augment fills from positions API (P7/P15 — Kalshi is source
             # of truth, always). GET /portfolio/orders archives old orders,
             # but GET /portfolio/positions never does. This catches fills
@@ -465,21 +422,7 @@ class TradingEngine:
             except Exception:
                 logger.warning("positions_sync_failed", exc_info=True)
 
-            _t5 = _time.monotonic()
             self._recompute_positions()
-            _t6 = _time.monotonic()
-
-            _timing = (
-                f"refresh_account: total={round((_t6 - _t0) * 1000)}ms "
-                f"orders={round((_t3 - _t2) * 1000)}ms({len(orders)}) "
-                f"sync={round((_t4 - _t3) * 1000)}ms "
-                f"positions={round((_t5 - _t4) * 1000)}ms "
-                f"recompute={round((_t6 - _t5) * 1000)}ms "
-                f"pairs={len(self._scanner.pairs)}\n"
-            )
-            from pathlib import Path
-            with Path("talos_perf.log").open("a") as _f:
-                _f.write(_timing)
 
             # Build enriched order dicts for the order log
             self._order_data = [
