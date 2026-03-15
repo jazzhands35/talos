@@ -264,17 +264,28 @@ class TradingEngine:
 
             await self._feed.start()
             # If we reach here without exception, the WS exited cleanly
-            logger.error("ws_connection_lost", reason="listen loop exited cleanly")
             self._ws_connected = False
             self._notify("WEBSOCKET DISCONNECTED — prices are stale!", "error")
-        except Exception as e:
-            logger.error(
-                "ws_connection_lost",
-                reason=str(e),
-                error_type=type(e).__name__,
+            from pathlib import Path
+            Path("talos_perf.log").open("a").write(
+                f"WS_CLEAN_EXIT: listen loop ended without exception\n"
             )
+        except Exception as e:
             self._ws_connected = False
             self._notify(f"WEBSOCKET DISCONNECTED: {e}", "error")
+            from pathlib import Path
+            Path("talos_perf.log").open("a").write(
+                f"WS_EXCEPTION: {type(e).__name__}: {e}\n"
+            )
+
+        # Auto-reconnect after disconnect (wait 5s then retry)
+        if not self._ws_connected:
+            import asyncio as _aio
+            from pathlib import Path as _P
+            _P("talos_perf.log").open("a").write("WS_RECONNECTING: waiting 5s...\n")
+            self._notify("Reconnecting WebSocket in 5s...", "warning")
+            await _aio.sleep(5)
+            await self.start_feed()
 
     async def refresh_account(self) -> None:
         """Fetch balance + orders, sync ledgers, compute positions."""
