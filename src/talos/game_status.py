@@ -473,11 +473,12 @@ SOURCE_MAP: dict[str, tuple[str, str, str]] = {
     # The Odds API — minor/international leagues
     "KXAHLGAME": ("odds-api", "icehockey_ahl", "icehockey_ahl"),
     "KXSHLGAME": ("odds-api", "icehockey_sweden_hockey_league", "icehockey_sweden_hockey_league"),
-    # Tennis challengers — API-Tennis (event_type_key 281=men, 275=women)
+    # Tennis — API-Tennis covers all tours (event_type_key: 265=ATP, 266=WTA, 281=Ch.M, 272=Ch.W)
+    "KXATPMATCH": ("api-tennis", "tennis", "265"),
+    "KXWTAMATCH": ("api-tennis", "tennis", "266"),
     "KXATPCHALLENGERMATCH": ("api-tennis", "tennis", "281"),
     "KXWTACHALLENGERMATCH": ("api-tennis", "tennis", "272"),
-    # Tennis main draw — resolved dynamically via OddsApiProvider.get_active_tennis_keys()
-    # Not in SOURCE_MAP — handled by TENNIS_SERIES set below
+    "KXATPDOUBLES": ("api-tennis", "tennis", "267"),
     # PandaScore — esports
     "KXLOLGAME": ("pandascore", "lol", "league-of-legends"),
     "KXCS2GAME": ("pandascore", "csgo", "cs2"),
@@ -487,10 +488,8 @@ SOURCE_MAP: dict[str, tuple[str, str, str]] = {
 }
 
 # Tennis series resolved dynamically — tournament keys rotate
-# Main-draw tennis — resolved dynamically (challengers in SOURCE_MAP above)
-TENNIS_SERIES = {
-    "KXATPMATCH", "KXWTAMATCH", "KXATPDOUBLES",
-}
+# All tennis now in SOURCE_MAP via API-Tennis — no dynamic resolution needed
+TENNIS_SERIES: set[str] = set()
 
 # Map Kalshi tennis prefix hints to Odds API key patterns
 _TENNIS_KEY_HINTS = {
