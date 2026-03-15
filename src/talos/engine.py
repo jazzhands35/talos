@@ -278,6 +278,9 @@ class TradingEngine:
 
     async def refresh_account(self) -> None:
         """Fetch balance + orders, sync ledgers, compute positions."""
+        import time as _time
+        _t0 = _time.monotonic()
+
         await self._recover_stale_books()
 
         # Bump sync generation so optimistic placements from this cycle
@@ -289,11 +292,14 @@ class TradingEngine:
                 pass
 
         try:
+            _t1 = _time.monotonic()
             balance = await self._rest.get_balance()
             self._balance = balance.balance
             self._portfolio_value = balance.portfolio_value
 
+            _t2 = _time.monotonic()
             orders = await self._rest.get_all_orders()
+            _t3 = _time.monotonic()
             self._orders_cache = orders
 
             # Update top-of-market tracker with current orders
@@ -341,6 +347,7 @@ class TradingEngine:
                 except KeyError:
                     pass  # Pair not registered with adjuster yet
 
+            _t4 = _time.monotonic()
             # Augment fills from positions API (P7/P15 — Kalshi is source
             # of truth, always). GET /portfolio/orders archives old orders,
             # but GET /portfolio/positions never does. This catches fills
@@ -370,7 +377,21 @@ class TradingEngine:
             except Exception:
                 logger.warning("positions_sync_failed", exc_info=True)
 
+            _t5 = _time.monotonic()
             self._recompute_positions()
+            _t6 = _time.monotonic()
+
+            logger.info(
+                "refresh_account_timing",
+                total_ms=round((_t6 - _t0) * 1000),
+                balance_ms=round((_t2 - _t1) * 1000),
+                orders_ms=round((_t3 - _t2) * 1000),
+                order_count=len(orders),
+                sync_ms=round((_t4 - _t3) * 1000),
+                positions_ms=round((_t5 - _t4) * 1000),
+                recompute_ms=round((_t6 - _t5) * 1000),
+                pair_count=len(self._scanner.pairs),
+            )
 
             # Build enriched order dicts for the order log
             self._order_data = [

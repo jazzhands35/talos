@@ -363,9 +363,12 @@ class OpportunitiesTable(DataTable):
         tracker: TopOfMarketTracker | None = None,
     ) -> None:
         """Rebuild table rows from current scanner state + position data."""
+        import time as _time
+
         if scanner is None:
             return
 
+        _t0 = _time.monotonic()
         all_snaps = scanner.all_snapshots
         current_keys = {row_key.value for row_key in self.rows}
         new_keys = set(all_snaps.keys())
@@ -399,6 +402,15 @@ class OpportunitiesTable(DataTable):
                         self.update_cell(opp.event_ticker, col_key, value)
                 else:
                     self.add_row(*row_data, key=opp.event_ticker)
+
+        _elapsed = (_time.monotonic() - _t0) * 1000
+        if _elapsed > 50:  # Only log if slow (>50ms)
+            import structlog as _sl
+            _sl.get_logger().info(
+                "table_refresh_timing",
+                ms=round(_elapsed),
+                rows=len(all_snaps),
+            )
 
     def _build_row(
         self, opp: Any, tracker: TopOfMarketTracker | None
