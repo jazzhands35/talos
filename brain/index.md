@@ -32,6 +32,7 @@
 - [[plans/03-api-integration/phase-12-order-groups]]
 - [[plans/03-api-integration/phase-13-decrease-order]]
 - [[plans/03-api-integration/phase-14-tier3-extras]]
+- [[plans/04-ml-integration/overview]]
 
 ## Other
 - [[architecture]]
