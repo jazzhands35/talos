@@ -219,7 +219,8 @@ class OpportunitiesTable(DataTable):
         self._resolver: Any = None
         self._volumes_24h: dict[str, int] = {}
         self._sort_col: int | None = None
-        self._sort_reverse: bool = True  # default descending
+        self._sort_reverse: bool = True
+        self._needs_resort: bool = False
 
     def set_resolver(self, resolver: Any) -> None:
         """Set the game status resolver for Date/Game columns."""
@@ -273,12 +274,13 @@ class OpportunitiesTable(DataTable):
         return fixed, result
 
     def toggle_sort(self, col_idx: int) -> None:
-        """Toggle sort column/direction."""
+        """Sort rows by column — one-time reorder on click."""
         if col_idx == self._sort_col:
             self._sort_reverse = not self._sort_reverse
         else:
             self._sort_col = col_idx
-            self._sort_reverse = True  # start descending
+            self._sort_reverse = True
+        self._needs_resort = True
 
     def _sort_key(self, opp: Any) -> Any:
         """Return a comparable sort value for the current sort column."""
@@ -328,124 +330,106 @@ class OpportunitiesTable(DataTable):
             return
 
         all_snaps = scanner.all_snapshots
+        current_keys = {row_key.value for row_key in self.rows}
+        new_keys = set(all_snaps.keys())
 
-        # Sort by selected column (default: edge descending)
-        sorted_opps = sorted(
-            all_snaps.values(),
-            key=self._sort_key,
-            reverse=self._sort_reverse,
-        )
+        # On sort click: clear and re-add in sorted order
+        if self._needs_resort:
+            self._needs_resort = False
+            sorted_opps = sorted(
+                all_snaps.values(),
+                key=self._sort_key,
+                reverse=self._sort_reverse,
+            )
+            with self.app.batch_update():
+                self.clear()
+                for opp in sorted_opps:
+                    self.add_row(*self._build_row(opp, tracker), key=opp.event_ticker)
+            return
+
+        # Normal refresh: update in place, preserving row order and highlight
+        sorted_opps = sorted(all_snaps.values(), key=lambda o: o.raw_edge, reverse=True)
 
         with self.app.batch_update():
-            # Clear and re-add in sorted order (update_cell can't reorder)
-            self.clear()
+            for key in current_keys - new_keys:
+                if key is not None:
+                    self.remove_row(key)
             for opp in sorted_opps:
-                edge_str = _fmt_edge(opp.fee_edge)
-
-                # Position columns
-                pos = self._positions.get(opp.event_ticker)
-                if pos is not None:
-                    total_a = pos.leg_a.filled_count + pos.leg_a.resting_count
-                    total_b = pos.leg_b.filled_count + pos.leg_b.resting_count
-                    pos_a = _fmt_pos(pos.leg_a.filled_count, total_a, pos.leg_a.no_price)
-                    pos_b = _fmt_pos(pos.leg_b.filled_count, total_b, pos.leg_b.no_price)
-
-                    # Delta neutrality highlighting — yellow on behind side
-                    fa, fb = pos.leg_a.filled_count, pos.leg_b.filled_count
-                    ra, rb = pos.leg_a.resting_count, pos.leg_b.resting_count
-                    ta, tb = fa + ra, fb + rb
-                    if fa != fb:
-                        if fa < fb:
-                            pos_a = RichText(str(pos_a), style=YELLOW, justify="right")
-                        else:
-                            pos_b = RichText(str(pos_b), style=YELLOW, justify="right")
-                    elif ta != tb:
-                        if ta < tb:
-                            pos_a = RichText(str(pos_a), style=YELLOW, justify="right")
-                        else:
-                            pos_b = RichText(str(pos_b), style=YELLOW, justify="right")
-
-                    if pos.leg_a.queue_position:
-                        q_a = RichText(str(pos.leg_a.queue_position), justify="right")
-                    else:
-                        q_a = DIM_DASH
-                    if pos.leg_b.queue_position:
-                        q_b = RichText(str(pos.leg_b.queue_position), justify="right")
-                    else:
-                        q_b = DIM_DASH
-                    cpm_a = RichText(
-                        format_cpm(pos.leg_a.cpm, pos.leg_a.cpm_partial), justify="right"
-                    )
-                    cpm_b = RichText(
-                        format_cpm(pos.leg_b.cpm, pos.leg_b.cpm_partial), justify="right"
-                    )
-                    eta_a = RichText(
-                        format_eta(pos.leg_a.eta_minutes, pos.leg_a.cpm_partial), justify="right"
-                    )
-                    eta_b = RichText(
-                        format_eta(pos.leg_b.eta_minutes, pos.leg_b.cpm_partial), justify="right"
-                    )
-                    net = pos.locked_profit_cents - pos.exposure_cents
-                    pnl = _fmt_pnl(net, pos.kalshi_pnl)
-                    status = _fmt_status(pos.status)
-                    net_odds = _fmt_net_odds(
-                        opp.no_a,
-                        opp.no_b,
-                        pos.leg_a.filled_count,
-                        pos.leg_b.filled_count,
-                        pos.leg_a.total_fill_cost,
-                        pos.leg_b.total_fill_cost,
-                        pos.leg_a.total_fees,
-                        pos.leg_b.total_fees,
-                    )
+                row_data = self._build_row(opp, tracker)
+                if opp.event_ticker in current_keys:
+                    for col_idx, value in enumerate(row_data):
+                        col_key = self.ordered_columns[col_idx].key
+                        self.update_cell(opp.event_ticker, col_key, value)
                 else:
-                    pos_a = DIM_DASH
-                    pos_b = DIM_DASH
-                    q_a = DIM_DASH
-                    q_b = DIM_DASH
-                    cpm_a = DIM_DASH
-                    cpm_b = DIM_DASH
-                    eta_a = DIM_DASH
-                    eta_b = DIM_DASH
-                    pnl = DIM_DASH
-                    status = _fmt_status("")
-                    net_odds = _fmt_net_odds(opp.no_a, opp.no_b)
+                    self.add_row(*row_data, key=opp.event_ticker)
 
-                # Top-of-market warning (applies regardless of position data)
-                if tracker is not None:
-                    if tracker.is_at_top(opp.ticker_a) is False:
-                        q_a = RichText(f"!! {q_a}", style=YELLOW, justify="right")
-                    if tracker.is_at_top(opp.ticker_b) is False:
-                        q_b = RichText(f"!! {q_b}", style=YELLOW, justify="right")
+    def _build_row(
+        self, opp: Any, tracker: TopOfMarketTracker | None
+    ) -> tuple:
+        """Build the full row_data tuple for one opportunity."""
+        edge_str = _fmt_edge(opp.fee_edge)
 
-                display_name = self._labels.get(opp.event_ticker, opp.event_ticker)
-                vol_a = _fmt_vol(self._volumes_24h.get(opp.ticker_a, 0))
-                vol_b = _fmt_vol(self._volumes_24h.get(opp.ticker_b, 0))
-                game_status = self._resolver.get(opp.event_ticker) if self._resolver else None
-                game_date = _fmt_game_date(game_status.scheduled_start if game_status else None)
-                game_col = _fmt_game_status(game_status)
-                row_data = (
-                    display_name,
-                    _fmt_cents(opp.no_a),
-                    _fmt_cents(opp.no_b),
-                    edge_str,
-                    vol_a,
-                    vol_b,
-                    game_date,
-                    game_col,
-                    pos_a,
-                    pos_b,
-                    q_a,
-                    cpm_a,
-                    eta_a,
-                    q_b,
-                    cpm_b,
-                    eta_b,
-                    status,
-                    pnl,
-                    net_odds,
-                )
-                self.add_row(*row_data, key=opp.event_ticker)
+        pos = self._positions.get(opp.event_ticker)
+        if pos is not None:
+            total_a = pos.leg_a.filled_count + pos.leg_a.resting_count
+            total_b = pos.leg_b.filled_count + pos.leg_b.resting_count
+            pos_a = _fmt_pos(pos.leg_a.filled_count, total_a, pos.leg_a.no_price)
+            pos_b = _fmt_pos(pos.leg_b.filled_count, total_b, pos.leg_b.no_price)
+
+            fa, fb = pos.leg_a.filled_count, pos.leg_b.filled_count
+            ra, rb = pos.leg_a.resting_count, pos.leg_b.resting_count
+            ta, tb = fa + ra, fb + rb
+            if fa != fb:
+                if fa < fb:
+                    pos_a = RichText(str(pos_a), style=YELLOW, justify="right")
+                else:
+                    pos_b = RichText(str(pos_b), style=YELLOW, justify="right")
+            elif ta != tb:
+                if ta < tb:
+                    pos_a = RichText(str(pos_a), style=YELLOW, justify="right")
+                else:
+                    pos_b = RichText(str(pos_b), style=YELLOW, justify="right")
+
+            q_a = RichText(str(pos.leg_a.queue_position), justify="right") if pos.leg_a.queue_position else DIM_DASH
+            q_b = RichText(str(pos.leg_b.queue_position), justify="right") if pos.leg_b.queue_position else DIM_DASH
+            cpm_a = RichText(format_cpm(pos.leg_a.cpm, pos.leg_a.cpm_partial), justify="right")
+            cpm_b = RichText(format_cpm(pos.leg_b.cpm, pos.leg_b.cpm_partial), justify="right")
+            eta_a = RichText(format_eta(pos.leg_a.eta_minutes, pos.leg_a.cpm_partial), justify="right")
+            eta_b = RichText(format_eta(pos.leg_b.eta_minutes, pos.leg_b.cpm_partial), justify="right")
+            net = pos.locked_profit_cents - pos.exposure_cents
+            pnl = _fmt_pnl(net, pos.kalshi_pnl)
+            status = _fmt_status(pos.status)
+            net_odds = _fmt_net_odds(
+                opp.no_a, opp.no_b,
+                pos.leg_a.filled_count, pos.leg_b.filled_count,
+                pos.leg_a.total_fill_cost, pos.leg_b.total_fill_cost,
+                pos.leg_a.total_fees, pos.leg_b.total_fees,
+            )
+        else:
+            pos_a = pos_b = q_a = q_b = DIM_DASH
+            cpm_a = cpm_b = eta_a = eta_b = DIM_DASH
+            pnl = DIM_DASH
+            status = _fmt_status("")
+            net_odds = _fmt_net_odds(opp.no_a, opp.no_b)
+
+        if tracker is not None:
+            if tracker.is_at_top(opp.ticker_a) is False:
+                q_a = RichText(f"!! {q_a}", style=YELLOW, justify="right")
+            if tracker.is_at_top(opp.ticker_b) is False:
+                q_b = RichText(f"!! {q_b}", style=YELLOW, justify="right")
+
+        display_name = self._labels.get(opp.event_ticker, opp.event_ticker)
+        vol_a = _fmt_vol(self._volumes_24h.get(opp.ticker_a, 0))
+        vol_b = _fmt_vol(self._volumes_24h.get(opp.ticker_b, 0))
+        game_status = self._resolver.get(opp.event_ticker) if self._resolver else None
+        game_date = _fmt_game_date(game_status.scheduled_start if game_status else None)
+        game_col = _fmt_game_status(game_status)
+        return (
+            display_name, _fmt_cents(opp.no_a), _fmt_cents(opp.no_b), edge_str,
+            vol_a, vol_b, game_date, game_col,
+            pos_a, pos_b, q_a, cpm_a, eta_a, q_b, cpm_b, eta_b,
+            status, pnl, net_odds,
+        )
 
 
 class AccountPanel(Static):
