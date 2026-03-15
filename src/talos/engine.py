@@ -298,11 +298,9 @@ class TradingEngine:
             self._portfolio_value = balance.portfolio_value
 
             _t2 = _time.monotonic()
-            # Fetch only resting/executed orders — not all 1800+ historical.
-            # Fill data comes from the positions API (below).
+            # Only fetch resting orders — fill data comes from positions API.
+            # "executed" (1500+) and "canceled" (250+) are historical noise.
             orders = await self._rest.get_all_orders(status="resting")
-            executed = await self._rest.get_all_orders(status="executed")
-            orders.extend(executed)
             _t3 = _time.monotonic()
             self._orders_cache = orders
 
