@@ -694,8 +694,11 @@ class TradingEngine:
                     pair.ticker_a in self._settled_markets[event_ticker]
                     and pair.ticker_b in self._settled_markets[event_ticker]
                 )
-                if both_done and self._data_collector is not None:
-                    self._log_event_outcome(event_ticker, pair)
+                if both_done:
+                    if self._data_collector is not None:
+                        self._log_event_outcome(event_ticker, pair)
+                    # Auto-remove settled game to free WS subscription slots
+                    asyncio.create_task(self.remove_game(event_ticker))
 
     def _on_market_settled(self, ticker: str) -> None:
         """Handle market settlement (cash distributed)."""
