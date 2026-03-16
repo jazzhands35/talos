@@ -170,6 +170,8 @@ def _fmt_status(status: str) -> RichText:
         return DIM_DASH
 
     status_styles: list[tuple[str, str, str]] = [
+        ("EXITING", "\u25f7", PEACH),
+        ("EXIT", "\u2716", PEACH),
         ("Low edge", "\u25cb", "dim"),
         ("Unstable", "\u25cb", "dim"),
         ("Sug. off", "\u25cb", "dim"),
@@ -206,16 +208,16 @@ class OpportunitiesTable(DataTable):
 
     # Column index -> sort key extractor from (opp, positions, volumes, resolver, labels)
     _SORT_KEYS: dict[int, str] = {
-        0: "label",      # Event name
-        1: "sport",      # Sport
-        2: "league",     # League
-        3: "no_a",       # NO-A price
-        4: "no_b",       # NO-B price
-        5: "fee_edge",   # Edge
-        6: "vol_a",      # V-A (24h volume)
-        7: "vol_b",      # V-B (24h volume)
-        8: "start",      # Date
-        9: "state",      # Game status
+        0: "label",  # Event name
+        1: "sport",  # Sport
+        2: "league",  # League
+        3: "no_a",  # NO-A price
+        4: "no_b",  # NO-B price
+        5: "fee_edge",  # Edge
+        6: "vol_a",  # V-A (24h volume)
+        7: "vol_b",  # V-B (24h volume)
+        8: "start",  # Date
+        9: "state",  # Game status
     }
 
     def __init__(self, **kwargs: Any) -> None:
@@ -395,10 +397,7 @@ class OpportunitiesTable(DataTable):
                         col_key = self.ordered_columns[col_idx].key
                         self.update_cell(opp.event_ticker, col_key, value)
 
-
-    def _build_row(
-        self, opp: Any, tracker: TopOfMarketTracker | None
-    ) -> tuple:
+    def _build_row(self, opp: Any, tracker: TopOfMarketTracker | None) -> tuple:
         """Build the full row_data tuple for one opportunity."""
         edge_str = _fmt_edge(opp.fee_edge)
 
@@ -423,12 +422,24 @@ class OpportunitiesTable(DataTable):
                 else:
                     pos_b = RichText(str(pos_b), style=YELLOW, justify="right")
 
-            q_a = RichText(str(pos.leg_a.queue_position), justify="right") if pos.leg_a.queue_position else DIM_DASH
-            q_b = RichText(str(pos.leg_b.queue_position), justify="right") if pos.leg_b.queue_position else DIM_DASH
+            q_a = (
+                RichText(str(pos.leg_a.queue_position), justify="right")
+                if pos.leg_a.queue_position
+                else DIM_DASH
+            )
+            q_b = (
+                RichText(str(pos.leg_b.queue_position), justify="right")
+                if pos.leg_b.queue_position
+                else DIM_DASH
+            )
             cpm_a = RichText(format_cpm(pos.leg_a.cpm, pos.leg_a.cpm_partial), justify="right")
             cpm_b = RichText(format_cpm(pos.leg_b.cpm, pos.leg_b.cpm_partial), justify="right")
-            eta_a = RichText(format_eta(pos.leg_a.eta_minutes, pos.leg_a.cpm_partial), justify="right")
-            eta_b = RichText(format_eta(pos.leg_b.eta_minutes, pos.leg_b.cpm_partial), justify="right")
+            eta_a = RichText(
+                format_eta(pos.leg_a.eta_minutes, pos.leg_a.cpm_partial), justify="right"
+            )
+            eta_b = RichText(
+                format_eta(pos.leg_b.eta_minutes, pos.leg_b.cpm_partial), justify="right"
+            )
             net = pos.locked_profit_cents - pos.exposure_cents
             pnl = _fmt_pnl(net, pos.kalshi_pnl)
             status = _fmt_status(pos.status)
@@ -453,11 +464,26 @@ class OpportunitiesTable(DataTable):
         game_date = _fmt_game_date(game_status.scheduled_start if game_status else None)
         game_col = _fmt_game_status(game_status)
         return (
-            display_name, sport, league,
-            _fmt_cents(opp.no_a), _fmt_cents(opp.no_b), edge_str,
-            vol_a, vol_b, game_date, game_col,
-            pos_a, pos_b, q_a, cpm_a, eta_a, q_b, cpm_b, eta_b,
-            status, pnl,
+            display_name,
+            sport,
+            league,
+            _fmt_cents(opp.no_a),
+            _fmt_cents(opp.no_b),
+            edge_str,
+            vol_a,
+            vol_b,
+            game_date,
+            game_col,
+            pos_a,
+            pos_b,
+            q_a,
+            cpm_a,
+            eta_a,
+            q_b,
+            cpm_b,
+            eta_b,
+            status,
+            pnl,
         )
 
 

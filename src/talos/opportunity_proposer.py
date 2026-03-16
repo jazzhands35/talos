@@ -53,12 +53,17 @@ class OpportunityProposer:
         pending_keys: set[ProposalKey],
         now: datetime | None = None,
         display_name: str = "",
+        exit_only: bool = False,
     ) -> Proposal | None:
         """Return a bid proposal if all gates pass, None otherwise."""
         if now is None:
             now = datetime.now(UTC)
 
         event = pair.event_ticker
+
+        # Gate 0: exit-only — no new bids
+        if exit_only:
+            return None
 
         # Gate 1: edge threshold
         if opportunity.fee_edge < self._config.edge_threshold_cents:
@@ -75,14 +80,12 @@ class OpportunityProposer:
             if ledger.resting_count(Side.A) > 0 or ledger.resting_count(Side.B) > 0:
                 return None
         else:
-            has_a = (
-                ledger.unit_remaining(Side.A) == 0
-                or ledger.resting_count(Side.A) >= ledger.unit_remaining(Side.A)
-            )
-            has_b = (
-                ledger.unit_remaining(Side.B) == 0
-                or ledger.resting_count(Side.B) >= ledger.unit_remaining(Side.B)
-            )
+            has_a = ledger.unit_remaining(Side.A) == 0 or ledger.resting_count(
+                Side.A
+            ) >= ledger.unit_remaining(Side.A)
+            has_b = ledger.unit_remaining(Side.B) == 0 or ledger.resting_count(
+                Side.B
+            ) >= ledger.unit_remaining(Side.B)
             if has_a and has_b:
                 return None
 
@@ -115,9 +118,9 @@ class OpportunityProposer:
         # Qty = remaining capacity minus what's already resting.
         # After a unit_size change, existing fills/resting are a partial unit.
         # Exception: re-entry after both sides complete → start a fresh full unit.
-        if ledger.both_sides_complete() and ledger.filled_count(
-            Side.A
-        ) == ledger.filled_count(Side.B):
+        if ledger.both_sides_complete() and ledger.filled_count(Side.A) == ledger.filled_count(
+            Side.B
+        ):
             qty = ledger.unit_size
         else:
             need_a = ledger.unit_remaining(Side.A) - ledger.resting_count(Side.A)

@@ -20,7 +20,6 @@ from talos.auto_accept_log import AutoAcceptLogger
 from talos.engine import TradingEngine
 from talos.models.proposal import ProposalKey
 from talos.models.strategy import BidConfirmation
-from talos.proposal_queue import ProposalQueue
 from talos.scanner import ArbitrageScanner
 from talos.ui.proposal_panel import ProposalPanel
 from talos.ui.screens import AddGamesScreen, AutoAcceptScreen, BidScreen, ScanScreen, UnitSizeScreen
@@ -45,6 +44,7 @@ class TalosApp(App):
         ("n", "reject_proposal", "Reject"),
         ("f", "toggle_auto_accept", "Auto-Accept"),
         ("p", "show_proposals", "Proposals"),
+        ("e", "toggle_exit_only", "Exit-Only"),
         ("c", "scan", "Scan"),
         ("o", "open_in_browser", "Open"),
         ("q", "quit", "Quit"),
@@ -284,7 +284,7 @@ class TalosApp(App):
 
     def _log_market_snapshots(self) -> None:
         """Log market snapshots every 10s for ML data collection."""
-        if self._engine is None or not hasattr(self._engine, '_data_collector'):
+        if self._engine is None or not hasattr(self._engine, "_data_collector"):
             return
         dc = self._engine._data_collector
         if dc is None:
@@ -298,25 +298,31 @@ class TalosApp(App):
                     pos = s
                     break
             status = self._engine.event_statuses.get(opp.event_ticker, "")
-            gs = self._engine.game_status_resolver.get(opp.event_ticker) if self._engine.game_status_resolver else None
-            snapshots.append({
-                "event_ticker": opp.event_ticker,
-                "ticker_a": opp.ticker_a,
-                "ticker_b": opp.ticker_b,
-                "no_a": opp.no_a,
-                "no_b": opp.no_b,
-                "edge": opp.fee_edge,
-                "volume_a": 0,  # from ticker feed if available
-                "volume_b": 0,
-                "open_interest_a": 0,
-                "open_interest_b": 0,
-                "game_state": gs.state if gs else "unknown",
-                "status": status,
-                "filled_a": pos.leg_a.filled_count if pos else 0,
-                "filled_b": pos.leg_b.filled_count if pos else 0,
-                "resting_a": pos.leg_a.resting_count if pos else 0,
-                "resting_b": pos.leg_b.resting_count if pos else 0,
-            })
+            gs = (
+                self._engine.game_status_resolver.get(opp.event_ticker)
+                if self._engine.game_status_resolver
+                else None
+            )
+            snapshots.append(
+                {
+                    "event_ticker": opp.event_ticker,
+                    "ticker_a": opp.ticker_a,
+                    "ticker_b": opp.ticker_b,
+                    "no_a": opp.no_a,
+                    "no_b": opp.no_b,
+                    "edge": opp.fee_edge,
+                    "volume_a": 0,  # from ticker feed if available
+                    "volume_b": 0,
+                    "open_interest_a": 0,
+                    "open_interest_b": 0,
+                    "game_state": gs.state if gs else "unknown",
+                    "status": status,
+                    "filled_a": pos.leg_a.filled_count if pos else 0,
+                    "filled_b": pos.leg_b.filled_count if pos else 0,
+                    "resting_a": pos.leg_a.resting_count if pos else 0,
+                    "resting_b": pos.leg_b.resting_count if pos else 0,
+                }
+            )
         if snapshots:
             dc.log_market_snapshots(snapshots)
 
@@ -375,6 +381,7 @@ class TalosApp(App):
             return
         self.notify("Scanning for events...")
         import time as _scan_time
+
         _scan_t0 = _scan_time.monotonic()
         try:
             events = await self._engine.game_manager.scan_events()
@@ -391,31 +398,35 @@ class TalosApp(App):
         selected_tickers = set(selected) if selected else set()
 
         # Log scan to data collector
-        dc = getattr(self._engine, '_data_collector', None)
+        dc = getattr(self._engine, "_data_collector", None)
         if dc is not None:
             from talos.game_manager import SCAN_SERIES
+
             scan_events = []
             for ev in events:
                 prefix = ev.series_ticker or ev.event_ticker.split("-")[0]
                 from talos.ui.widgets import _SPORT_LEAGUE
+
                 sport, league = _SPORT_LEAGUE.get(prefix, ("", ""))
                 active_mkts = [m for m in ev.markets if m.status == "active"]
-                scan_events.append({
-                    "event_ticker": ev.event_ticker,
-                    "series_ticker": ev.series_ticker,
-                    "sport": sport,
-                    "league": league,
-                    "title": ev.title,
-                    "sub_title": ev.sub_title,
-                    "volume_a": active_mkts[0].volume_24h or 0 if len(active_mkts) > 0 else 0,
-                    "volume_b": active_mkts[1].volume_24h or 0 if len(active_mkts) > 1 else 0,
-                    "no_bid_a": active_mkts[0].no_bid or 0 if len(active_mkts) > 0 else 0,
-                    "no_ask_a": active_mkts[0].no_ask or 0 if len(active_mkts) > 0 else 0,
-                    "no_bid_b": active_mkts[1].no_bid or 0 if len(active_mkts) > 1 else 0,
-                    "no_ask_b": active_mkts[1].no_ask or 0 if len(active_mkts) > 1 else 0,
-                    "edge": 0.0,
-                    "selected": 1 if ev.event_ticker in selected_tickers else 0,
-                })
+                scan_events.append(
+                    {
+                        "event_ticker": ev.event_ticker,
+                        "series_ticker": ev.series_ticker,
+                        "sport": sport,
+                        "league": league,
+                        "title": ev.title,
+                        "sub_title": ev.sub_title,
+                        "volume_a": active_mkts[0].volume_24h or 0 if len(active_mkts) > 0 else 0,
+                        "volume_b": active_mkts[1].volume_24h or 0 if len(active_mkts) > 1 else 0,
+                        "no_bid_a": active_mkts[0].no_bid or 0 if len(active_mkts) > 0 else 0,
+                        "no_ask_a": active_mkts[0].no_ask or 0 if len(active_mkts) > 0 else 0,
+                        "no_bid_b": active_mkts[1].no_bid or 0 if len(active_mkts) > 1 else 0,
+                        "no_ask_b": active_mkts[1].no_ask or 0 if len(active_mkts) > 1 else 0,
+                        "edge": 0.0,
+                        "selected": 1 if ev.event_ticker in selected_tickers else 0,
+                    }
+                )
             dc.log_scan(
                 events_found=len(events),
                 events_eligible=len(events),
@@ -585,6 +596,29 @@ class TalosApp(App):
             markup=False,
         )
         logger.info("auto_accept_stopped", accepted_count=count, elapsed=elapsed)
+
+    def action_toggle_exit_only(self) -> None:
+        """Toggle exit-only mode on the highlighted event."""
+        if self._engine is None:
+            return
+        table = self.query_one(OpportunitiesTable)
+        if table.cursor_row is None or table.row_count == 0:
+            return
+        try:
+            cell_key = table.coordinate_to_cell_key(table.cursor_coordinate)
+            event_ticker = str(cell_key.row_key.value)
+        except CellDoesNotExist:
+            return
+        if not event_ticker:
+            return
+        self._toggle_exit_only(event_ticker)
+
+    @work(thread=False)
+    async def _toggle_exit_only(self, event_ticker: str) -> None:
+        if self._engine is not None:
+            is_on = self._engine.toggle_exit_only(event_ticker)
+            if is_on:
+                await self._engine._enforce_exit_only(event_ticker)
 
     def action_clear_games(self) -> None:
         if self._engine is not None:

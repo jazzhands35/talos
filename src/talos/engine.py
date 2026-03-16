@@ -25,14 +25,14 @@ from talos.models.order import Order
 from talos.models.portfolio import EventPosition, Position
 from talos.models.position import EventPositionSummary
 from talos.models.proposal import Proposal, ProposalKey
-from talos.rebalance import compute_rebalance_proposal
-from talos.rebalance import execute_rebalance as _execute_rebalance
 from talos.models.ws import FillMessage, TickerMessage, UserOrderMessage
 from talos.opportunity_proposer import OpportunityProposer
 from talos.portfolio_feed import PortfolioFeed
 from talos.position_feed import PositionFeed
 from talos.position_ledger import PositionLedger, Side, compute_display_positions
 from talos.proposal_queue import ProposalQueue
+from talos.rebalance import compute_rebalance_proposal
+from talos.rebalance import execute_rebalance as _execute_rebalance
 from talos.rest_client import KalshiRESTClient
 from talos.scanner import ArbitrageScanner
 from talos.ticker_feed import TickerFeed
@@ -113,6 +113,7 @@ class TradingEngine:
         self._ws_connected: bool = False
         self._settled_markets: dict[str, dict[str, str]] = {}  # event_ticker -> {ticker: result}
         self._order_placed_at: dict[str, float] = {}  # order_id -> monotonic timestamp
+        self._exit_only_events: set[str] = set()  # events in exit-only mode
 
         # Wire portfolio feed callbacks
         if self._portfolio_feed is not None:
@@ -208,6 +209,174 @@ class TradingEngine:
         if self.on_unit_size_change is not None:
             self.on_unit_size_change(size)
 
+    # ── Exit-only mode ────────────────────────────────────────────
+
+    def is_exit_only(self, event_ticker: str) -> bool:
+        return event_ticker in self._exit_only_events
+
+    def toggle_exit_only(self, event_ticker: str) -> bool:
+        """Toggle exit-only mode for an event. Returns new state."""
+        if event_ticker in self._exit_only_events:
+            self._exit_only_events.discard(event_ticker)
+            name = self._display_name(event_ticker)
+            self._notify(f"Exit-only OFF: {name}")
+            logger.info("exit_only_off", event_ticker=event_ticker)
+            return False
+        else:
+            self._exit_only_events.add(event_ticker)
+            name = self._display_name(event_ticker)
+            self._notify(f"Exit-only ON: {name}", "warning")
+            logger.info("exit_only_on", event_ticker=event_ticker)
+            self._enforce_exit_only_sync(event_ticker)
+            return True
+
+    def _enforce_exit_only_sync(self, event_ticker: str) -> None:
+        """Synchronous part of exit-only enforcement — expire proposals."""
+        # Expire any pending bid proposals for this event
+        for proposal in list(self._proposal_queue.pending()):
+            if proposal.key.event_ticker == event_ticker and proposal.kind == "bid":
+                self._proposal_queue.reject(proposal.key)
+
+    async def _enforce_exit_only(self, event_ticker: str) -> None:
+        """Cancel resting orders per exit-only rules.
+
+        Balanced → cancel all resting on both sides.
+        Imbalanced → cancel resting on the ahead side only.
+        """
+        try:
+            ledger = self._adjuster.get_ledger(event_ticker)
+        except KeyError:
+            return
+
+        filled_a = ledger.filled_count(Side.A)
+        filled_b = ledger.filled_count(Side.B)
+
+        if filled_a == filled_b:
+            # Balanced — cancel everything
+            for side in (Side.A, Side.B):
+                order_id = ledger.resting_order_id(side)
+                if order_id is not None:
+                    try:
+                        await self._rest.cancel_order(order_id)
+                        logger.info(
+                            "exit_only_cancel",
+                            event_ticker=event_ticker,
+                            side=side.value,
+                            order_id=order_id,
+                            reason="balanced",
+                        )
+                    except Exception:
+                        logger.warning(
+                            "exit_only_cancel_failed",
+                            event_ticker=event_ticker,
+                            side=side.value,
+                            exc_info=True,
+                        )
+        else:
+            # Imbalanced — cancel the ahead side only
+            ahead = Side.A if filled_a > filled_b else Side.B
+            order_id = ledger.resting_order_id(ahead)
+            if order_id is not None:
+                try:
+                    await self._rest.cancel_order(order_id)
+                    logger.info(
+                        "exit_only_cancel",
+                        event_ticker=event_ticker,
+                        side=ahead.value,
+                        order_id=order_id,
+                        reason="ahead_side",
+                    )
+                except Exception:
+                    logger.warning(
+                        "exit_only_cancel_failed",
+                        event_ticker=event_ticker,
+                        side=ahead.value,
+                        exc_info=True,
+                    )
+
+        await self._verify_after_action(event_ticker)
+
+    def _check_exit_only(self) -> None:
+        """Auto-trigger exit-only based on game status, auto-remove when done.
+
+        Called from _recompute_positions (runs every refresh cycle).
+        """
+        if self._game_status_resolver is None:
+            return
+
+        exit_minutes = self._auto_config.exit_only_minutes
+        now = datetime.now(UTC)
+
+        for pair in self._scanner.pairs:
+            event_ticker = pair.event_ticker
+
+            if event_ticker not in self._exit_only_events:
+                # Check if we should auto-activate
+                gs = self._game_status_resolver.get(event_ticker)
+                if gs is None:
+                    continue
+
+                if gs.state == "live":
+                    self._exit_only_events.add(event_ticker)
+                    self._enforce_exit_only_sync(event_ticker)
+                    name = self._display_name(event_ticker)
+                    self._notify(f"Exit-only AUTO: {name} (live)", "warning")
+                    logger.info(
+                        "exit_only_auto_trigger",
+                        event_ticker=event_ticker,
+                        reason="live",
+                    )
+                elif (
+                    gs.state == "pre"
+                    and gs.scheduled_start is not None
+                    and (gs.scheduled_start - now).total_seconds() < exit_minutes * 60
+                ):
+                    self._exit_only_events.add(event_ticker)
+                    self._enforce_exit_only_sync(event_ticker)
+                    name = self._display_name(event_ticker)
+                    mins = (gs.scheduled_start - now).total_seconds() / 60
+                    self._notify(
+                        f"Exit-only AUTO: {name} ({mins:.0f}m to start)",
+                        "warning",
+                    )
+                    logger.info(
+                        "exit_only_auto_trigger",
+                        event_ticker=event_ticker,
+                        reason="approaching_start",
+                        minutes_to_start=mins,
+                    )
+
+    async def _enforce_all_exit_only(self) -> None:
+        """Enforce exit-only rules on all flagged events. Called from refresh cycle."""
+        for event_ticker in list(self._exit_only_events):
+            # Check if balanced + no resting → auto-remove
+            try:
+                ledger = self._adjuster.get_ledger(event_ticker)
+            except KeyError:
+                self._exit_only_events.discard(event_ticker)
+                continue
+
+            filled_a = ledger.filled_count(Side.A)
+            filled_b = ledger.filled_count(Side.B)
+            resting_a = ledger.resting_count(Side.A)
+            resting_b = ledger.resting_count(Side.B)
+
+            if filled_a == filled_b and resting_a == 0 and resting_b == 0:
+                # Balanced and no resting → auto-remove game
+                name = self._display_name(event_ticker)
+                self._notify(f"Exit-only DONE: {name} — removing")
+                logger.info(
+                    "exit_only_auto_remove",
+                    event_ticker=event_ticker,
+                    filled=filled_a,
+                )
+                self._exit_only_events.discard(event_ticker)
+                await self.remove_game(event_ticker)
+                continue
+
+            # Still has resting on wrong side — enforce
+            await self._enforce_exit_only(event_ticker)
+
     def get_ticker_data(self, ticker: str) -> TickerMessage | None:
         """Return the latest WS ticker data for a market, or None."""
         if self._ticker_feed is None:
@@ -252,6 +421,7 @@ class TradingEngine:
                     for pair in pairs:
                         prefix = pair.event_ticker.split("-")[0]
                         from talos.ui.widgets import _SPORT_LEAGUE
+
                         sport, league = _SPORT_LEAGUE.get(prefix, ("", ""))
                         self._data_collector.log_game_add(
                             event_ticker=pair.event_ticker,
@@ -285,6 +455,7 @@ class TradingEngine:
                 if batch:
                     # Don't await — let it run while WS starts listening
                     import asyncio as _aio
+
                     _aio.create_task(self._game_status_resolver.resolve_batch(batch))
 
             # Subscribe to portfolio events globally (all markets)
@@ -316,6 +487,7 @@ class TradingEngine:
             logger.info("ws_reconnecting")
             self._notify("Reconnecting WebSocket in 5s...", "warning")
             import asyncio as _aio
+
             await _aio.sleep(5)
             await self.start_feed()
 
@@ -451,6 +623,10 @@ class TradingEngine:
 
             # Evaluate scanner opportunities for automated bid proposals
             self.evaluate_opportunities()
+
+            # Check exit-only triggers and enforce cancellations
+            self._check_exit_only()
+            await self._enforce_all_exit_only()
         except Exception:
             logger.exception("refresh_account_error")
 
@@ -631,6 +807,7 @@ class TradingEngine:
                     event_ticker = pair.event_ticker
                     break
             import time as _ft
+
             placed_at = self._order_placed_at.get(msg.order_id)
             time_since = _ft.monotonic() - placed_at if placed_at else None
             qp = self._queue_cache.get(msg.order_id)
@@ -760,6 +937,7 @@ class TradingEngine:
 
         prefix = event_ticker.split("-")[0]
         from talos.ui.widgets import _SPORT_LEAGUE
+
         sport, league = _SPORT_LEAGUE.get(prefix, ("", ""))
 
         total_cost_a = ledger.filled_total_cost(Side.A)
@@ -882,9 +1060,7 @@ class TradingEngine:
                 if pos is not None:
                     pos_fills[side] = abs(pos.position)
             # Authoritative fill count = max of both sources
-            auth_fills = {
-                s: max(kalshi_fills[s], pos_fills[s]) for s in (Side.A, Side.B)
-            }
+            auth_fills = {s: max(kalshi_fills[s], pos_fills[s]) for s in (Side.A, Side.B)}
 
             for side in (Side.A, Side.B):
                 sl = side.value  # "A" or "B"
@@ -982,7 +1158,9 @@ class TradingEngine:
         Shared by on_top_of_market_change (with toast) and reevaluate_jumps
         (silent). The notification is the caller's responsibility.
         """
-        proposal = self._adjuster.evaluate_jump(ticker, at_top)
+        evt_ticker = self._adjuster.resolve_event(ticker)
+        exit_only = self.is_exit_only(evt_ticker) if evt_ticker else False
+        proposal = self._adjuster.evaluate_jump(ticker, at_top, exit_only=exit_only)
         if proposal is not None:
             evt = proposal.event_ticker
             name = self._display_name(evt)
@@ -1044,8 +1222,7 @@ class TradingEngine:
         for pair in self._scanner.pairs:
             # Skip if a withdraw proposal already covers this event
             has_withdraw = any(
-                k.event_ticker == pair.event_ticker and k.kind == "withdraw"
-                for k in pending_keys
+                k.event_ticker == pair.event_ticker and k.kind == "withdraw" for k in pending_keys
             )
             if has_withdraw:
                 continue
@@ -1079,8 +1256,7 @@ class TradingEngine:
 
             # Skip if a rebalance proposal already covers this event
             has_rebalance = any(
-                k.event_ticker == pair.event_ticker and k.kind == "rebalance"
-                for k in pending_keys
+                k.event_ticker == pair.event_ticker and k.kind == "rebalance" for k in pending_keys
             )
             if has_rebalance:
                 continue
@@ -1120,6 +1296,7 @@ class TradingEngine:
                 ledger,
                 pending_keys,
                 display_name=self._display_name(pair.event_ticker),
+                exit_only=self.is_exit_only(pair.event_ticker),
             )
             if proposal is not None:
                 self._proposal_queue.add(proposal)
@@ -1134,6 +1311,14 @@ class TradingEngine:
         After placement, optimistically updates the ledger via record_placement()
         (with generation-based stale-sync guard) and appends to _orders_cache.
         """
+        # Block on exit-only events
+        evt_for_bid = self._adjuster.resolve_event(bid.ticker_a)
+        if evt_for_bid and self.is_exit_only(evt_for_bid):
+            label = self._display_name(evt_for_bid)
+            self._notify(f"Bid BLOCKED {label}: exit-only mode (press E to disable)", "error")
+            logger.error("bid_blocked_exit_only", event_ticker=evt_for_bid)
+            return
+
         # Block on paused markets
         for ticker in (bid.ticker_a, bid.ticker_b):
             if ticker in self._paused_markets:
@@ -1154,9 +1339,7 @@ class TradingEngine:
                 ok, reason = ledger.is_placement_safe(side, bid.qty, price, rate=fee_rate)
                 if not ok:
                     name = self._display_name(ledger.event_ticker)
-                    self._notify(
-                        f"Bid BLOCKED {name} (side {side.value}): {reason}", "error"
-                    )
+                    self._notify(f"Bid BLOCKED {name} (side {side.value}): {reason}", "error")
                     logger.error(
                         "bid_blocked_safety_gate",
                         event_ticker=ledger.event_ticker,
@@ -1194,13 +1377,20 @@ class TradingEngine:
             # guard in sync_from_orders prevents stale syncs from clearing this.
             if ledger is not None:
                 ledger.record_placement(
-                    Side.A, order_a.order_id, order_a.remaining_count, bid.no_a,
+                    Side.A,
+                    order_a.order_id,
+                    order_a.remaining_count,
+                    bid.no_a,
                 )
                 ledger.record_placement(
-                    Side.B, order_b.order_id, order_b.remaining_count, bid.no_b,
+                    Side.B,
+                    order_b.order_id,
+                    order_b.remaining_count,
+                    bid.no_b,
                 )
             # Track placement time for fill latency calculation
             import time as _pt
+
             _now = _pt.monotonic()
             self._order_placed_at[order_a.order_id] = _now
             self._order_placed_at[order_b.order_id] = _now
@@ -1243,8 +1433,13 @@ class TradingEngine:
                 for pair in pairs:
                     prefix = pair.event_ticker.split("-")[0]
                     from talos.ui.widgets import _SPORT_LEAGUE
+
                     sport, league = _SPORT_LEAGUE.get(prefix, ("", ""))
-                    gs = self._game_status_resolver.get(pair.event_ticker) if self._game_status_resolver else None
+                    gs = (
+                        self._game_status_resolver.get(pair.event_ticker)
+                        if self._game_status_resolver
+                        else None
+                    )
                     self._data_collector.log_game_add(
                         event_ticker=pair.event_ticker,
                         series_ticker=prefix,
@@ -1257,7 +1452,9 @@ class TradingEngine:
                         volume_b=self._game_manager.volumes_24h.get(pair.ticker_b, 0),
                         fee_type=pair.fee_type,
                         fee_rate=pair.fee_rate,
-                        scheduled_start=gs.scheduled_start.isoformat() if gs and gs.scheduled_start else None,
+                        scheduled_start=gs.scheduled_start.isoformat()
+                        if gs and gs.scheduled_start
+                        else None,
                     )
             self._notify(f"Added {len(urls)} game(s)")
         except Exception as e:
@@ -1267,6 +1464,7 @@ class TradingEngine:
     async def remove_game(self, event_ticker: str) -> None:
         """Remove a game from monitoring."""
         try:
+            self._exit_only_events.discard(event_ticker)
             if self._game_status_resolver is not None:
                 self._game_status_resolver.remove(event_ticker)
             await self._game_manager.remove_game(event_ticker)
@@ -1485,6 +1683,21 @@ class TradingEngine:
         total_a = filled_a + resting_a
         total_b = filled_b + resting_b
 
+        # Exit-only status takes priority
+        if self.is_exit_only(event_ticker):
+            if filled_a == filled_b and resting_a == 0 and resting_b == 0:
+                return "EXIT"
+            if resting_a > 0 or resting_b > 0:
+                if filled_a != filled_b:
+                    diff = abs(filled_a - filled_b)
+                    behind = "B" if filled_a > filled_b else "A"
+                    return f"EXIT -{diff} {behind}"
+                return "EXITING"
+            # Imbalanced, no resting — waiting for behind side to fill
+            diff = abs(filled_a - filled_b)
+            behind = "B" if filled_a > filled_b else "A"
+            return f"EXIT -{diff} {behind}"
+
         if total_a == 0 and total_b == 0:
             # No position — show why proposer isn't suggesting (fall through)
             return self._compute_proposer_status(event_ticker)
@@ -1562,7 +1775,6 @@ class TradingEngine:
                 return pair
         return None
 
-
     def _find_ledger_for_bid(self, bid: BidConfirmation) -> PositionLedger | None:
         """Look up the position ledger for a bid's event."""
         for pair in self._scanner.pairs:
@@ -1575,6 +1787,9 @@ class TradingEngine:
 
     def _compute_proposer_status(self, event_ticker: str) -> str:
         """Diagnose why the proposer isn't suggesting for this event."""
+        if self.is_exit_only(event_ticker):
+            return "EXIT"
+
         if not self._auto_config.enabled:
             return "Sug. off"
 

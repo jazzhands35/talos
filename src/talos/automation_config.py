@@ -13,3 +13,4 @@ class AutomationConfig:
     rejection_cooldown_seconds: float = 30.0
     unit_size: int = 10
     enabled: bool = True
+    exit_only_minutes: float = 30.0

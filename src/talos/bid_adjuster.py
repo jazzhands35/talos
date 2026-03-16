@@ -89,11 +89,19 @@ class BidAdjuster:
 
     # ── Decision logic (synchronous, testable) ──────────────────────
 
-    def evaluate_jump(self, ticker: str, at_top: bool) -> ProposedAdjustment | None:
+    def evaluate_jump(
+        self,
+        ticker: str,
+        at_top: bool,
+        exit_only: bool = False,
+    ) -> ProposedAdjustment | None:
         """Evaluate a jump event and return a proposal if appropriate.
 
         Called by TopOfMarketTracker.on_change callback.
         Returns None if no action needed.
+
+        When exit_only=True, only allows adjustments on the behind side
+        (to catch up to delta neutral). The ahead side is blocked.
         """
         lookup = self._ticker_map.get(ticker)
         if lookup is None:
@@ -109,6 +117,18 @@ class BidAdjuster:
             return None
 
         ledger = self._ledgers[pair.event_ticker]
+
+        # Exit-only gate: block adjustments on the ahead side
+        if exit_only:
+            filled_a = ledger.filled_count(Side.A)
+            filled_b = ledger.filled_count(Side.B)
+            if filled_a == filled_b:
+                # Balanced — block all adjustments
+                return None
+            ahead = Side.A if filled_a > filled_b else Side.B
+            if side is ahead:
+                # This is the ahead side — don't adjust
+                return None
 
         # No resting order on this side — nothing to adjust
         if ledger.resting_order_id(side) is None:
@@ -173,8 +193,7 @@ class BidAdjuster:
                         f"={this_effective + other_effective:.1f} >= 100)"
                     ),
                     position_before=(
-                        f"A: {ledger.format_position(Side.A)}"
-                        f" | B: {ledger.format_position(Side.B)}"
+                        f"A: {ledger.format_position(Side.A)} | B: {ledger.format_position(Side.B)}"
                     ),
                 )
             logger.info(
@@ -300,6 +319,11 @@ class BidAdjuster:
                 # Re-evaluate the jump
                 return self.evaluate_jump(ticker, at_top=False)
         return None
+
+    def resolve_event(self, ticker: str) -> str | None:
+        """Resolve a market ticker to its event ticker, or None if unknown."""
+        lookup = self._ticker_map.get(ticker)
+        return lookup[0].event_ticker if lookup is not None else None
 
     # ── Query methods ───────────────────────────────────────────────
 
