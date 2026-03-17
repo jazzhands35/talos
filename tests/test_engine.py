@@ -99,7 +99,14 @@ class TestScaffold:
         callback = MagicMock()
         engine.on_notification = callback
         engine._notify("hello", "warning")
-        callback.assert_called_once_with("hello", "warning")
+        callback.assert_called_once_with("hello", "warning", False)
+
+    def test_notify_toast_flag(self):
+        engine = _make_engine()
+        callback = MagicMock()
+        engine.on_notification = callback
+        engine._notify("error!", "error", toast=True)
+        callback.assert_called_once_with("error!", "error", True)
 
     def test_notify_noop_without_callback(self):
         engine = _make_engine()
@@ -374,7 +381,7 @@ class TestActions:
         engine, rest = _engine_with_pair()
         rest.create_order.side_effect = RuntimeError("API down")
         notifications = []
-        engine.on_notification = lambda msg, sev: notifications.append((msg, sev))
+        engine.on_notification = lambda msg, sev, toast=False: notifications.append((msg, sev))
 
         from talos.models.strategy import BidConfirmation
 
@@ -407,7 +414,7 @@ class TestActions:
     async def test_approve_proposal_no_pending(self):
         engine, rest = _engine_with_pair()
         notifications = []
-        engine.on_notification = lambda msg, sev: notifications.append((msg, sev))
+        engine.on_notification = lambda msg, sev, toast=False: notifications.append((msg, sev))
 
         key = ProposalKey(event_ticker="EVT-1", side="A", kind="adjustment")
         await engine.approve_proposal(key)
@@ -465,7 +472,7 @@ class TestPlaceBidsSafety:
         ledger.record_resting(Side.A, order_id="existing-a", count=10, price=45)
 
         notifications: list[tuple[str, str]] = []
-        engine.on_notification = lambda msg, sev: notifications.append((msg, sev))
+        engine.on_notification = lambda msg, sev, toast=False: notifications.append((msg, sev))
 
         from talos.models.strategy import BidConfirmation
 
@@ -483,7 +490,7 @@ class TestPlaceBidsSafety:
         ledger.record_fill(Side.B, count=5, price=47)
 
         notifications: list[tuple[str, str]] = []
-        engine.on_notification = lambda msg, sev: notifications.append((msg, sev))
+        engine.on_notification = lambda msg, sev, toast=False: notifications.append((msg, sev))
 
         from talos.models.strategy import BidConfirmation
 
@@ -615,7 +622,7 @@ class TestProposalQueue:
     async def test_approve_missing_proposal_notifies(self):
         engine = _engine_with_jump_setup()
         notifications: list[tuple[str, str]] = []
-        engine.on_notification = lambda msg, sev: notifications.append((msg, sev))
+        engine.on_notification = lambda msg, sev, toast=False: notifications.append((msg, sev))
         key = ProposalKey(event_ticker="EVT-1", side="B", kind="adjustment")
         await engine.approve_proposal(key)
         assert any("No pending" in msg for msg, _ in notifications)
@@ -910,7 +917,7 @@ class TestCheckImbalances:
         rest.get_orders = AsyncMock(side_effect=RuntimeError("API down"))
 
         notifications: list[tuple[str, str]] = []
-        engine.on_notification = lambda msg, sev: notifications.append((msg, sev))
+        engine.on_notification = lambda msg, sev, toast=False: notifications.append((msg, sev))
 
         await engine.approve_proposal(key)
 
@@ -1316,7 +1323,7 @@ class TestLifecycleFiltering:
         engine, rest = _engine_with_pair()
         rest.get_settlements = AsyncMock(return_value=[])
         notifications: list[str] = []
-        engine.on_notification = lambda msg, sev="information": notifications.append(msg)
+        engine.on_notification = lambda msg, sev="information", toast=False: notifications.append(msg)
 
         # Our market → should notify
         engine._on_market_settled("TK-A")
@@ -1332,7 +1339,7 @@ class TestLifecycleFiltering:
     def test_determined_notification_only_for_our_markets(self):
         engine, _ = _engine_with_pair()
         notifications: list[str] = []
-        engine.on_notification = lambda msg, sev="information": notifications.append(msg)
+        engine.on_notification = lambda msg, sev="information", toast=False: notifications.append(msg)
 
         engine._on_market_determined("TK-B", "yes", 100)
         assert any("TK-B" in n for n in notifications)
@@ -1344,7 +1351,7 @@ class TestLifecycleFiltering:
     def test_paused_notification_only_for_our_markets(self):
         engine, _ = _engine_with_pair()
         notifications: list[str] = []
-        engine.on_notification = lambda msg, sev="information": notifications.append(msg)
+        engine.on_notification = lambda msg, sev="information", toast=False: notifications.append(msg)
 
         engine._on_market_paused("TK-A", True)
         assert any("TK-A" in n for n in notifications)
@@ -1372,7 +1379,7 @@ class TestLifecycleFiltering:
         )
         rest.get_settlements = AsyncMock(return_value=[settlement])
         notifications: list[str] = []
-        engine.on_notification = lambda msg, sev="information": notifications.append(msg)
+        engine.on_notification = lambda msg, sev="information", toast=False: notifications.append(msg)
 
         engine._on_market_settled("TK-A")
         # Let the fire-and-forget task run
@@ -1398,7 +1405,7 @@ class TestReconcileWithKalshi:
 
     def _notify_collector(self, engine: TradingEngine) -> list[tuple[str, str]]:
         notifications: list[tuple[str, str]] = []
-        engine.on_notification = lambda msg, sev="info": notifications.append((msg, sev))
+        engine.on_notification = lambda msg, sev="info", toast=False: notifications.append((msg, sev))
         return notifications
 
     def test_clean_state_no_alerts(self, capsys: pytest.CaptureFixture[str]) -> None:
@@ -1553,7 +1560,7 @@ class TestAutoRebalance:
         rest.create_order_group = AsyncMock(return_value="grp-test")
 
         notifications: list[tuple[str, str]] = []
-        engine.on_notification = lambda msg, sev: notifications.append((msg, sev))
+        engine.on_notification = lambda msg, sev, toast=False: notifications.append((msg, sev))
 
         await engine.check_imbalances()
 

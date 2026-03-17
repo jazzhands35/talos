@@ -9,7 +9,7 @@ from zoneinfo import ZoneInfo
 from rich.segment import Segment
 from rich.style import Style as RichStyle
 from rich.text import Text as RichText
-from textual.widgets import DataTable, Static
+from textual.widgets import DataTable, RichLog, Static
 
 from talos.cpm import format_cpm, format_eta
 from talos.fees import fee_adjusted_cost
@@ -17,7 +17,7 @@ from talos.game_status import GameStatus
 from talos.models.position import EventPositionSummary
 from talos.scanner import ArbitrageScanner
 from talos.top_of_market import TopOfMarketTracker
-from talos.ui.theme import BLUE, GREEN, PEACH, RED, SURFACE2, YELLOW
+from talos.ui.theme import BLUE, GREEN, PEACH, RED, SUBTEXT0, SURFACE2, YELLOW
 
 
 def _fmt_cents(value: int) -> RichText:
@@ -544,3 +544,32 @@ class OrderLog(Static):
                 f"{order['price']}¢  {filled}/{total}  {remaining} resting  {icon}{pos_str}"
             )
         self.update("ORDERS\n\n" + "\n".join(lines))
+
+
+_SEVERITY_STYLE = {
+    "information": RichStyle(color=SUBTEXT0),
+    "warning": RichStyle(color=YELLOW),
+    "error": RichStyle(color=RED, bold=True),
+}
+
+
+class ActivityLog(RichLog):
+    """Scrollable activity log for automated engine notifications.
+
+    Uses RichLog (no widget-per-message overhead) instead of Textual toasts
+    to prevent asyncio task accumulation from freezing the event loop.
+    """
+
+    def on_mount(self) -> None:
+        self.write(RichText("ACTIVITY", style=RichStyle(color=BLUE, bold=True)))
+        self.write("")
+
+    def log_activity(self, message: str, severity: str = "information") -> None:
+        """Append a timestamped, color-coded message."""
+        now = datetime.now(UTC)
+        ts = now.strftime("%H:%M:%S")
+        style = _SEVERITY_STYLE.get(severity, _SEVERITY_STYLE["information"])
+        line = RichText()
+        line.append(f"  {ts}  ", style=RichStyle(color=SURFACE2))
+        line.append(message, style=style)
+        self.write(line)

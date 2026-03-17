@@ -7,7 +7,6 @@ The TUI delegates to this engine rather than managing trading state directly.
 from __future__ import annotations
 
 import asyncio
-import time
 from collections.abc import Callable
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
@@ -115,7 +114,6 @@ class TradingEngine:
         self._settled_markets: dict[str, dict[str, str]] = {}  # event_ticker -> {ticker: result}
         self._order_placed_at: dict[str, float] = {}  # order_id -> monotonic timestamp
         self._exit_only_events: set[str] = set()  # events in exit-only mode
-        self._recent_notifications: dict[str, float] = {}  # message -> monotonic ts
 
         # Wire portfolio feed callbacks
         if self._portfolio_feed is not None:
@@ -129,7 +127,7 @@ class TradingEngine:
             self._lifecycle_feed.on_paused = self._on_market_paused
 
         # Callbacks for UI communication and persistence
-        self.on_notification: Callable[[str, str], None] | None = None
+        self.on_notification: Callable[[str, str, bool], None] | None = None
         self.on_unit_size_change: Callable[[int], None] | None = None
 
     # ── Read-only properties ─────────────────────────────────────────
@@ -485,16 +483,16 @@ class TradingEngine:
                 await self._feed.start()
                 # If we reach here, the WS exited cleanly
                 self._ws_connected = False
-                self._notify("WEBSOCKET DISCONNECTED — prices are stale!", "error")
+                self._notify("WEBSOCKET DISCONNECTED — prices are stale!", "error", toast=True)
                 logger.error("ws_connection_lost", reason="listen loop exited cleanly")
             except Exception as e:
                 self._ws_connected = False
-                self._notify(f"WEBSOCKET DISCONNECTED: {e}", "error")
+                self._notify(f"WEBSOCKET DISCONNECTED: {e}", "error", toast=True)
                 logger.error("ws_connection_lost", reason=str(e), error_type=type(e).__name__)
 
             # Wait and retry — loop instead of recursion
             logger.info("ws_reconnecting")
-            self._notify("Reconnecting WebSocket in 5s...", "warning")
+            self._notify("Reconnecting WebSocket in 5s...", "warning", toast=True)
             await asyncio.sleep(5)
 
     async def _setup_initial_games(self) -> None:
@@ -1164,7 +1162,7 @@ class TradingEngine:
                         kalshi_resting=kalshi_resting[side],
                         unit_size=ledger.unit_size,
                     )
-                    self._notify(msg, "error")
+                    self._notify(msg, "error", toast=True)
 
                 # Check 2: Multiple resting orders (double-bid indicator)
                 if kalshi_resting_order_count[side] > 1:
@@ -1465,7 +1463,7 @@ class TradingEngine:
         evt_for_bid = self._adjuster.resolve_event(bid.ticker_a)
         if evt_for_bid and self.is_exit_only(evt_for_bid):
             label = self._display_name(evt_for_bid)
-            self._notify(f"Bid BLOCKED {label}: exit-only mode (press E to disable)", "error")
+            self._notify(f"Bid BLOCKED {label}: exit-only mode (press E to disable)", "error", toast=True)
             logger.error("bid_blocked_exit_only", event_ticker=evt_for_bid)
             return
 
@@ -1474,7 +1472,7 @@ class TradingEngine:
             if ticker in self._paused_markets:
                 evt = self._adjuster.resolve_event(ticker)
                 label = self._display_name(evt) if evt else ticker
-                self._notify(f"Bid BLOCKED {label}: {ticker} is paused", "error")
+                self._notify(f"Bid BLOCKED {label}: {ticker} is paused", "error", toast=True)
                 logger.error("bid_blocked_market_paused", ticker=ticker)
                 return
 
@@ -1489,7 +1487,7 @@ class TradingEngine:
                 ok, reason = ledger.is_placement_safe(side, bid.qty, price, rate=fee_rate)
                 if not ok:
                     name = self._display_name(ledger.event_ticker)
-                    self._notify(f"Bid BLOCKED {name} (side {side.value}): {reason}", "error")
+                    self._notify(f"Bid BLOCKED {name} (side {side.value}): {reason}", "error", toast=True)
                     logger.error(
                         "bid_blocked_safety_gate",
                         event_ticker=ledger.event_ticker,
@@ -1562,7 +1560,7 @@ class TradingEngine:
                         source="auto_accept" if self._auto_config.enabled else "manual",
                     )
         except Exception as e:
-            self._notify(f"Order error: {type(e).__name__}: {e}", "error")
+            self._notify(f"Order error: {type(e).__name__}: {e}", "error", toast=True)
             logger.exception("place_bids_error")
 
     async def add_games(self, urls: list[str], source: str = "scan") -> None:
@@ -1606,9 +1604,9 @@ class TradingEngine:
                         if gs and gs.scheduled_start
                         else None,
                     )
-            self._notify(f"Added {len(urls)} game(s)")
+            self._notify(f"Added {len(urls)} game(s)", toast=True)
         except Exception as e:
-            self._notify(f"Error: {e}", "error")
+            self._notify(f"Error: {e}", "error", toast=True)
             logger.exception("add_games_error")
 
     async def remove_game(self, event_ticker: str) -> None:
@@ -1618,9 +1616,9 @@ class TradingEngine:
             if self._game_status_resolver is not None:
                 self._game_status_resolver.remove(event_ticker)
             await self._game_manager.remove_game(event_ticker)
-            self._notify(f"Removed {event_ticker}")
+            self._notify(f"Removed {event_ticker}", toast=True)
         except Exception as e:
-            self._notify(f"Error: {e}", "error")
+            self._notify(f"Error: {e}", "error", toast=True)
 
     async def clear_games(self) -> None:
         """Clear all monitored games."""
@@ -1630,9 +1628,9 @@ class TradingEngine:
                 for pair in self._game_manager.active_games:
                     self._game_status_resolver.remove(pair.event_ticker)
             await self._game_manager.clear_all_games()
-            self._notify(f"Cleared {count} game(s)")
+            self._notify(f"Cleared {count} game(s)", toast=True)
         except Exception as e:
-            self._notify(f"Error: {e}", "error")
+            self._notify(f"Error: {e}", "error", toast=True)
 
     async def refresh_game_status(self) -> None:
         """Hourly: re-fetch game status for all active events."""
@@ -1644,7 +1642,7 @@ class TradingEngine:
         try:
             envelope = self._proposal_queue.approve(key)
         except KeyError:
-            self._notify("No pending proposal to approve", "warning")
+            self._notify("No pending proposal to approve", "warning", toast=True)
             return
 
         if envelope.kind == "hold":
@@ -1679,7 +1677,7 @@ class TradingEngine:
                     f" \u2192 {envelope.adjustment.new_price}c",
                 )
             except Exception as e:
-                self._notify(f"Adjustment FAILED: {type(e).__name__}: {e}", "error")
+                self._notify(f"Adjustment FAILED: {type(e).__name__}: {e}", "error", toast=True)
                 logger.exception(
                     "adjustment_execute_error",
                     event_ticker=envelope.adjustment.event_ticker,
@@ -1719,7 +1717,7 @@ class TradingEngine:
         try:
             ledger = self._adjuster.get_ledger(event_ticker)
         except KeyError:
-            self._notify(f"Withdraw FAILED: no ledger for {event_ticker}", "error")
+            self._notify(f"Withdraw FAILED: no ledger for {event_ticker}", "error", toast=True)
             return
 
         name = self._display_name(event_ticker)
@@ -1740,6 +1738,7 @@ class TradingEngine:
                     self._notify(
                         f"Withdraw cancel FAILED ({side.value}): {e}",
                         "error",
+                        toast=True,
                     )
                     logger.exception(
                         "withdrawal_cancel_error",
@@ -1796,6 +1795,7 @@ class TradingEngine:
             self._notify(
                 f"Verify FAILED for {name} — position data may be stale",
                 "warning",
+                toast=True,
             )
 
     # ── Internal helpers ─────────────────────────────────────────────
@@ -2021,31 +2021,12 @@ class TradingEngine:
             tickers.append(pair.ticker_b)
         return tickers
 
-    _NOTIFY_DEDUP_WINDOW = 30.0  # seconds — suppress identical toasts within this window
-    _NOTIFY_RATE_LIMIT = 10  # max unique toasts per dedup window
-    _NOTIFY_RATE_WINDOW = 10.0  # rate-limit window (seconds)
-
-    def _notify(self, message: str, severity: str = "information") -> None:
+    def _notify(self, message: str, severity: str = "information", *, toast: bool = False) -> None:
         """Emit a notification to the UI if callback is set.
 
-        Two-layer throttle to prevent toast accumulation from freezing the
-        Textual event loop (each toast creates an asyncio task):
-        1. Dedup: identical messages within 30s are suppressed.
-        2. Rate limit: max 10 unique messages per 10s window.
+        By default, notifications go to the ActivityLog panel (zero asyncio
+        overhead). Pass ``toast=True`` for critical errors or user-initiated
+        action results that need an interruptive Textual toast.
         """
-        now = time.monotonic()
-        # Prune expired entries
-        cutoff = now - self._NOTIFY_DEDUP_WINDOW
-        self._recent_notifications = {
-            msg: ts for msg, ts in self._recent_notifications.items() if ts > cutoff
-        }
-        if message in self._recent_notifications:
-            return  # Suppress duplicate
-        # Rate limit — count messages in the shorter rate window
-        rate_cutoff = now - self._NOTIFY_RATE_WINDOW
-        recent_count = sum(1 for ts in self._recent_notifications.values() if ts > rate_cutoff)
-        if recent_count >= self._NOTIFY_RATE_LIMIT:
-            return  # Rate limited
-        self._recent_notifications[message] = now
         if self.on_notification:
-            self.on_notification(message, severity)
+            self.on_notification(message, severity, toast)

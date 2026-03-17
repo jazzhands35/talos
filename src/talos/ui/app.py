@@ -24,7 +24,7 @@ from talos.scanner import ArbitrageScanner
 from talos.ui.proposal_panel import ProposalPanel
 from talos.ui.screens import AddGamesScreen, AutoAcceptScreen, BidScreen, ScanScreen, UnitSizeScreen
 from talos.ui.theme import APP_CSS
-from talos.ui.widgets import AccountPanel, OpportunitiesTable, OrderLog
+from talos.ui.widgets import AccountPanel, ActivityLog, OpportunitiesTable, OrderLog
 
 logger = structlog.get_logger()
 
@@ -73,6 +73,7 @@ class TalosApp(App):
         yield OpportunitiesTable(id="opportunities-table")
         with Horizontal(id="bottom-panels"):
             yield AccountPanel(id="account-panel")
+            yield ActivityLog(id="activity-log")
             yield OrderLog(id="order-log")
         yield Footer()
 
@@ -102,9 +103,15 @@ class TalosApp(App):
 
     # ── Engine callbacks ──────────────────────────────────────────
 
-    def _on_engine_notification(self, message: str, severity: str) -> None:
-        """Forward engine notifications to Textual toasts."""
-        self.notify(message, severity=cast(SeverityLevel, severity), markup=False)
+    def _on_engine_notification(self, message: str, severity: str, toast: bool) -> None:
+        """Route engine notifications to activity log or toast.
+
+        Most automated events go to the ActivityLog panel (zero asyncio overhead).
+        Only critical errors and user-initiated results use Textual toasts.
+        """
+        self.query_one(ActivityLog).log_activity(message, severity)
+        if toast:
+            self.notify(message, severity=cast(SeverityLevel, severity), markup=False)
 
     def _refresh_proposals(self) -> None:
         """Update subtitle and WS disconnect banner."""

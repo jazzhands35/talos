@@ -61,6 +61,15 @@ Footer {{
     max-height: 12;
 }}
 
+#activity-log {{
+    width: 3fr;
+    border: solid {SURFACE1};
+    background: {SURFACE0};
+    padding: 0 1;
+    height: auto;
+    max-height: 12;
+}}
+
 #order-log {{
     width: 3fr;
     border: solid {SURFACE1};
