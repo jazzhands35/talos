@@ -630,7 +630,10 @@ class TestExecuteRebalance:
         )
 
         rest.create_order.assert_not_called()
-        assert any("skipped" in msg.lower() or "balanced" in msg.lower() for msg, _ in notifications)
+        assert any(
+            "skipped" in msg.lower() or "balanced" in msg.lower()
+            for msg, _ in notifications
+        )
 
 
 # ── Fresh sync before catch-up ───────────────────────────────────────

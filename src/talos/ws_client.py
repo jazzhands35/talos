@@ -133,6 +133,7 @@ class KalshiWSClient:
         self._ws = await websockets.connect(
             self._ws_url,
             additional_headers=headers,
+            open_timeout=10,     # fail fast if server unreachable
             ping_interval=None,  # disable client pings — Kalshi sends server pings every 10s
             ping_timeout=None,   # no client-side timeout
         )

@@ -6,21 +6,22 @@ from typing import Any
 
 from pydantic import BaseModel, Field, model_validator
 
+from talos.models._converters import dollars_to_cents as _dollars_to_cents
+from talos.models._converters import fp_to_int as _fp_to_int
+from talos.models._converters import log_unknown_fields
+
 ACTIVE_STATUSES = frozenset({"resting", "executed"})
 
+_ORDER_FP_FIELDS = frozenset({
+    "yes_price_dollars", "no_price_dollars",
+    "taker_fees_dollars", "maker_fees_dollars",
+    "maker_fill_cost_dollars", "taker_fill_cost_dollars",
+    "fill_count_fp", "remaining_count_fp", "initial_count_fp",
+})
 
-def _dollars_to_cents(val: Any) -> int:
-    """Convert a _dollars string/float to integer cents."""
-    if val is None:
-        return 0
-    return round(float(val) * 100)
-
-
-def _fp_to_int(val: Any) -> int:
-    """Convert an _fp string to integer."""
-    if val is None:
-        return 0
-    return int(float(val))
+_FILL_FP_FIELDS = frozenset({
+    "yes_price_dollars", "no_price_dollars", "count_fp",
+})
 
 
 class Order(BaseModel, extra="ignore"):
@@ -56,6 +57,7 @@ class Order(BaseModel, extra="ignore"):
     def _migrate_fp(cls, data: Any) -> Any:
         if not isinstance(data, dict):
             return data
+        log_unknown_fields("Order", data, cls.model_fields.keys() | _ORDER_FP_FIELDS)
         # Dollars → cents
         for old, new in [
             ("yes_price", "yes_price_dollars"),
@@ -102,6 +104,7 @@ class Fill(BaseModel, extra="ignore"):
     def _migrate_fp(cls, data: Any) -> Any:
         if not isinstance(data, dict):
             return data
+        log_unknown_fields("Fill", data, cls.model_fields.keys() | _FILL_FP_FIELDS)
         for old, new in [
             ("yes_price", "yes_price_dollars"),
             ("no_price", "no_price_dollars"),

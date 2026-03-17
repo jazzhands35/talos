@@ -353,7 +353,7 @@ async def execute_rebalance(
         fresh_catchup_qty = max(0, fresh_over_filled - fresh_under_committed)
         if fresh_catchup_qty <= 0:
             notify(
-                f"Catch-up skipped — fresh sync shows gap closed (balanced)",
+                "Catch-up skipped — fresh sync shows gap closed (balanced)",
                 "information",
             )
             logger.info(

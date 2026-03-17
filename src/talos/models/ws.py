@@ -10,19 +10,8 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, model_validator
 
-
-def _dollars_to_cents(val: Any) -> int | None:
-    """Convert a _dollars string/float to integer cents."""
-    if val is None:
-        return None
-    return round(float(val) * 100)
-
-
-def _fp_to_int(val: Any) -> int | None:
-    """Convert an _fp string to integer."""
-    if val is None:
-        return None
-    return int(float(val))
+from talos.models._converters import dollars_to_cents as _dollars_to_cents
+from talos.models._converters import fp_to_int as _fp_to_int
 
 
 class OrderBookSnapshot(BaseModel):

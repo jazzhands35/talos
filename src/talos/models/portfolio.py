@@ -6,19 +6,24 @@ from typing import Any
 
 from pydantic import BaseModel, model_validator
 
+from talos.models._converters import dollars_to_cents as _dollars_to_cents
+from talos.models._converters import fp_to_int as _fp_to_int
+from talos.models._converters import log_unknown_fields
 
-def _dollars_to_cents(val: Any) -> int:
-    """Convert a _dollars string/float to integer cents."""
-    if val is None:
-        return 0
-    return round(float(val) * 100)
+_POSITION_FP_FIELDS = frozenset({
+    "position_fp", "total_traded_dollars", "market_exposure_dollars",
+    "resting_orders_count_fp",
+})
 
+_EVENT_POSITION_FP_FIELDS = frozenset({
+    "total_cost_dollars", "event_exposure_dollars", "realized_pnl_dollars",
+    "fees_paid_dollars", "total_cost_shares_fp", "resting_orders_count_fp",
+})
 
-def _fp_to_int(val: Any) -> int:
-    """Convert an _fp string to integer."""
-    if val is None:
-        return 0
-    return int(float(val))
+_SETTLEMENT_FP_FIELDS = frozenset({
+    "yes_total_cost_dollars", "no_total_cost_dollars",
+    "yes_count_fp", "no_count_fp", "value_dollars",
+})
 
 
 class Balance(BaseModel):
@@ -64,6 +69,7 @@ class Position(BaseModel, extra="ignore"):
     def _migrate_fp(cls, data: Any) -> Any:
         if not isinstance(data, dict):
             return data
+        log_unknown_fields("Position", data, cls.model_fields.keys() | _POSITION_FP_FIELDS)
         if "position_fp" in data and data["position_fp"] is not None:
             data["position"] = _fp_to_int(data["position_fp"])
         for old, new in [
@@ -96,6 +102,7 @@ class EventPosition(BaseModel, extra="ignore"):
     def _migrate_fp(cls, data: Any) -> Any:
         if not isinstance(data, dict):
             return data
+        log_unknown_fields("EventPosition", data, cls.model_fields.keys() | _EVENT_POSITION_FP_FIELDS)
         for old, new in [
             ("total_cost", "total_cost_dollars"),
             ("event_exposure", "event_exposure_dollars"),
@@ -136,6 +143,7 @@ class Settlement(BaseModel, extra="ignore"):
     def _migrate_fp(cls, data: Any) -> Any:
         if not isinstance(data, dict):
             return data
+        log_unknown_fields("Settlement", data, cls.model_fields.keys() | _SETTLEMENT_FP_FIELDS)
         # revenue is already cents integer — leave it
         # fee_cost is a dollars string — convert to cents
         if "fee_cost" in data and isinstance(data["fee_cost"], str):

@@ -1,6 +1,9 @@
 """Tests for exit-only mode — gates, status display, and auto-trigger."""
 
 from datetime import UTC, datetime, timedelta
+from unittest.mock import AsyncMock, MagicMock
+
+import pytest
 
 from talos.automation_config import AutomationConfig
 from talos.bid_adjuster import BidAdjuster
@@ -259,3 +262,112 @@ class TestExitOnlyEnforcement:
         assert ledger.filled_count(Side.A) == 0
         assert ledger.filled_count(Side.B) == 0
         # 0 == 0 → balanced → cancel both
+
+    def test_imbalanced_behind_side_target_resting(self):
+        """Behind side's resting should be reduced to match ahead fills."""
+        ledger = PositionLedger(event_ticker="EVT-1", unit_size=20)
+        ledger.record_fill(Side.A, count=5, price=48)
+        ledger.record_resting(Side.A, "ord-a", count=15, price=48)
+        ledger.record_fill(Side.B, count=1, price=49)
+        ledger.record_resting(Side.B, "ord-b", count=19, price=49)
+
+        ahead = Side.A  # 5 > 1
+        behind = Side.B
+        # Behind needs: ahead_filled - behind_filled = 5 - 1 = 4 resting
+        target_behind_resting = ledger.filled_count(ahead) - ledger.filled_count(behind)
+        assert target_behind_resting == 4
+        assert ledger.resting_count(behind) == 19  # currently 19, needs reducing to 4
+
+
+# ── Async enforcement integration ────────────────────────────
+
+
+class TestExitOnlyEnforcementAsync:
+    """Test _enforce_exit_only via TradingEngine with mock REST."""
+
+    def _make_engine_with_pair(self):
+        from talos.engine import TradingEngine
+        from talos.game_manager import GameManager
+        from talos.market_feed import MarketFeed
+        from talos.rest_client import KalshiRESTClient
+        from talos.scanner import ArbitrageScanner
+        from talos.top_of_market import TopOfMarketTracker
+
+        books = OrderBookManager()
+        scanner = ArbitrageScanner(books)
+        scanner.add_pair("EVT-1", "TK-A", "TK-B")
+        pair = ArbPair(event_ticker="EVT-1", ticker_a="TK-A", ticker_b="TK-B")
+        adjuster = BidAdjuster(books, [pair], unit_size=20)
+        rest = AsyncMock(spec=KalshiRESTClient)
+        engine = TradingEngine(
+            scanner=scanner,
+            game_manager=MagicMock(spec=GameManager),
+            rest_client=rest,
+            market_feed=MagicMock(spec=MarketFeed),
+            tracker=TopOfMarketTracker(books),
+            adjuster=adjuster,
+        )
+        return engine, rest
+
+    @pytest.mark.asyncio
+    async def test_imbalanced_cancels_ahead_and_reduces_behind(self):
+        """Exit-only: cancel ahead resting, reduce behind resting to match."""
+        engine, rest = self._make_engine_with_pair()
+        ledger = engine.adjuster.get_ledger("EVT-1")
+        ledger.record_fill(Side.A, count=5, price=48)
+        ledger.record_resting(Side.A, "ord-a", count=15, price=48)
+        ledger.record_fill(Side.B, count=1, price=49)
+        ledger.record_resting(Side.B, "ord-b", count=19, price=49)
+
+        rest.cancel_order = AsyncMock()
+        rest.get_order = AsyncMock(
+            return_value=type("O", (), {"remaining_count": 19})()
+        )
+        rest.decrease_order = AsyncMock()
+        rest.get_all_orders = AsyncMock(return_value=[])
+
+        await engine._enforce_exit_only("EVT-1")
+
+        # Step 1: cancel ahead side (A) resting
+        rest.cancel_order.assert_called_once_with("ord-a")
+        # Step 2: reduce behind side (B) from 19 to 4
+        rest.decrease_order.assert_called_once_with("ord-b", reduce_to=4)
+
+    @pytest.mark.asyncio
+    async def test_imbalanced_behind_no_resting_no_decrease(self):
+        """If behind side has no resting, only cancel ahead side."""
+        engine, rest = self._make_engine_with_pair()
+        ledger = engine.adjuster.get_ledger("EVT-1")
+        ledger.record_fill(Side.A, count=5, price=48)
+        ledger.record_resting(Side.A, "ord-a", count=15, price=48)
+        ledger.record_fill(Side.B, count=1, price=49)
+        # B has no resting
+
+        rest.cancel_order = AsyncMock()
+        rest.decrease_order = AsyncMock()
+        rest.get_all_orders = AsyncMock(return_value=[])
+
+        await engine._enforce_exit_only("EVT-1")
+
+        rest.cancel_order.assert_called_once_with("ord-a")
+        rest.decrease_order.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_imbalanced_behind_resting_already_at_target(self):
+        """If behind resting is already <= target, no decrease needed."""
+        engine, rest = self._make_engine_with_pair()
+        ledger = engine.adjuster.get_ledger("EVT-1")
+        ledger.record_fill(Side.A, count=5, price=48)
+        ledger.record_resting(Side.A, "ord-a", count=15, price=48)
+        ledger.record_fill(Side.B, count=2, price=49)
+        ledger.record_resting(Side.B, "ord-b", count=3, price=49)
+        # target = 5 - 2 = 3, behind has exactly 3 → no decrease
+
+        rest.cancel_order = AsyncMock()
+        rest.decrease_order = AsyncMock()
+        rest.get_all_orders = AsyncMock(return_value=[])
+
+        await engine._enforce_exit_only("EVT-1")
+
+        rest.cancel_order.assert_called_once_with("ord-a")
+        rest.decrease_order.assert_not_called()

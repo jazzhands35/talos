@@ -339,9 +339,22 @@ class DataCollector:
         self, snapshots: list[dict[str, Any]]
     ) -> None:
         """Bulk insert market snapshots for all monitored events."""
+        if not snapshots:
+            return
         ts = self._now()
-        for snap in snapshots:
-            self._insert("market_snapshots", ts=ts, **snap)
+        try:
+            for snap in snapshots:
+                cols = ["ts"] + list(snap.keys())
+                placeholders = ", ".join(["?"] * len(cols))
+                col_names = ", ".join(cols)
+                values = [ts] + [snap[c] for c in snap]
+                self._db.execute(
+                    f"INSERT INTO market_snapshots ({col_names}) VALUES ({placeholders})",
+                    values,
+                )
+            self._db.commit()  # Single commit for entire batch
+        except Exception:
+            logger.warning("data_collector_snapshot_batch_failed", exc_info=True)
 
     # ── Settlements ───────────────────────────────────────────────
 

@@ -98,6 +98,7 @@ class TalosApp(App):
             # Auto-accept on by default (24h), press F to toggle off
             self._start_auto_accept(24.0)
             self._start_feed()
+            self._start_watchdog()
 
     # ── Engine callbacks ──────────────────────────────────────────
 
@@ -236,6 +237,70 @@ class TalosApp(App):
         if self._engine is not None:
             self._engine.reject_proposal(event.key)
 
+    # ── Event loop watchdog ─────────────────────────────────────
+
+    @work(thread=False)
+    async def _start_watchdog(self) -> None:
+        """Detect event loop blocking by measuring sleep accuracy.
+
+        Sleeps for 0.5s in a loop. If actual elapsed > 2s, the event
+        loop was blocked — log a warning with all running tasks.
+        """
+        import asyncio as _wd_asyncio
+        import time as _wd_time
+        import traceback as _wd_tb
+        import sys as _wd_sys
+
+        log_path = "talos_freeze.log"
+        while True:
+            t0 = _wd_time.monotonic()
+            await _wd_asyncio.sleep(0.5)
+            elapsed = _wd_time.monotonic() - t0
+
+            if elapsed > 2.0:
+                # Event loop was blocked!
+                msg = (
+                    f"EVENT LOOP BLOCKED for {elapsed:.1f}s "
+                    f"(expected 0.5s)\n"
+                )
+                # Dump all task stack traces
+                tasks = _wd_asyncio.all_tasks()
+                task_info = []
+                for task in tasks:
+                    name = task.get_name()
+                    coro = task.get_coro()
+                    frames = task.get_stack(limit=5)
+                    stack = "".join(_wd_tb.format_list(_wd_tb.extract_stack(limit=0)))
+                    if frames:
+                        stack = "".join(
+                            _wd_tb.format_list(
+                                _wd_tb.StackSummary.extract(
+                                    _wd_tb.walk_stack(None), limit=0
+                                )
+                            )
+                        )
+                        # Get the actual task frames
+                        frame_strs = []
+                        for frame in frames:
+                            frame_strs.append(
+                                f"  {frame.f_code.co_filename}:{frame.f_lineno} "
+                                f"in {frame.f_code.co_name}"
+                            )
+                        stack = "\n".join(frame_strs)
+                    task_info.append(f"  Task {name}: {coro}\n{stack}")
+
+                full_msg = msg + f"Active tasks ({len(tasks)}):\n" + "\n".join(task_info)
+
+                logger.error("event_loop_blocked", elapsed=elapsed)
+                try:
+                    with open(log_path, "a") as f:
+                        f.write(f"[{_wd_time.strftime('%H:%M:%S')}] {full_msg}\n\n")
+                except Exception:
+                    pass
+
+                # Also write to stderr for immediate visibility
+                print(f"\n!!! FREEZE DETECTED: {elapsed:.1f}s !!!", file=_wd_sys.stderr)
+
     # ── Polling delegations ───────────────────────────────────────
 
     @work(thread=False)
@@ -270,20 +335,24 @@ class TalosApp(App):
         table._all_dirty = True  # position data changed, rebuild all rows
         self.query_one(OrderLog).update_orders(self._engine.order_data)
 
-    @work(thread=False)
+    @work(thread=False, exclusive=True, group="poll_queue")
     async def _poll_queue(self) -> None:
         if self._engine is None:
             return
         await self._engine.refresh_queue_positions()
         self.query_one(OpportunitiesTable).update_positions(self._engine.position_summaries)
 
-    @work(thread=False)
+    @work(thread=False, exclusive=True, group="poll_trades")
     async def _poll_trades(self) -> None:
         if self._engine is not None:
             await self._engine.refresh_trades()
 
     def _log_market_snapshots(self) -> None:
-        """Log market snapshots every 10s for ML data collection."""
+        """Log market snapshots every 10s for ML data collection.
+
+        Collects snapshot data on the main thread (reads engine state),
+        then writes to SQLite in a worker thread to avoid blocking the UI.
+        """
         if self._engine is None or not hasattr(self._engine, "_data_collector"):
             return
         dc = self._engine._data_collector
