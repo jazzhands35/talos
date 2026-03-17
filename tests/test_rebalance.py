@@ -1,0 +1,664 @@
+"""Tests for rebalance detection and execution (extracted from test_engine.py)."""
+
+from __future__ import annotations
+
+from unittest.mock import AsyncMock
+
+import pytest
+
+from talos.bid_adjuster import BidAdjuster
+from talos.models.order import Order
+from talos.models.proposal import ProposedRebalance
+from talos.models.strategy import ArbPair, Opportunity
+from talos.orderbook import OrderBookManager
+from talos.position_ledger import PositionLedger, Side
+from talos.rebalance import compute_rebalance_proposal, execute_rebalance
+from talos.rest_client import KalshiRESTClient
+from talos.scanner import ArbitrageScanner
+
+
+# ── Helpers ──────────────────────────────────────────────────────────
+
+
+def _make_pair() -> ArbPair:
+    return ArbPair(event_ticker="EVT-1", ticker_a="TK-A", ticker_b="TK-B")
+
+
+def _books_with_data(no_a: int = 45, no_b: int = 48) -> OrderBookManager:
+    """OrderBookManager with book data so markets are considered 'open'."""
+    from talos.models.ws import OrderBookSnapshot
+
+    books = OrderBookManager()
+    books.apply_snapshot(
+        "TK-A",
+        OrderBookSnapshot(market_ticker="TK-A", market_id="m1", yes=[], no=[[no_a, 100]]),
+    )
+    books.apply_snapshot(
+        "TK-B",
+        OrderBookSnapshot(market_ticker="TK-B", market_id="m2", yes=[], no=[[no_b, 100]]),
+    )
+    return books
+
+
+def _make_snapshot(no_a: int = 45, no_b: int = 48) -> Opportunity:
+    return Opportunity(
+        event_ticker="EVT-1",
+        ticker_a="TK-A",
+        ticker_b="TK-B",
+        no_a=no_a,
+        no_b=no_b,
+        qty_a=100,
+        qty_b=100,
+        raw_edge=100 - no_a - no_b,
+        fee_edge=0.0,
+        tradeable_qty=100,
+        timestamp="2026-03-13T00:00:00Z",
+    )
+
+
+def _make_order(
+    ticker: str,
+    *,
+    order_id: str = "ord-1",
+    fill_count: int = 0,
+    remaining_count: int = 0,
+    no_price: int = 45,
+    status: str = "resting",
+) -> Order:
+    return Order(
+        order_id=order_id,
+        ticker=ticker,
+        action="buy",
+        side="no",
+        no_price=no_price,
+        initial_count=fill_count + remaining_count,
+        remaining_count=remaining_count,
+        fill_count=fill_count,
+        status=status,
+    )
+
+
+def _make_exec_context(
+    *,
+    no_a: int = 45,
+    no_b: int = 48,
+) -> tuple[ArbitrageScanner, BidAdjuster, AsyncMock]:
+    """Build scanner + adjuster + mock REST for execution tests."""
+    books = OrderBookManager()
+    scanner = ArbitrageScanner(books)
+    scanner.add_pair("EVT-1", "TK-A", "TK-B")
+    pair = ArbPair(event_ticker="EVT-1", ticker_a="TK-A", ticker_b="TK-B")
+    adjuster = BidAdjuster(books, [pair], unit_size=10)
+    rest = AsyncMock(spec=KalshiRESTClient)
+    rest.create_order_group = AsyncMock(return_value="grp-test")
+    return scanner, adjuster, rest
+
+
+# ── Pure detection tests ─────────────────────────────────────────────
+
+
+class TestComputeRebalanceProposal:
+    def test_no_imbalance_no_proposal(self):
+        """Balanced positions produce no rebalance proposal."""
+        pair = _make_pair()
+        ledger = PositionLedger(event_ticker="EVT-1", unit_size=10)
+        ledger.record_resting(Side.A, "ord-a", 10, 45)
+        ledger.record_resting(Side.B, "ord-b", 10, 47)
+
+        result = compute_rebalance_proposal(
+            "EVT-1", ledger, pair, None, "Test", OrderBookManager()
+        )
+        assert result is None
+
+    def test_imbalance_within_unit_no_proposal(self):
+        """Delta < unit_size is tolerated (normal fill asymmetry)."""
+        pair = _make_pair()
+        ledger = PositionLedger(event_ticker="EVT-1", unit_size=10)
+        ledger.record_fill(Side.A, 10, 45)
+        ledger.record_fill(Side.B, 10, 47)
+
+        # delta=0 → no proposal (perfectly balanced)
+        result = compute_rebalance_proposal(
+            "EVT-1", ledger, pair, None, "Test", OrderBookManager()
+        )
+        assert result is None
+
+    def test_any_committed_delta_proposes(self):
+        """Any non-zero committed delta triggers rebalance (unhedged exposure)."""
+        pair = _make_pair()
+        ledger = PositionLedger(event_ticker="EVT-1", unit_size=10)
+        ledger.record_fill(Side.A, 10, 45)
+        ledger.record_resting(Side.A, "ord-a", 1, 45)
+        ledger.record_fill(Side.B, 10, 47)
+
+        # delta=1 → proposal (even 1 unhedged contract matters)
+        result = compute_rebalance_proposal(
+            "EVT-1", ledger, pair, None, "Test", OrderBookManager()
+        )
+        assert result is not None
+        assert result.kind == "rebalance"
+
+    def test_imbalance_at_exactly_unit_size_proposes(self):
+        """Delta == unit_size is flagged (a full unit of imbalance)."""
+        pair = _make_pair()
+        ledger = PositionLedger(event_ticker="EVT-1", unit_size=10)
+        ledger.record_fill(Side.A, 10, 45)
+        ledger.record_resting(Side.A, "ord-a", 10, 45)
+        ledger.record_fill(Side.B, 10, 47)
+
+        result = compute_rebalance_proposal(
+            "EVT-1", ledger, pair, None, "Test", OrderBookManager()
+        )
+        assert result is not None
+        assert result.kind == "rebalance"
+
+    def test_imbalance_exceeds_unit_proposes_rebalance(self):
+        """Delta > unit_size produces a rebalance proposal."""
+        pair = _make_pair()
+        ledger = PositionLedger(event_ticker="EVT-1", unit_size=10)
+        ledger.record_fill(Side.A, 50, 45)
+        ledger.record_resting(Side.A, "ord-a", 60, 45)
+        ledger.record_fill(Side.B, 50, 47)
+        ledger.record_resting(Side.B, "ord-b", 10, 47)
+
+        result = compute_rebalance_proposal(
+            "EVT-1", ledger, pair, None, "Test", OrderBookManager()
+        )
+        assert result is not None
+        assert result.kind == "rebalance"
+        assert result.key.side == "A"  # over-extended side
+        assert "Cancel" in result.detail  # target=over_filled always cancels all resting
+        assert "110" in result.detail  # committed_A
+        assert "60" in result.detail  # committed_B
+
+    def test_fill_imbalance_no_snapshot_manual_fallback(self):
+        """With open markets but no scanner snapshot, falls back to manual."""
+        pair = _make_pair()
+        ledger = PositionLedger(event_ticker="EVT-1", unit_size=10)
+        ledger.record_fill(Side.A, 30, 45)
+        ledger.record_fill(Side.B, 10, 47)
+
+        result = compute_rebalance_proposal(
+            "EVT-1", ledger, pair, None, "Test", _books_with_data()
+        )
+        assert result is not None
+        assert result.kind == "rebalance"
+        assert result.key.side == "A"
+        assert result.rebalance is None  # no executable step
+
+    def test_fill_imbalance_with_snapshot_proposes_catchup(self):
+        """With scanner snapshot, fill imbalance proposes catch-up bid."""
+        pair = _make_pair()
+        ledger = PositionLedger(event_ticker="EVT-1", unit_size=10)
+        ledger.record_fill(Side.A, 30, 45)
+        ledger.record_fill(Side.B, 20, 48)
+        snapshot = _make_snapshot(no_a=45, no_b=48)
+
+        result = compute_rebalance_proposal(
+            "EVT-1", ledger, pair, snapshot, "Test", _books_with_data()
+        )
+        assert result is not None
+        assert result.rebalance is not None
+        # No step 1 (no resting to cancel)
+        assert result.rebalance.order_id is None
+        # Step 2: catch-up 10 on B at current price
+        assert result.rebalance.catchup_ticker == "TK-B"
+        assert result.rebalance.catchup_qty == 10
+        assert result.rebalance.catchup_price == 48
+
+    def test_two_step_cancel_then_catchup(self):
+        """30f+10r / 20f -> cancel A resting, then catch up on B."""
+        pair = _make_pair()
+        ledger = PositionLedger(event_ticker="EVT-1", unit_size=10)
+        ledger.record_fill(Side.A, 30, 45)
+        ledger.record_resting(Side.A, "ord-a", 10, 45)
+        ledger.record_fill(Side.B, 20, 48)
+        snapshot = _make_snapshot(no_a=45, no_b=48)
+
+        result = compute_rebalance_proposal(
+            "EVT-1", ledger, pair, snapshot, "Test", OrderBookManager()
+        )
+        assert result is not None
+        assert result.rebalance is not None
+        # Step 1: cancel all resting on A
+        assert result.rebalance.order_id == "ord-a"
+        assert result.rebalance.current_resting == 10
+        assert result.rebalance.target_resting == 0
+        # Step 2: catch-up 10 on B
+        assert result.rebalance.catchup_ticker == "TK-B"
+        assert result.rebalance.catchup_qty == 10
+        assert result.rebalance.catchup_price == 48
+        assert "Cancel" in result.detail
+        assert "Place 10" in result.detail
+
+    def test_reduce_only_when_under_has_resting(self):
+        """If under-side already has resting, only reduce over-side."""
+        pair = _make_pair()
+        ledger = PositionLedger(event_ticker="EVT-1", unit_size=10)
+        ledger.record_fill(Side.A, 40, 45)
+        ledger.record_resting(Side.A, "ord-a", 10, 45)
+        ledger.record_fill(Side.B, 20, 48)
+        ledger.record_resting(Side.B, "ord-b", 10, 48)
+        snapshot = _make_snapshot(no_a=45, no_b=48)
+
+        result = compute_rebalance_proposal(
+            "EVT-1", ledger, pair, snapshot, "Test", OrderBookManager()
+        )
+        assert result is not None
+        assert result.rebalance is not None
+        assert result.rebalance.order_id == "ord-a"
+        assert result.rebalance.target_resting == 0
+        assert result.rebalance.catchup_qty == 0
+
+    def test_reduce_over_side_when_under_has_more_fills(self):
+        """When under-side has more fills than over-filled, cancel all over resting."""
+        pair = _make_pair()
+        ledger = PositionLedger(event_ticker="EVT-1", unit_size=10)
+        ledger.record_fill(Side.A, 30, 45)
+        ledger.record_resting(Side.A, "ord-a", 20, 45)
+        ledger.record_fill(Side.B, 40, 48)
+
+        result = compute_rebalance_proposal(
+            "EVT-1", ledger, pair, None, "Test", _books_with_data()
+        )
+        assert result is not None
+        assert result.rebalance is not None
+        assert result.rebalance.target_resting == 0
+        assert result.rebalance.current_resting == 20
+        assert result.rebalance.catchup_qty == 0
+
+    def test_catchup_bridges_full_gap(self):
+        """Catch-up quantity covers the full gap (no unit cap)."""
+        pair = _make_pair()
+        ledger = PositionLedger(event_ticker="EVT-1", unit_size=10)
+        ledger.record_fill(Side.A, 50, 45)
+        ledger.record_fill(Side.B, 20, 48)
+        snapshot = _make_snapshot(no_a=45, no_b=48)
+
+        result = compute_rebalance_proposal(
+            "EVT-1", ledger, pair, snapshot, "Test", _books_with_data()
+        )
+        assert result is not None
+        assert result.rebalance is not None
+        assert result.rebalance.catchup_qty == 30  # full gap: 50 - 20
+
+    def test_catchup_full_gap_not_capped(self):
+        """Catch-up quantity is the full gap, not capped at unit_size."""
+        pair = _make_pair()
+        ledger = PositionLedger(event_ticker="EVT-1", unit_size=20)
+        ledger.record_fill(Side.A, 40, 45)
+        ledger.record_fill(Side.B, 15, 48)
+        snapshot = _make_snapshot(no_a=45, no_b=48)
+
+        result = compute_rebalance_proposal(
+            "EVT-1", ledger, pair, snapshot, "Test", _books_with_data()
+        )
+        assert result is not None
+        assert result.rebalance is not None
+        assert result.rebalance.catchup_qty == 25  # full gap, not capped at 20
+
+    def test_target_is_over_filled_not_max(self):
+        """Target = over_filled. Over-side resting is always cancelled."""
+        pair = _make_pair()
+        ledger = PositionLedger(event_ticker="EVT-1", unit_size=20)
+        ledger.record_fill(Side.A, 30, 45)
+        ledger.record_resting(Side.A, "ord-a", 20, 45)  # 50 committed
+        ledger.record_fill(Side.B, 10, 48)
+        snapshot = _make_snapshot(no_a=45, no_b=48)
+
+        result = compute_rebalance_proposal(
+            "EVT-1", ledger, pair, snapshot, "Test", OrderBookManager()
+        )
+        assert result is not None
+        assert result.rebalance is not None
+        assert result.rebalance.target_resting == 0
+        assert result.rebalance.current_resting == 20
+        assert result.rebalance.catchup_qty == 20
+
+    def test_under_resting_reduces_effective_gap(self):
+        """Existing resting on under-side reduces effective catch-up needed."""
+        pair = _make_pair()
+        ledger = PositionLedger(event_ticker="EVT-1", unit_size=20)
+        ledger.record_fill(Side.A, 40, 45)
+        ledger.record_fill(Side.B, 15, 48)
+        ledger.record_resting(Side.B, "ord-b", 10, 48)  # 25 committed
+        snapshot = _make_snapshot(no_a=45, no_b=48)
+
+        result = compute_rebalance_proposal(
+            "EVT-1", ledger, pair, snapshot, "Test", _books_with_data()
+        )
+        assert result is not None
+        assert result.rebalance is not None
+        # gap = target(40) - under_committed(25) = 15
+        # effective_gap = 15 - under_resting(10) = 5
+        assert result.rebalance.catchup_qty == 5
+
+    def test_empty_positions_no_proposal(self):
+        """Zero committed on both sides produces no proposal."""
+        pair = _make_pair()
+        ledger = PositionLedger(event_ticker="EVT-1", unit_size=10)
+
+        result = compute_rebalance_proposal(
+            "EVT-1", ledger, pair, None, "Test", OrderBookManager()
+        )
+        assert result is None
+
+    def test_settled_balanced_no_proposal(self):
+        """Equal fills with no resting produces no proposal."""
+        pair = _make_pair()
+        ledger = PositionLedger(event_ticker="EVT-1", unit_size=10)
+        ledger.record_fill(Side.A, 20, 45)
+        ledger.record_fill(Side.B, 20, 48)
+
+        result = compute_rebalance_proposal(
+            "EVT-1", ledger, pair, None, "Test", OrderBookManager()
+        )
+        assert result is None
+
+    def test_settled_imbalanced_no_books_no_proposal(self):
+        """Imbalanced fills + no resting + no orderbook data -> settled, skip."""
+        pair = _make_pair()
+        books = OrderBookManager()
+        ledger = PositionLedger(event_ticker="EVT-1", unit_size=10)
+        ledger.record_fill(Side.A, 30, 45)
+        ledger.record_fill(Side.B, 10, 48)
+
+        # No books registered -> best_ask returns None -> treated as settled
+        result = compute_rebalance_proposal(
+            "EVT-1", ledger, pair, None, "Test", books
+        )
+        assert result is None
+
+
+# ── Async execution tests ───────────────────────────────────────────
+
+
+class TestExecuteRebalance:
+    @pytest.mark.asyncio
+    async def test_cancel_and_catchup(self):
+        """Executing two-step rebalance cancels first, then places catch-up."""
+        scanner, adjuster, rest = _make_exec_context()
+        ledger = adjuster.get_ledger("EVT-1")
+        ledger.record_fill(Side.A, 30, 45)
+        ledger.record_fill(Side.B, 20, 48)
+
+        rest.cancel_order = AsyncMock()
+        rest.create_order = AsyncMock(
+            return_value=_make_order("TK-B", order_id="new-b")
+        )
+        # Fresh sync maintains the imbalance
+        rest.get_orders = AsyncMock(
+            return_value=[
+                _make_order("TK-A", order_id="ord-a-done", fill_count=30,
+                            no_price=45, status="canceled"),
+                _make_order("TK-B", order_id="ord-b-done", fill_count=20,
+                            no_price=48, status="canceled"),
+            ]
+        )
+
+        rebalance = ProposedRebalance(
+            event_ticker="EVT-1", side="A",
+            order_id="ord-a", ticker="TK-A",
+            current_resting=10, target_resting=0,
+            catchup_ticker="TK-B", catchup_price=48, catchup_qty=10,
+        )
+        notifications: list[tuple[str, str]] = []
+        await execute_rebalance(
+            rebalance, rest_client=rest, adjuster=adjuster, scanner=scanner,
+            notify=lambda msg, sev: notifications.append((msg, sev)),
+        )
+
+        rest.cancel_order.assert_called_once_with("ord-a")
+        rest.create_order.assert_called_once_with(
+            ticker="TK-B", action="buy", side="no",
+            no_price=48, count=10, order_group_id="grp-test",
+        )
+
+    @pytest.mark.asyncio
+    async def test_decrease_reduces_resting(self):
+        """Partial reduce uses decrease_order (preserves queue position)."""
+        scanner, adjuster, rest = _make_exec_context()
+
+        rest.get_order = AsyncMock(
+            return_value=_make_order("TK-A", order_id="ord-a",
+                                     fill_count=30, remaining_count=20, no_price=45)
+        )
+        rest.decrease_order = AsyncMock(
+            return_value=_make_order("TK-A", order_id="ord-a", remaining_count=10)
+        )
+
+        rebalance = ProposedRebalance(
+            event_ticker="EVT-1", side="A",
+            order_id="ord-a", ticker="TK-A",
+            current_resting=20, target_resting=10,
+        )
+        await execute_rebalance(
+            rebalance, rest_client=rest, adjuster=adjuster, scanner=scanner,
+            notify=lambda msg, sev: None,
+        )
+
+        rest.get_order.assert_called_once_with("ord-a")
+        rest.decrease_order.assert_called_once_with("ord-a", reduce_to=10)
+
+    @pytest.mark.asyncio
+    async def test_already_at_target(self):
+        """If remaining_count already at or below target, skip the decrease."""
+        scanner, adjuster, rest = _make_exec_context()
+
+        rest.get_order = AsyncMock(
+            return_value=_make_order("TK-A", order_id="ord-a",
+                                     fill_count=25, remaining_count=5, no_price=45)
+        )
+        rest.decrease_order = AsyncMock()
+
+        rebalance = ProposedRebalance(
+            event_ticker="EVT-1", side="A",
+            order_id="ord-a", ticker="TK-A",
+            current_resting=30, target_resting=5,
+        )
+        notifications: list[tuple[str, str]] = []
+        await execute_rebalance(
+            rebalance, rest_client=rest, adjuster=adjuster, scanner=scanner,
+            notify=lambda msg, sev: notifications.append((msg, sev)),
+        )
+
+        rest.decrease_order.assert_not_called()
+        assert any("already at target" in msg.lower() for msg, _ in notifications)
+
+    @pytest.mark.asyncio
+    async def test_decrease_uses_target_resting(self):
+        """decrease_order uses target_resting directly."""
+        scanner, adjuster, rest = _make_exec_context()
+
+        rest.get_order = AsyncMock(
+            return_value=_make_order("TK-A", order_id="ord-a-new",
+                                     fill_count=0, remaining_count=20, no_price=45)
+        )
+        rest.decrease_order = AsyncMock(
+            return_value=_make_order("TK-A", order_id="ord-a-new", remaining_count=10)
+        )
+
+        rebalance = ProposedRebalance(
+            event_ticker="EVT-1", side="A",
+            order_id="ord-a-new", ticker="TK-A",
+            current_resting=20, target_resting=10,
+        )
+        await execute_rebalance(
+            rebalance, rest_client=rest, adjuster=adjuster, scanner=scanner,
+            notify=lambda msg, sev: None,
+        )
+
+        rest.decrease_order.assert_called_once_with("ord-a-new", reduce_to=10)
+
+    @pytest.mark.asyncio
+    async def test_skips_decrease_when_already_at_target(self):
+        """If fresh order remaining <= target, skip the decrease call."""
+        scanner, adjuster, rest = _make_exec_context()
+
+        rest.get_order = AsyncMock(
+            return_value=_make_order("TK-A", order_id="ord-a",
+                                     fill_count=45, remaining_count=5, no_price=45)
+        )
+        rest.amend_order = AsyncMock()
+
+        rebalance = ProposedRebalance(
+            event_ticker="EVT-1", side="A",
+            order_id="ord-a", ticker="TK-A",
+            current_resting=20, target_resting=10,
+        )
+        notifications: list[tuple[str, str]] = []
+        await execute_rebalance(
+            rebalance, rest_client=rest, adjuster=adjuster, scanner=scanner,
+            notify=lambda msg, sev: notifications.append((msg, sev)),
+        )
+
+        rest.amend_order.assert_not_called()
+        assert any("already at target" in msg.lower() for msg, _ in notifications)
+
+    @pytest.mark.asyncio
+    async def test_catchup_blocked_by_safety(self):
+        """Catch-up blocked by safety gate doesn't place order."""
+        scanner, adjuster, rest = _make_exec_context()
+        ledger = adjuster.get_ledger("EVT-1")
+        ledger.record_fill(Side.A, 40, 45)
+        ledger.record_fill(Side.B, 20, 48)
+
+        # Fresh sync: A=40f, B=20f+5r=25 committed → delta=15 >= 10,
+        # but B has resting → safety gate blocks placement
+        rest.get_orders = AsyncMock(
+            return_value=[
+                _make_order("TK-A", order_id="ord-a-done", fill_count=40,
+                            no_price=45, status="canceled"),
+                _make_order("TK-B", order_id="ord-b-done", fill_count=20,
+                            no_price=48, status="canceled"),
+                _make_order("TK-B", order_id="ord-b-late", remaining_count=5,
+                            no_price=48, status="resting"),
+            ]
+        )
+        rest.create_order = AsyncMock()
+
+        rebalance = ProposedRebalance(
+            event_ticker="EVT-1", side="A",
+            catchup_ticker="TK-B", catchup_price=48, catchup_qty=10,
+        )
+        notifications: list[tuple[str, str]] = []
+        await execute_rebalance(
+            rebalance, rest_client=rest, adjuster=adjuster, scanner=scanner,
+            notify=lambda msg, sev: notifications.append((msg, sev)),
+        )
+
+        rest.create_order.assert_not_called()
+        assert any("BLOCKED" in msg for msg, _ in notifications)
+
+
+# ── Fresh sync before catch-up ───────────────────────────────────────
+
+
+class TestFreshSyncBeforeCatchup:
+    @pytest.mark.asyncio
+    async def test_catchup_skipped_when_fresh_sync_resolves_imbalance(self):
+        """If fresh sync shows imbalance < unit_size and resting covers gap, skip."""
+        scanner, adjuster, rest = _make_exec_context()
+
+        # Fresh sync reveals B filled up to 25 between polls → delta=5 < 10
+        # B also has 5 resting covering the remaining gap
+        rest.get_orders = AsyncMock(
+            return_value=[
+                _make_order("TK-A", order_id="oa", fill_count=30,
+                            no_price=45, status="canceled"),
+                _make_order("TK-B", order_id="ob", fill_count=25,
+                            no_price=48, status="canceled"),
+                _make_order("TK-B", order_id="ob-r", fill_count=0,
+                            remaining_count=5, no_price=48, status="resting"),
+            ]
+        )
+        rest.create_order = AsyncMock()
+
+        rebalance = ProposedRebalance(
+            event_ticker="EVT-1", side="A",
+            catchup_ticker="TK-B", catchup_price=48, catchup_qty=10,
+        )
+        notifications: list[tuple[str, str]] = []
+        await execute_rebalance(
+            rebalance, rest_client=rest, adjuster=adjuster, scanner=scanner,
+            notify=lambda msg, sev: notifications.append((msg, sev)),
+        )
+
+        rest.create_order.assert_not_called()
+        assert any("skipped" in msg.lower() for msg, _ in notifications)
+
+    @pytest.mark.asyncio
+    async def test_catchup_blocked_when_fresh_sync_fails(self):
+        """If fresh sync raises, catch-up is blocked."""
+        scanner, adjuster, rest = _make_exec_context()
+
+        rest.get_orders = AsyncMock(side_effect=RuntimeError("API timeout"))
+        rest.create_order = AsyncMock()
+
+        rebalance = ProposedRebalance(
+            event_ticker="EVT-1", side="A",
+            catchup_ticker="TK-B", catchup_price=48, catchup_qty=10,
+        )
+        notifications: list[tuple[str, str]] = []
+        await execute_rebalance(
+            rebalance, rest_client=rest, adjuster=adjuster, scanner=scanner,
+            notify=lambda msg, sev: notifications.append((msg, sev)),
+        )
+
+        rest.create_order.assert_not_called()
+        assert any("fresh sync failed" in msg.lower() for msg, _ in notifications)
+
+    @pytest.mark.asyncio
+    async def test_catchup_blocked_when_pair_not_found(self):
+        """If pair is missing from scanner, catch-up is blocked."""
+        scanner, adjuster, rest = _make_exec_context()
+
+        # Remove the pair from scanner so _find_pair returns None
+        scanner._pairs.clear()
+
+        rest.create_order = AsyncMock()
+
+        rebalance = ProposedRebalance(
+            event_ticker="EVT-1", side="A",
+            catchup_ticker="TK-B", catchup_price=48, catchup_qty=10,
+        )
+        notifications: list[tuple[str, str]] = []
+        await execute_rebalance(
+            rebalance, rest_client=rest, adjuster=adjuster, scanner=scanner,
+            notify=lambda msg, sev: notifications.append((msg, sev)),
+        )
+
+        rest.create_order.assert_not_called()
+        assert any("pair not found" in msg.lower() for msg, _ in notifications)
+
+    @pytest.mark.asyncio
+    async def test_fresh_sync_confirms_imbalance_catchup_proceeds(self):
+        """When fresh sync confirms imbalance still exists, catch-up proceeds."""
+        scanner, adjuster, rest = _make_exec_context()
+
+        # Fresh sync confirms same state
+        rest.get_orders = AsyncMock(
+            return_value=[
+                _make_order("TK-A", order_id="oa", fill_count=30,
+                            no_price=45, status="canceled"),
+                _make_order("TK-B", order_id="ob", fill_count=20,
+                            no_price=48, status="canceled"),
+            ]
+        )
+        rest.create_order = AsyncMock(
+            return_value=_make_order("TK-B", order_id="new-b")
+        )
+
+        rebalance = ProposedRebalance(
+            event_ticker="EVT-1", side="A",
+            catchup_ticker="TK-B", catchup_price=48, catchup_qty=10,
+        )
+        await execute_rebalance(
+            rebalance, rest_client=rest, adjuster=adjuster, scanner=scanner,
+            notify=lambda msg, sev: None,
+        )
+
+        rest.create_order.assert_called_once_with(
+            ticker="TK-B", action="buy", side="no",
+            no_price=48, count=10, order_group_id="grp-test",
+        )
