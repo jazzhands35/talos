@@ -7,6 +7,7 @@ The TUI delegates to this engine rather than managing trading state directly.
 from __future__ import annotations
 
 import asyncio
+import time
 from collections.abc import Callable
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
@@ -114,6 +115,7 @@ class TradingEngine:
         self._settled_markets: dict[str, dict[str, str]] = {}  # event_ticker -> {ticker: result}
         self._order_placed_at: dict[str, float] = {}  # order_id -> monotonic timestamp
         self._exit_only_events: set[str] = set()  # events in exit-only mode
+        self._recent_notifications: dict[str, float] = {}  # message -> monotonic ts
 
         # Wire portfolio feed callbacks
         if self._portfolio_feed is not None:
@@ -241,7 +243,8 @@ class TradingEngine:
         """Cancel resting orders per exit-only rules.
 
         Balanced → cancel all resting on both sides.
-        Imbalanced → cancel resting on the ahead side only.
+        Imbalanced → cancel ahead side resting, reduce behind side
+        resting so it can only fill up to match ahead's fill count.
         """
         try:
             ledger = self._adjuster.get_ledger(event_ticker)
@@ -273,8 +276,9 @@ class TradingEngine:
                             exc_info=True,
                         )
         else:
-            # Imbalanced — cancel the ahead side only
+            # Imbalanced — cancel the ahead side, reduce behind side
             ahead = Side.A if filled_a > filled_b else Side.B
+            behind = ahead.other
             order_id = ledger.resting_order_id(ahead)
             if order_id is not None:
                 try:
@@ -293,6 +297,53 @@ class TradingEngine:
                         side=ahead.value,
                         exc_info=True,
                     )
+
+            # Reduce behind side resting so it can't overshoot ahead's fills
+            behind_order_id = ledger.resting_order_id(behind)
+            if behind_order_id is not None:
+                ahead_filled = ledger.filled_count(ahead)
+                behind_filled = ledger.filled_count(behind)
+                target_behind_resting = ahead_filled - behind_filled
+                current_behind_resting = ledger.resting_count(behind)
+                if target_behind_resting <= 0:
+                    # Behind already has more fills — cancel all resting
+                    try:
+                        await self._rest.cancel_order(behind_order_id)
+                        logger.info(
+                            "exit_only_cancel",
+                            event_ticker=event_ticker,
+                            side=behind.value,
+                            order_id=behind_order_id,
+                            reason="behind_overshoot",
+                        )
+                    except Exception:
+                        logger.warning(
+                            "exit_only_cancel_failed",
+                            event_ticker=event_ticker,
+                            side=behind.value,
+                            exc_info=True,
+                        )
+                elif current_behind_resting > target_behind_resting:
+                    try:
+                        await self._rest.decrease_order(
+                            behind_order_id,
+                            reduce_to=target_behind_resting,
+                        )
+                        logger.info(
+                            "exit_only_reduce_behind",
+                            event_ticker=event_ticker,
+                            side=behind.value,
+                            order_id=behind_order_id,
+                            from_resting=current_behind_resting,
+                            to_resting=target_behind_resting,
+                        )
+                    except Exception:
+                        logger.warning(
+                            "exit_only_reduce_behind_failed",
+                            event_ticker=event_ticker,
+                            side=behind.value,
+                            exc_info=True,
+                        )
 
         await self._verify_after_action(event_ticker)
 
@@ -325,6 +376,16 @@ class TradingEngine:
                         "exit_only_auto_trigger",
                         event_ticker=event_ticker,
                         reason="live",
+                    )
+                elif gs.state == "post":
+                    self._exit_only_events.add(event_ticker)
+                    self._enforce_exit_only_sync(event_ticker)
+                    name = self._display_name(event_ticker)
+                    self._notify(f"Exit-only AUTO: {name} (FINAL)", "warning")
+                    logger.info(
+                        "exit_only_auto_trigger",
+                        event_ticker=event_ticker,
+                        reason="final",
                     )
                 elif (
                     gs.state == "pre"
@@ -386,110 +447,120 @@ class TradingEngine:
     # ── Polling methods ─────────────────────────────────────────────
 
     async def start_feed(self) -> None:
-        """Connect WebSocket, restore saved games, and listen."""
-        try:
-            await self._feed.connect()
-            self._ws_connected = True
-            self._notify("WebSocket connected")
+        """Connect WebSocket, restore saved games, and listen.
 
-            # Auto-discover events with positions or resting orders
-            discovered = await self._discover_active_events()
+        Reconnects automatically on disconnect with a non-recursive loop.
+        """
+        first_connect = True
+        while True:
+            try:
+                await self._feed.connect()
+                self._ws_connected = True
+                self._notify("WebSocket connected")
 
-            # Merge with saved games (union, deduplicate)
-            all_tickers = list(dict.fromkeys(discovered + self._initial_games))
+                if first_connect:
+                    await self._setup_initial_games()
+                    first_connect = False
 
-            # Fast restore from cached data (no REST calls)
-            if self._initial_games_full:
-                cached_tickers = set()
-                pairs = []
-                for data in self._initial_games_full:
-                    try:
-                        pair = self._game_manager.restore_game(data)
-                        self._adjuster.add_event(pair)
-                        pairs.append(pair)
-                        cached_tickers.add(pair.event_ticker)
-                    except Exception:
-                        logger.warning("restore_game_failed", event=data.get("event_ticker"))
-                # Bulk subscribe all market tickers at once
-                tickers = [t for p in pairs for t in (p.ticker_a, p.ticker_b)]
-                if tickers:
-                    await self._feed.subscribe_bulk(tickers)
-                if pairs:
-                    self._notify(f"Loaded {len(pairs)} game(s)")
-                # Log startup restores
-                if self._data_collector is not None:
-                    for pair in pairs:
-                        prefix = pair.event_ticker.split("-")[0]
-                        from talos.ui.widgets import _SPORT_LEAGUE
+                # Subscribe to portfolio events globally (all markets)
+                if self._portfolio_feed is not None:
+                    await self._portfolio_feed.subscribe()
+                if self._lifecycle_feed is not None:
+                    await self._lifecycle_feed.subscribe()
+                if self._position_feed is not None:
+                    await self._position_feed.subscribe()
 
-                        sport, league = _SPORT_LEAGUE.get(prefix, ("", ""))
-                        self._data_collector.log_game_add(
-                            event_ticker=pair.event_ticker,
-                            series_ticker=prefix,
-                            sport=sport,
-                            league=league,
-                            source="startup",
-                            ticker_a=pair.ticker_a,
-                            ticker_b=pair.ticker_b,
-                            fee_type=pair.fee_type,
-                            fee_rate=pair.fee_rate,
-                        )
-                self._initial_games_full = None
-                # Only REST-fetch discovered events not already in cache
-                all_tickers = [t for t in all_tickers if t not in cached_tickers]
+                # Subscribe to ticker updates for all active markets
+                if self._ticker_feed is not None:
+                    market_tickers = self._active_market_tickers()
+                    if market_tickers:
+                        await self._ticker_feed.subscribe(market_tickers)
 
-            if all_tickers:
-                pairs = await self._game_manager.add_games(all_tickers)
-                for pair in pairs:
-                    self._adjuster.add_event(pair)
-                if pairs:
-                    self._notify(f"Loaded {len(pairs)} game(s)")
-                self._initial_games.clear()
+                # Resubscribe orderbook channels on reconnect
+                if not first_connect:
+                    tickers = self._active_market_tickers()
+                    if tickers:
+                        await self._feed.subscribe_bulk(tickers)
 
-            # Resolve game status — run in background, don't block startup
-            if self._game_status_resolver is not None:
-                batch = [
-                    (p.event_ticker, self._game_manager.subtitles.get(p.event_ticker, ""))
-                    for p in self._game_manager.active_games
-                ]
-                if batch:
-                    # Don't await — let it run while WS starts listening
-                    import asyncio as _aio
+                await self._feed.start()
+                # If we reach here, the WS exited cleanly
+                self._ws_connected = False
+                self._notify("WEBSOCKET DISCONNECTED — prices are stale!", "error")
+                logger.error("ws_connection_lost", reason="listen loop exited cleanly")
+            except Exception as e:
+                self._ws_connected = False
+                self._notify(f"WEBSOCKET DISCONNECTED: {e}", "error")
+                logger.error("ws_connection_lost", reason=str(e), error_type=type(e).__name__)
 
-                    _aio.create_task(self._game_status_resolver.resolve_batch(batch))
-
-            # Subscribe to portfolio events globally (all markets)
-            if self._portfolio_feed is not None:
-                await self._portfolio_feed.subscribe()
-            if self._lifecycle_feed is not None:
-                await self._lifecycle_feed.subscribe()
-            if self._position_feed is not None:
-                await self._position_feed.subscribe()
-
-            # Subscribe to ticker updates for all active markets
-            if self._ticker_feed is not None:
-                market_tickers = self._active_market_tickers()
-                if market_tickers:
-                    await self._ticker_feed.subscribe(market_tickers)
-
-            await self._feed.start()
-            # If we reach here without exception, the WS exited cleanly
-            self._ws_connected = False
-            self._notify("WEBSOCKET DISCONNECTED — prices are stale!", "error")
-            logger.error("ws_connection_lost", reason="listen loop exited cleanly")
-        except Exception as e:
-            self._ws_connected = False
-            self._notify(f"WEBSOCKET DISCONNECTED: {e}", "error")
-            logger.error("ws_connection_lost", reason=str(e), error_type=type(e).__name__)
-
-        # Auto-reconnect after disconnect (wait 5s then retry)
-        if not self._ws_connected:
+            # Wait and retry — loop instead of recursion
             logger.info("ws_reconnecting")
             self._notify("Reconnecting WebSocket in 5s...", "warning")
-            import asyncio as _aio
+            await asyncio.sleep(5)
 
-            await _aio.sleep(5)
-            await self.start_feed()
+    async def _setup_initial_games(self) -> None:
+        """One-time game setup on first WS connect."""
+        # Auto-discover events with positions or resting orders
+        discovered = await self._discover_active_events()
+
+        # Merge with saved games (union, deduplicate)
+        all_tickers = list(dict.fromkeys(discovered + self._initial_games))
+
+        # Fast restore from cached data (no REST calls)
+        if self._initial_games_full:
+            cached_tickers = set()
+            pairs = []
+            for data in self._initial_games_full:
+                try:
+                    pair = self._game_manager.restore_game(data)
+                    self._adjuster.add_event(pair)
+                    pairs.append(pair)
+                    cached_tickers.add(pair.event_ticker)
+                except Exception:
+                    logger.warning("restore_game_failed", event=data.get("event_ticker"))
+            # Bulk subscribe all market tickers at once
+            tickers = [t for p in pairs for t in (p.ticker_a, p.ticker_b)]
+            if tickers:
+                await self._feed.subscribe_bulk(tickers)
+            if pairs:
+                self._notify(f"Loaded {len(pairs)} game(s)")
+            # Log startup restores
+            if self._data_collector is not None:
+                for pair in pairs:
+                    prefix = pair.event_ticker.split("-")[0]
+                    from talos.ui.widgets import _SPORT_LEAGUE
+
+                    sport, league = _SPORT_LEAGUE.get(prefix, ("", ""))
+                    self._data_collector.log_game_add(
+                        event_ticker=pair.event_ticker,
+                        series_ticker=prefix,
+                        sport=sport,
+                        league=league,
+                        source="startup",
+                        ticker_a=pair.ticker_a,
+                        ticker_b=pair.ticker_b,
+                        fee_type=pair.fee_type,
+                        fee_rate=pair.fee_rate,
+                    )
+            self._initial_games_full = None
+            # Only REST-fetch discovered events not already in cache
+            all_tickers = [t for t in all_tickers if t not in cached_tickers]
+
+        if all_tickers:
+            pairs = await self._game_manager.add_games(all_tickers)
+            for pair in pairs:
+                self._adjuster.add_event(pair)
+            if pairs:
+                self._notify(f"Loaded {len(pairs)} game(s)")
+            self._initial_games.clear()
+
+        # Resolve game status — run in background, don't block startup
+        if self._game_status_resolver is not None:
+            batch = [
+                (p.event_ticker, self._game_manager.subtitles.get(p.event_ticker, ""))
+                for p in self._game_manager.active_games
+            ]
+            if batch:
+                asyncio.create_task(self._game_status_resolver.resolve_batch(batch))
 
     async def refresh_balance(self) -> None:
         """Fetch balance only — fast, independent of order/position sync."""
@@ -525,8 +596,13 @@ class TradingEngine:
 
             # Re-check all tracked tickers against the live book so the
             # _at_top cache reflects current state, not stale WS events.
+            # Suppress callback to avoid toast flood — reevaluate_jumps()
+            # handles proposals silently later in this cycle.
+            saved_cb = self._tracker.on_change
+            self._tracker.on_change = None
             for ticker in self._tracker.resting_tickers:
                 self._tracker.check(ticker)
+            self._tracker.on_change = saved_cb
 
             # Fetch queue positions and merge into cache
             try:
@@ -619,7 +695,7 @@ class TradingEngine:
             self.reevaluate_jumps()
 
             # Check for position imbalances (P16)
-            self.check_imbalances()
+            await self.check_imbalances()
 
             # Evaluate scanner opportunities for automated bid proposals
             self.evaluate_opportunities()
@@ -650,18 +726,25 @@ class TradingEngine:
         self._recompute_positions()
 
     async def refresh_trades(self) -> None:
-        """Fetch recent trades for CPM tracking."""
+        """Fetch recent trades for CPM tracking.
+
+        Limits concurrency to 5 parallel requests to avoid spawning
+        hundreds of tasks when the API is slow.
+        """
         tickers = self._active_market_tickers()
         if not tickers:
             return
 
+        sem = asyncio.Semaphore(5)
+
         async def _fetch(ticker: str) -> tuple[str, list] | None:
-            try:
-                trades = await self._rest.get_trades(ticker, limit=50)
-                return (ticker, trades)
-            except Exception:
-                logger.warning("trade_fetch_failed", ticker=ticker, exc_info=True)
-                return None
+            async with sem:
+                try:
+                    trades = await self._rest.get_trades(ticker, limit=50)
+                    return (ticker, trades)
+                except Exception:
+                    logger.warning("trade_fetch_failed", ticker=ticker, exc_info=True)
+                    return None
 
         results = await asyncio.gather(*[_fetch(t) for t in tickers])
         for result in results:
@@ -1085,11 +1168,6 @@ class TradingEngine:
 
                 # Check 2: Multiple resting orders (double-bid indicator)
                 if kalshi_resting_order_count[side] > 1:
-                    msg = (
-                        f"MULTI-ORDER {name} {sl}: "
-                        f"{kalshi_resting_order_count[side]} resting orders "
-                        f"({kalshi_resting[side]} total contracts)"
-                    )
                     logger.warning(
                         "reconcile_multiple_resting",
                         event_ticker=pair.event_ticker,
@@ -1097,7 +1175,6 @@ class TradingEngine:
                         order_count=kalshi_resting_order_count[side],
                         total_resting=kalshi_resting[side],
                     )
-                    self._notify(msg, "warning")
 
                 # Check 3: Fill consistency between orders and positions APIs
                 if pos_fills[side] > 0 and kalshi_fills[side] > 0:
@@ -1137,17 +1214,25 @@ class TradingEngine:
     # ── Event handlers ───────────────────────────────────────────
 
     def on_top_of_market_change(self, ticker: str, at_top: bool) -> None:
-        """Handle top-of-market state transition — evaluate adjustment."""
+        """Handle top-of-market state transition — evaluate adjustment.
+
+        Logs to structlog only (no toast) to prevent toast accumulation
+        from freezing the event loop. The Status column already shows
+        jumped state, and proposals handle the response.
+        """
         resting = self._tracker.resting_price(ticker)
         evt = self._adjuster.resolve_event(ticker)
         label = self._display_name(evt) if evt else ticker
         if at_top:
-            self._notify(f"Back at top: {label} ({resting}c)")
+            logger.info("back_at_top", ticker=ticker, label=label, resting=resting)
         else:
-            top_price = self._tracker.book_top_price(ticker) or "?"
-            self._notify(
-                f"Jumped: {label} (you: {resting}c, top: {top_price}c)",
-                "warning",
+            top_price = self._tracker.book_top_price(ticker) or 0
+            logger.info(
+                "jumped",
+                ticker=ticker,
+                label=label,
+                resting=resting,
+                top_price=top_price,
             )
 
         self._generate_jump_proposal(ticker, at_top=at_top)
@@ -1242,23 +1327,30 @@ class TradingEngine:
                     if not has_proposal:
                         self._generate_jump_proposal(ticker)
 
-    def check_imbalances(self) -> None:
-        """Detect position imbalances and propose rebalancing (P16).
+    async def check_imbalances(self) -> None:
+        """Detect and auto-execute rebalance catch-ups (P16).
 
-        Delegates to compute_rebalance_proposal() for pure detection logic.
+        Delegates to compute_rebalance_proposal() for pure detection,
+        then auto-executes via execute_rebalance() without operator approval.
+        Rebalance is risk-reducing (closing exposure), so it bypasses the
+        ProposalQueue (P2 progression: supervised -> autonomous for catch-up).
+
+        NOTE: The old pending_keys/ProposalQueue check is intentionally removed.
+        Auto-execution replaces manual proposal approval — the executed_this_cycle
+        set prevents double-firing within a single call.
         """
-        pending_keys = {p.key for p in self._proposal_queue.pending()}
+        executed_this_cycle: set[str] = set()
         for pair in self._scanner.pairs:
+            if pair.event_ticker in executed_this_cycle:
+                continue
+
+            # Exit-only events have their own cancellation flow
+            if self.is_exit_only(pair.event_ticker):
+                continue
+
             try:
                 ledger = self._adjuster.get_ledger(pair.event_ticker)
             except KeyError:
-                continue
-
-            # Skip if a rebalance proposal already covers this event
-            has_rebalance = any(
-                k.event_ticker == pair.event_ticker and k.kind == "rebalance" for k in pending_keys
-            )
-            if has_rebalance:
                 continue
 
             snapshot = self._scanner.all_snapshots.get(pair.event_ticker)
@@ -1270,9 +1362,18 @@ class TradingEngine:
                 self._display_name(pair.event_ticker),
                 self._feed.book_manager,
             )
-            if proposal is not None:
-                self._proposal_queue.add(proposal)
-                pending_keys.add(proposal.key)
+            if proposal is None or proposal.rebalance is None:
+                continue
+
+            # Auto-execute — no ProposalQueue
+            await _execute_rebalance(
+                proposal.rebalance,
+                rest_client=self._rest,
+                adjuster=self._adjuster,
+                scanner=self._scanner,
+                notify=self._notify,
+            )
+            executed_this_cycle.add(pair.event_ticker)
 
     def evaluate_opportunities(self) -> None:
         """Run OpportunityProposer against all scanner pairs.
@@ -1871,7 +1972,31 @@ class TradingEngine:
             tickers.append(pair.ticker_b)
         return tickers
 
+    _NOTIFY_DEDUP_WINDOW = 30.0  # seconds — suppress identical toasts within this window
+    _NOTIFY_RATE_LIMIT = 10  # max unique toasts per dedup window
+    _NOTIFY_RATE_WINDOW = 10.0  # rate-limit window (seconds)
+
     def _notify(self, message: str, severity: str = "information") -> None:
-        """Emit a notification to the UI if callback is set."""
+        """Emit a notification to the UI if callback is set.
+
+        Two-layer throttle to prevent toast accumulation from freezing the
+        Textual event loop (each toast creates an asyncio task):
+        1. Dedup: identical messages within 30s are suppressed.
+        2. Rate limit: max 10 unique messages per 10s window.
+        """
+        now = time.monotonic()
+        # Prune expired entries
+        cutoff = now - self._NOTIFY_DEDUP_WINDOW
+        self._recent_notifications = {
+            msg: ts for msg, ts in self._recent_notifications.items() if ts > cutoff
+        }
+        if message in self._recent_notifications:
+            return  # Suppress duplicate
+        # Rate limit — count messages in the shorter rate window
+        rate_cutoff = now - self._NOTIFY_RATE_WINDOW
+        recent_count = sum(1 for ts in self._recent_notifications.values() if ts > rate_cutoff)
+        if recent_count >= self._NOTIFY_RATE_LIMIT:
+            return  # Rate limited
+        self._recent_notifications[message] = now
         if self.on_notification:
             self.on_notification(message, severity)

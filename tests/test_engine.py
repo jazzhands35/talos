@@ -16,7 +16,7 @@ from talos.market_feed import MarketFeed
 from talos.models.order import Order
 from talos.models.portfolio import Balance, Position, Settlement
 from talos.models.proposal import ProposalKey
-from talos.models.strategy import ArbPair
+from talos.models.strategy import ArbPair, Opportunity
 from talos.models.ws import (
     FillMessage,
     OrderBookSnapshot,
@@ -792,23 +792,43 @@ class TestOpportunityProposerIntegration:
 
 
 class TestCheckImbalances:
-    def test_no_duplicate_rebalance_proposals(self):
-        """Second check doesn't add another rebalance for the same side."""
-        engine, _ = _engine_with_pair()
+    @pytest.mark.asyncio
+    async def test_no_duplicate_rebalance_proposals(self):
+        """check_imbalances auto-executes and doesn't queue proposals."""
+        engine, rest = _engine_with_pair()
         ledger = engine.adjuster.get_ledger("EVT-1")
         ledger.record_fill(Side.A, 50, 45)
         ledger.record_resting(Side.A, "ord-a", 60, 45)
         ledger.record_fill(Side.B, 50, 47)
         ledger.record_resting(Side.B, "ord-b", 10, 47)
 
-        engine.check_imbalances()
-        engine.check_imbalances()
+        engine.scanner._all_snapshots["EVT-1"] = Opportunity(
+            event_ticker="EVT-1", ticker_a="TK-A", ticker_b="TK-B",
+            no_a=45, no_b=47, qty_a=100, qty_b=100,
+            raw_edge=8, fee_edge=0.0, tradeable_qty=100,
+            timestamp="2026-03-16T00:00:00Z",
+        )
 
-        assert len(engine.proposal_queue) == 1
+        rest.get_all_orders = AsyncMock(return_value=[
+            _make_order("TK-A", order_id="ord-a", fill_count=50, remaining_count=60, no_price=45),
+            _make_order("TK-B", order_id="ord-b", fill_count=50, remaining_count=10, no_price=47),
+        ])
+        rest.cancel_order = AsyncMock()
+        rest.create_order = AsyncMock(return_value=_make_order("TK-B", order_id="new-b"))
+        rest.create_order_group = AsyncMock(return_value="grp-test")
+
+        await engine.check_imbalances()
+
+        # No proposals queued — auto-executed directly
+        assert len(engine.proposal_queue) == 0
 
     @pytest.mark.asyncio
     async def test_rebalance_approve_verifies_after_action(self):
         """Approving a rebalance runs verify_after_action from the engine."""
+        from datetime import UTC, datetime
+
+        from talos.models.proposal import Proposal, ProposalKey, ProposedRebalance
+
         engine, rest = _engine_with_pair_and_books()
         ledger = engine.adjuster.get_ledger("EVT-1")
         # A: 40f+10r=50, B: 20f+10r=30 -> reduce A only (B has resting)
@@ -817,8 +837,26 @@ class TestCheckImbalances:
         ledger.record_fill(Side.B, 20, 48)
         ledger.record_resting(Side.B, "ord-b", 10, 48)
 
-        engine.check_imbalances()
-        key = engine.proposal_queue.pending()[0].key
+        # Manually seed ProposalQueue (check_imbalances no longer queues)
+        key = ProposalKey(event_ticker="EVT-1", side="A", kind="rebalance")
+        proposal = Proposal(
+            key=key,
+            kind="rebalance",
+            summary="REBALANCE EVT-1 side A",
+            detail="test",
+            created_at=datetime.now(UTC),
+            rebalance=ProposedRebalance(
+                event_ticker="EVT-1",
+                side="A",
+                order_id="ord-a",
+                ticker="TK-A",
+                current_resting=10,
+                target_resting=0,
+                filled_count=40,
+                resting_price=45,
+            ),
+        )
+        engine.proposal_queue.add(proposal)
 
         rest.cancel_order = AsyncMock()
         # Verification sync happens after step 1 (per-ticker fetches)
@@ -835,6 +873,10 @@ class TestCheckImbalances:
     @pytest.mark.asyncio
     async def test_verify_failure_notifies_operator(self):
         """When post-action verify fails, operator sees a warning toast."""
+        from datetime import UTC, datetime
+
+        from talos.models.proposal import Proposal, ProposalKey, ProposedRebalance
+
         engine, rest = _engine_with_pair_and_books()
         ledger = engine.adjuster.get_ledger("EVT-1")
         ledger.record_fill(Side.A, 40, 45)
@@ -842,8 +884,26 @@ class TestCheckImbalances:
         ledger.record_fill(Side.B, 20, 48)
         ledger.record_resting(Side.B, "ord-b", 10, 48)
 
-        engine.check_imbalances()
-        key = engine.proposal_queue.pending()[0].key
+        # Manually seed ProposalQueue (check_imbalances no longer queues)
+        key = ProposalKey(event_ticker="EVT-1", side="A", kind="rebalance")
+        proposal = Proposal(
+            key=key,
+            kind="rebalance",
+            summary="REBALANCE EVT-1 side A",
+            detail="test",
+            created_at=datetime.now(UTC),
+            rebalance=ProposedRebalance(
+                event_ticker="EVT-1",
+                side="A",
+                order_id="ord-a",
+                ticker="TK-A",
+                current_resting=10,
+                target_resting=0,
+                filled_count=40,
+                resting_price=45,
+            ),
+        )
+        engine.proposal_queue.add(proposal)
 
         rest.cancel_order = AsyncMock()
         # Verify fails — API unreachable after action
@@ -1368,12 +1428,11 @@ class TestReconcileWithKalshi:
         ]
         engine._reconcile_with_kalshi(orders, {})
         errors = [msg for msg, sev in notes if sev == "error"]
-        warnings = [msg for msg, sev in notes if sev == "warning"]
         assert any("OVERCOMMIT" in msg for msg in errors)
-        assert any("MULTI-ORDER" in msg for msg in warnings)
+        # Multi-order is logged but not toasted (too noisy)
 
-    def test_multiple_resting_orders_warned(self) -> None:
-        """Two resting orders on same side — even if within unit, flag it."""
+    def test_multiple_resting_orders_logged_not_toasted(self) -> None:
+        """Two resting orders on same side — logged but no toast (too noisy)."""
         engine, _ = _engine_with_pair()
         notes = self._notify_collector(engine)
 
@@ -1383,8 +1442,9 @@ class TestReconcileWithKalshi:
             _make_order("TK-A", order_id="ord-2", fill_count=0, remaining_count=3),
         ]
         engine._reconcile_with_kalshi(orders, {})
+        # No toast for multi-order (logged only)
         warnings = [msg for msg, sev in notes if sev == "warning"]
-        assert any("MULTI-ORDER" in msg for msg in warnings)
+        assert not any("MULTI-ORDER" in msg for msg in warnings)
         # No overcommit (6 ≤ 10)
         errors = [msg for msg, sev in notes if sev == "error"]
         assert not errors
@@ -1465,3 +1525,82 @@ class TestReconcileWithKalshi:
         engine._reconcile_with_kalshi(orders, {})
         errors = [msg for msg, sev in notes if sev == "error"]
         assert len(errors) == 2  # One per side
+
+
+class TestAutoRebalance:
+    @pytest.mark.asyncio
+    async def test_check_imbalances_auto_executes(self):
+        """check_imbalances detects imbalance and auto-executes catch-up."""
+        engine, rest = _engine_with_pair()
+        ledger = engine.adjuster.get_ledger("EVT-1")
+        ledger.record_fill(Side.A, 40, 45)
+        ledger.record_fill(Side.B, 15, 48)
+
+        # Scanner snapshot needed for price
+        engine.scanner._all_snapshots["EVT-1"] = Opportunity(
+            event_ticker="EVT-1", ticker_a="TK-A", ticker_b="TK-B",
+            no_a=45, no_b=48, qty_a=100, qty_b=100,
+            raw_edge=7, fee_edge=0.0, tradeable_qty=100,
+            timestamp="2026-03-16T00:00:00Z",
+        )
+
+        # Mock for fresh sync in execute_rebalance
+        rest.get_all_orders = AsyncMock(return_value=[
+            _make_order("TK-A", order_id="oa", fill_count=40, no_price=45, status="canceled"),
+            _make_order("TK-B", order_id="ob", fill_count=15, no_price=48, status="canceled"),
+        ])
+        rest.create_order = AsyncMock(return_value=_make_order("TK-B", order_id="new-b"))
+        rest.create_order_group = AsyncMock(return_value="grp-test")
+
+        notifications: list[tuple[str, str]] = []
+        engine.on_notification = lambda msg, sev: notifications.append((msg, sev))
+
+        await engine.check_imbalances()
+
+        # Should have auto-placed catch-up, NOT added to proposal queue
+        rest.create_order.assert_called_once()
+        assert rest.create_order.call_args.kwargs["ticker"] == "TK-B"
+        assert rest.create_order.call_args.kwargs["count"] == 25  # full gap
+        assert len(engine.proposal_queue.pending()) == 0
+
+    @pytest.mark.asyncio
+    async def test_check_imbalances_skips_exit_only(self):
+        """Events in exit-only mode are skipped by check_imbalances."""
+        engine, rest = _engine_with_pair()
+        ledger = engine.adjuster.get_ledger("EVT-1")
+        ledger.record_fill(Side.A, 40, 45)
+        ledger.record_fill(Side.B, 15, 48)
+
+        engine._exit_only_events.add("EVT-1")
+
+        rest.create_order = AsyncMock()
+
+        await engine.check_imbalances()
+
+        rest.create_order.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_check_imbalances_double_fire_guard(self):
+        """Same event is not rebalanced twice in one check_imbalances call."""
+        engine, rest = _engine_with_pair()
+        ledger = engine.adjuster.get_ledger("EVT-1")
+        ledger.record_fill(Side.A, 40, 45)
+        ledger.record_fill(Side.B, 15, 48)
+
+        engine.scanner._all_snapshots["EVT-1"] = Opportunity(
+            event_ticker="EVT-1", ticker_a="TK-A", ticker_b="TK-B",
+            no_a=45, no_b=48, qty_a=100, qty_b=100,
+            raw_edge=7, fee_edge=0.0, tradeable_qty=100,
+            timestamp="2026-03-16T00:00:00Z",
+        )
+
+        rest.get_all_orders = AsyncMock(return_value=[
+            _make_order("TK-A", order_id="oa", fill_count=40, no_price=45, status="canceled"),
+            _make_order("TK-B", order_id="ob", fill_count=15, no_price=48, status="canceled"),
+        ])
+        rest.create_order = AsyncMock(return_value=_make_order("TK-B", order_id="new-b"))
+        rest.create_order_group = AsyncMock(return_value="grp-test")
+
+        await engine.check_imbalances()
+
+        assert rest.create_order.call_count == 1
