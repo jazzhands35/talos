@@ -287,7 +287,7 @@ async def execute_rebalance(
             return
 
         try:
-            orders = await rest_client.get_orders(limit=200)
+            orders = await rest_client.get_all_orders()
             ledger = adjuster.get_ledger(rebalance.event_ticker)
             ledger.sync_from_orders(
                 orders, ticker_a=pair.ticker_a, ticker_b=pair.ticker_b
@@ -301,32 +301,32 @@ async def execute_rebalance(
             notify("Catch-up BLOCKED: fresh sync failed", "error")
             return
 
-        # Re-check: is there still an imbalance worth catching up?
+        # Re-check with fresh data — recalculate qty
         over_side = Side.A if rebalance.side == "A" else Side.B
-        fresh_over = ledger.total_committed(over_side)
-        fresh_under = ledger.total_committed(under_side)
-        fresh_delta = fresh_over - fresh_under
-        if fresh_delta <= 0:
+        fresh_over_filled = ledger.filled_count(over_side)
+        fresh_under_committed = ledger.total_committed(under_side)
+        fresh_catchup_qty = max(0, fresh_over_filled - fresh_under_committed)
+        if fresh_catchup_qty <= 0:
             notify(
-                f"Catch-up skipped \u2014 fresh sync shows delta"
-                f" {fresh_delta} (balanced)",
+                f"Catch-up skipped — fresh sync shows gap closed (balanced)",
                 "information",
             )
             logger.info(
                 "rebalance_catchup_skipped_after_sync",
                 event_ticker=rebalance.event_ticker,
-                fresh_over=fresh_over,
-                fresh_under=fresh_under,
-                fresh_delta=fresh_delta,
+                fresh_over_filled=fresh_over_filled,
+                fresh_under_committed=fresh_under_committed,
             )
             return
 
-        # Safety gate — same checks as place_bids (P16, P18)
+        # Safety gate — same checks as place_bids (P16, P18).
+        # catchup=True bypasses P16 unit boundary (risk-reducing, not speculative).
         ok, reason = ledger.is_placement_safe(
             under_side,
-            rebalance.catchup_qty,
+            fresh_catchup_qty,
             rebalance.catchup_price,
             rate=pair.fee_rate,
+            catchup=True,
         )
         if not ok:
             notify(
@@ -345,7 +345,7 @@ async def execute_rebalance(
             rest_client,
             rebalance.event_ticker,
             under_side.value,
-            rebalance.catchup_qty,
+            fresh_catchup_qty,
         )
         try:
             await rest_client.create_order(
@@ -353,19 +353,19 @@ async def execute_rebalance(
                 action="buy",
                 side="no",
                 no_price=rebalance.catchup_price,
-                count=rebalance.catchup_qty,
+                count=fresh_catchup_qty,
                 order_group_id=catchup_group,
             )
             notify(
                 f"Rebalance step 2: catch-up {rebalance.catchup_ticker}"
-                f" {rebalance.catchup_qty} @ {rebalance.catchup_price}c",
+                f" {fresh_catchup_qty} @ {rebalance.catchup_price}c",
                 "information",
             )
             logger.info(
                 "rebalance_catchup_placed",
                 event_ticker=rebalance.event_ticker,
                 ticker=rebalance.catchup_ticker,
-                qty=rebalance.catchup_qty,
+                qty=fresh_catchup_qty,
                 price=rebalance.catchup_price,
             )
         except Exception as e:

@@ -387,7 +387,7 @@ class TestExecuteRebalance:
             return_value=_make_order("TK-B", order_id="new-b")
         )
         # Fresh sync maintains the imbalance
-        rest.get_orders = AsyncMock(
+        rest.get_all_orders = AsyncMock(
             return_value=[
                 _make_order("TK-A", order_id="ord-a-done", fill_count=30,
                             no_price=45, status="canceled"),
@@ -517,15 +517,16 @@ class TestExecuteRebalance:
 
     @pytest.mark.asyncio
     async def test_catchup_blocked_by_safety(self):
-        """Catch-up blocked by safety gate doesn't place order."""
+        """Catch-up with catchup=True bypasses P16 but still places when P18 passes."""
         scanner, adjuster, rest = _make_exec_context()
         ledger = adjuster.get_ledger("EVT-1")
         ledger.record_fill(Side.A, 40, 45)
         ledger.record_fill(Side.B, 20, 48)
 
-        # Fresh sync: A=40f, B=20f+5r=25 committed → delta=15 >= 10,
-        # but B has resting → safety gate blocks placement
-        rest.get_orders = AsyncMock(
+        # Fresh sync: A=40f, B=20f+5r=25 committed
+        # fresh_catchup_qty = max(0, 40-25) = 15
+        # catchup=True bypasses P16; P18: 45+48=93 < 100 → passes → order placed
+        rest.get_all_orders = AsyncMock(
             return_value=[
                 _make_order("TK-A", order_id="ord-a-done", fill_count=40,
                             no_price=45, status="canceled"),
@@ -533,6 +534,88 @@ class TestExecuteRebalance:
                             no_price=48, status="canceled"),
                 _make_order("TK-B", order_id="ord-b-late", remaining_count=5,
                             no_price=48, status="resting"),
+            ]
+        )
+        rest.create_order = AsyncMock(return_value=_make_order("TK-B", order_id="new-b"))
+
+        rebalance = ProposedRebalance(
+            event_ticker="EVT-1", side="A",
+            catchup_ticker="TK-B", catchup_price=48, catchup_qty=10,
+        )
+        notifications: list[tuple[str, str]] = []
+        await execute_rebalance(
+            rebalance, rest_client=rest, adjuster=adjuster, scanner=scanner,
+            notify=lambda msg, sev: notifications.append((msg, sev)),
+        )
+
+        # catchup=True bypasses P16, P18 passes → order placed with recalculated qty=15
+        rest.create_order.assert_called_once()
+        assert rest.create_order.call_args.kwargs["count"] == 15
+
+    @pytest.mark.asyncio
+    async def test_fresh_sync_uses_get_all_orders(self):
+        """Fresh sync before catch-up uses get_all_orders (not truncated get_orders)."""
+        scanner, adjuster, rest = _make_exec_context()
+        ledger = adjuster.get_ledger("EVT-1")
+        ledger.record_fill(Side.A, 30, 45)
+        ledger.record_fill(Side.B, 20, 48)
+
+        rest.get_all_orders = AsyncMock(
+            return_value=[
+                _make_order("TK-A", order_id="oa", fill_count=30, no_price=45, status="canceled"),
+                _make_order("TK-B", order_id="ob", fill_count=20, no_price=48, status="canceled"),
+            ]
+        )
+        rest.create_order = AsyncMock(return_value=_make_order("TK-B", order_id="new-b"))
+
+        rebalance = ProposedRebalance(
+            event_ticker="EVT-1", side="A",
+            catchup_ticker="TK-B", catchup_price=48, catchup_qty=10,
+        )
+        await execute_rebalance(
+            rebalance, rest_client=rest, adjuster=adjuster, scanner=scanner,
+            notify=lambda msg, sev: None,
+        )
+
+        rest.get_all_orders.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_catchup_qty_recalculated_from_fresh_sync(self):
+        """Catch-up qty is recalculated from fresh ledger, not stale proposal."""
+        scanner, adjuster, rest = _make_exec_context()
+
+        # Proposal says catchup_qty=25 (stale data: A=40, B=15)
+        # But fresh sync shows B caught up to 30 → real gap is 10
+        rest.get_all_orders = AsyncMock(
+            return_value=[
+                _make_order("TK-A", order_id="oa", fill_count=40, no_price=45, status="canceled"),
+                _make_order("TK-B", order_id="ob", fill_count=30, no_price=48, status="canceled"),
+            ]
+        )
+        rest.create_order = AsyncMock(return_value=_make_order("TK-B", order_id="new-b"))
+
+        rebalance = ProposedRebalance(
+            event_ticker="EVT-1", side="A",
+            catchup_ticker="TK-B", catchup_price=48, catchup_qty=25,  # stale
+        )
+        await execute_rebalance(
+            rebalance, rest_client=rest, adjuster=adjuster, scanner=scanner,
+            notify=lambda msg, sev: None,
+        )
+
+        # Should place 10 (recalculated), not 25 (stale)
+        rest.create_order.assert_called_once()
+        assert rest.create_order.call_args.kwargs["count"] == 10
+
+    @pytest.mark.asyncio
+    async def test_catchup_skipped_when_recalculated_qty_zero(self):
+        """If fresh sync closes the gap entirely, skip catch-up."""
+        scanner, adjuster, rest = _make_exec_context()
+
+        rest.get_all_orders = AsyncMock(
+            return_value=[
+                _make_order("TK-A", order_id="oa", fill_count=30, no_price=45, status="canceled"),
+                _make_order("TK-B", order_id="ob", fill_count=30, no_price=48, status="canceled"),
             ]
         )
         rest.create_order = AsyncMock()
@@ -548,7 +631,7 @@ class TestExecuteRebalance:
         )
 
         rest.create_order.assert_not_called()
-        assert any("BLOCKED" in msg for msg, _ in notifications)
+        assert any("skipped" in msg.lower() or "balanced" in msg.lower() for msg, _ in notifications)
 
 
 # ── Fresh sync before catch-up ───────────────────────────────────────
@@ -557,12 +640,12 @@ class TestExecuteRebalance:
 class TestFreshSyncBeforeCatchup:
     @pytest.mark.asyncio
     async def test_catchup_skipped_when_fresh_sync_resolves_imbalance(self):
-        """If fresh sync shows imbalance < unit_size and resting covers gap, skip."""
+        """If fresh sync shows gap is closed (over_filled <= under_committed), skip."""
         scanner, adjuster, rest = _make_exec_context()
 
-        # Fresh sync reveals B filled up to 25 between polls → delta=5 < 10
-        # B also has 5 resting covering the remaining gap
-        rest.get_orders = AsyncMock(
+        # Fresh sync reveals B filled up to 25 between polls + 5 resting = 30 committed
+        # fresh_over_filled=30, fresh_under_committed=30 → fresh_catchup_qty=0 → skip
+        rest.get_all_orders = AsyncMock(
             return_value=[
                 _make_order("TK-A", order_id="oa", fill_count=30,
                             no_price=45, status="canceled"),
@@ -592,7 +675,7 @@ class TestFreshSyncBeforeCatchup:
         """If fresh sync raises, catch-up is blocked."""
         scanner, adjuster, rest = _make_exec_context()
 
-        rest.get_orders = AsyncMock(side_effect=RuntimeError("API timeout"))
+        rest.get_all_orders = AsyncMock(side_effect=RuntimeError("API timeout"))
         rest.create_order = AsyncMock()
 
         rebalance = ProposedRebalance(
@@ -637,7 +720,7 @@ class TestFreshSyncBeforeCatchup:
         scanner, adjuster, rest = _make_exec_context()
 
         # Fresh sync confirms same state
-        rest.get_orders = AsyncMock(
+        rest.get_all_orders = AsyncMock(
             return_value=[
                 _make_order("TK-A", order_id="oa", fill_count=30,
                             no_price=45, status="canceled"),
