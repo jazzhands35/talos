@@ -85,7 +85,7 @@ Applied in: `TradingEngine` — `on_top_of_market_change()` calls `_generate_jum
 
 **Why not deduplicate at the toast layer:** The proposal queue deduplicates proposals by key, but toasts are fire-and-forget UI events. Deduplication must happen at the call site — the periodic sweep simply skips the toast.
 
-**Toast accumulation danger:** Textual's `self.notify()` creates a `ToastHolder` widget with its own asyncio task. High-frequency notifications (e.g., jump detection on 80 tickers) can accumulate thousands of tasks, freezing the event loop. `_notify` has a two-layer throttle: 30s dedup + 10 msgs/10s rate limit. Prefer `logger.info()` over `_notify()` for high-frequency non-actionable state changes. See [[decisions#2026-03-16 — Toast notification accumulation freeze]].
+**Toast accumulation danger:** Textual's `self.notify()` creates a `ToastHolder` widget with its own asyncio task. Over hours, even rate-limited toasts (10/10s) accumulate thousands of tasks, freezing the event loop. **Fix:** Tiered notification system — automated events go to `ActivityLog` (RichLog widget, zero asyncio overhead), toasts reserved for errors and user-initiated actions only. `_notify(toast=True)` for the rare cases that need interruptive UI. See [[decisions#2026-03-17 — Tiered notifications: ActivityLog replaces toast accumulation]].
 
 ## Deferred action queue (blocked by precondition)
 

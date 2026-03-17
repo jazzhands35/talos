@@ -281,6 +281,12 @@ Key changes:
 **Decision:** (1) Removed `self._notify()` from multi-order check; kept `logger.warning` for log analysis. (2) Added `gs.state == "post"` branch in `_check_exit_only` — FINAL games now enter exit-only, which triggers the existing auto-remove path (balanced fills + no resting → remove game). Priority order: "live" first, then "post", then "pre" with time window.
 **Rationale:** (1) Reconciliation health checks should log, not toast — they're informational, not actionable in real-time. (2) The exit-only pipeline is a classify → enforce two-phase system. Classification gates must be exhaustive — any missing state creates invisible stuck games. The "post" case is especially important because it means the game is over and we're just waiting for Kalshi settlement.
 
+## 2026-03-17 — Tiered notifications: ActivityLog replaces toast accumulation
+
+**Context:** Despite the 10/10s rate limiter added on Mar 16, Talos crashed after ~1.5h with 2,652 active tasks and a 785 MB freeze log. Root cause: even rate-limited toasts accumulate over hours. Each `self.notify()` creates a ToastHolder widget+asyncio task. When the event loop stalls from too many tasks, toast expiry timers can't fire, creating a death spiral.
+**Decision:** Tiered notification system: (1) `ActivityLog` widget (Textual `RichLog`) for all automated events — suggestions, accepts, exit-only, rebalance, jumps. Zero asyncio overhead (text append only). (2) Textual toasts reserved for critical errors and user-initiated action results. Engine `_notify(toast=True)` for the rare cases needing interruptive UI. Removed the rate limiter entirely — no longer needed.
+**Rationale:** The rate limiter was a bandaid. The real fix is separating the information channel (cheap, high-frequency) from the attention channel (expensive, rare). Same principle as syslog severity: DEBUG goes to files, CRITICAL goes to pagers.
+
 ## 2026-03-14 — Disable websockets client-side keepalive pings
 
 **Context:** WS disconnected with code 1011 "keepalive ping timeout". The `websockets` library sends client-side pings every 20s with 20s timeout. When `refresh_account` blocked the event loop for 5-8s, pong responses couldn't process in time, so the library killed its own connection.

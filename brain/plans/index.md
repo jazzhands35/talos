@@ -1,5 +1,9 @@
 # Plans
 
+## Active
+
+- [[plans/05-expiration-start-time/overview]] — Use Kalshi `expected_expiration_time` offset as fallback start time for unmapped leagues (exit-only trigger + UI display)
+
 ## Completed
 
 - [[plans/03-api-integration/overview]] — Expand Kalshi API integration: WS channels, model enrichment, settlements, dynamic fees, order safety flags
