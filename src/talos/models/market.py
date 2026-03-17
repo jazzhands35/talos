@@ -127,9 +127,9 @@ class OrderBook(BaseModel):
                         # Old format: [52, 10] (cents int, qty int)
                         p, q = pair[0], pair[1]
                         if isinstance(p, str):
-                            p = round(float(p) * 100)
+                            p = _dollars_to_cents(p)
                         if isinstance(q, str):
-                            q = int(float(q))
+                            q = _fp_to_int(q)
                         coerced.append({"price": p, "quantity": q})
                     data[side] = coerced
         return data

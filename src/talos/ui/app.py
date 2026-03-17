@@ -246,60 +246,41 @@ class TalosApp(App):
         Sleeps for 0.5s in a loop. If actual elapsed > 2s, the event
         loop was blocked — log a warning with all running tasks.
         """
-        import asyncio as _wd_asyncio
-        import time as _wd_time
-        import traceback as _wd_tb
-        import sys as _wd_sys
+        import asyncio
+        import sys
+        import time
 
         log_path = "talos_freeze.log"
         while True:
-            t0 = _wd_time.monotonic()
-            await _wd_asyncio.sleep(0.5)
-            elapsed = _wd_time.monotonic() - t0
+            t0 = time.monotonic()
+            await asyncio.sleep(0.5)
+            elapsed = time.monotonic() - t0
 
             if elapsed > 2.0:
-                # Event loop was blocked!
-                msg = (
-                    f"EVENT LOOP BLOCKED for {elapsed:.1f}s "
-                    f"(expected 0.5s)\n"
-                )
-                # Dump all task stack traces
-                tasks = _wd_asyncio.all_tasks()
+                tasks = asyncio.all_tasks()
                 task_info = []
                 for task in tasks:
-                    name = task.get_name()
-                    coro = task.get_coro()
                     frames = task.get_stack(limit=5)
-                    stack = "".join(_wd_tb.format_list(_wd_tb.extract_stack(limit=0)))
-                    if frames:
-                        stack = "".join(
-                            _wd_tb.format_list(
-                                _wd_tb.StackSummary.extract(
-                                    _wd_tb.walk_stack(None), limit=0
-                                )
-                            )
-                        )
-                        # Get the actual task frames
-                        frame_strs = []
-                        for frame in frames:
-                            frame_strs.append(
-                                f"  {frame.f_code.co_filename}:{frame.f_lineno} "
-                                f"in {frame.f_code.co_name}"
-                            )
-                        stack = "\n".join(frame_strs)
-                    task_info.append(f"  Task {name}: {coro}\n{stack}")
+                    frame_strs = [
+                        f"  {f.f_code.co_filename}:{f.f_lineno} in {f.f_code.co_name}"
+                        for f in frames
+                    ]
+                    stack = "\n".join(frame_strs) if frame_strs else "  (no stack)"
+                    task_info.append(f"  Task {task.get_name()}: {task.get_coro()}\n{stack}")
 
-                full_msg = msg + f"Active tasks ({len(tasks)}):\n" + "\n".join(task_info)
+                full_msg = (
+                    f"EVENT LOOP BLOCKED for {elapsed:.1f}s (expected 0.5s)\n"
+                    f"Active tasks ({len(tasks)}):\n" + "\n".join(task_info)
+                )
 
                 logger.error("event_loop_blocked", elapsed=elapsed)
                 try:
                     with open(log_path, "a") as f:
-                        f.write(f"[{_wd_time.strftime('%H:%M:%S')}] {full_msg}\n\n")
+                        f.write(f"[{time.strftime('%H:%M:%S')}] {full_msg}\n\n")
                 except Exception:
                     pass
 
-                # Also write to stderr for immediate visibility
-                print(f"\n!!! FREEZE DETECTED: {elapsed:.1f}s !!!", file=_wd_sys.stderr)
+                print(f"\n!!! FREEZE DETECTED: {elapsed:.1f}s !!!", file=sys.stderr)
 
     # ── Polling delegations ───────────────────────────────────────
 

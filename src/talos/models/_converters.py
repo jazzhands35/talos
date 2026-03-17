@@ -16,7 +16,7 @@ import structlog
 logger = structlog.get_logger()
 
 # Track which unknown fields we've already logged to avoid per-message spam.
-_seen_unknown: set[tuple[str, str]] = set()  # (model_name, field_name)
+_seen_unknown: dict[str, set[str]] = {}  # model_name -> {field_names}
 
 
 def dollars_to_cents(val: Any) -> int:
@@ -44,12 +44,14 @@ def log_unknown_fields(model_name: str, data: dict[str, Any], known: set[str]) -
 
     Surfaces Kalshi API schema drift at DEBUG level without per-message spam.
     """
-    unknown = set(data.keys()) - known
+    unknown = data.keys() - known
     if not unknown:
         return
-    new = unknown - {f for m, f in _seen_unknown if m == model_name}
+    seen = _seen_unknown.get(model_name)
+    if seen is None:
+        seen = _seen_unknown[model_name] = set()
+    new = unknown - seen
     if not new:
         return
-    for field in new:
-        _seen_unknown.add((model_name, field))
+    seen.update(new)
     logger.debug("unknown_api_fields", model=model_name, fields=sorted(new))

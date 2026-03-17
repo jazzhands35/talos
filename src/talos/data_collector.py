@@ -343,16 +343,14 @@ class DataCollector:
             return
         ts = self._now()
         try:
-            for snap in snapshots:
-                cols = ["ts"] + list(snap.keys())
-                placeholders = ", ".join(["?"] * len(cols))
-                col_names = ", ".join(cols)
-                values = [ts] + [snap[c] for c in snap]
-                self._db.execute(
-                    f"INSERT INTO market_snapshots ({col_names}) VALUES ({placeholders})",
-                    values,
-                )
-            self._db.commit()  # Single commit for entire batch
+            # Build SQL once — all snapshots share the same schema.
+            cols = ["ts"] + list(snapshots[0].keys())
+            col_names = ", ".join(cols)
+            placeholders = ", ".join(["?"] * len(cols))
+            sql = f"INSERT INTO market_snapshots ({col_names}) VALUES ({placeholders})"
+            rows = [[ts] + [snap[c] for c in snapshots[0]] for snap in snapshots]
+            self._db.executemany(sql, rows)
+            self._db.commit()
         except Exception:
             logger.warning("data_collector_snapshot_batch_failed", exc_info=True)
 

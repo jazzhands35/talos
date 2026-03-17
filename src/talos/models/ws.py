@@ -12,6 +12,7 @@ from pydantic import BaseModel, model_validator
 
 from talos.models._converters import dollars_to_cents as _dollars_to_cents
 from talos.models._converters import fp_to_int as _fp_to_int
+from talos.models._converters import log_unknown_fields
 
 
 class OrderBookSnapshot(BaseModel):
@@ -38,9 +39,9 @@ class OrderBookSnapshot(BaseModel):
                 for pair in data[new]:
                     p, q = pair[0], pair[1]
                     if isinstance(p, str):
-                        p = round(float(p) * 100)
+                        p = _dollars_to_cents(p)
                     if isinstance(q, str):
-                        q = int(float(q))
+                        q = _fp_to_int(q)
                     converted.append([p, q])
                 data[old] = converted
         return data
@@ -66,9 +67,9 @@ class OrderBookDelta(BaseModel):
         if not isinstance(data, dict):
             return data
         if "price_dollars" in data and data["price_dollars"] is not None:
-            data["price"] = round(float(data["price_dollars"]) * 100)
+            data["price"] = _dollars_to_cents(data["price_dollars"])
         if "delta_fp" in data and data["delta_fp"] is not None:
-            data["delta"] = int(float(data["delta_fp"]))
+            data["delta"] = _fp_to_int(data["delta_fp"])
         return data
 
 
@@ -135,10 +136,10 @@ class TradeMessage(BaseModel):
         # Price from dollars
         for field in ("yes_price_dollars", "no_price_dollars"):
             if field in data and data[field] is not None:
-                data["price"] = round(float(data[field]) * 100)
+                data["price"] = _dollars_to_cents(data[field])
                 break
         if "count_fp" in data and data["count_fp"] is not None:
-            data["count"] = int(float(data["count_fp"]))
+            data["count"] = _fp_to_int(data["count_fp"])
         return data
 
 
