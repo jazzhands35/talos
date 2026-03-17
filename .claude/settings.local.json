@@ -33,7 +33,18 @@
       "Bash(/tmp/test_lifecycle_patch.py:*)",
       "Bash(/tmp/test_rest_client_patch.py:*)",
       "Bash(echo EXIT_CODE=$?:*)",
-      "Bash(C:/Users/Sean/Documents/Python/Talos/.venv/Scripts/pip install:*)"
+      "Bash(C:/Users/Sean/Documents/Python/Talos/.venv/Scripts/pip install:*)",
+      "Bash(ls:*)",
+      "Bash(grep:*)",
+      "Bash(find:*)",
+      "Bash(cd:*)",
+      "Read(//c/Users/Sean/Documents/Python/Talos/$HOME/**)",
+      "Read(//c/tmp/**)",
+      "Bash(gh api:*)",
+      "Bash(ps aux:*)",
+      "Bash(WMIC PROCESS WHERE \"CommandLine LIKE '%scrape_history%'\" GET ProcessId 2>/dev/null)",
+      "Bash(start:*)",
+      "Bash(tee test_output.txt)"
     ]
   }
 }

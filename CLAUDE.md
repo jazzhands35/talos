@@ -52,6 +52,19 @@ pip install -e ".[dev]"
 
 Run both **test-runner** and **lint-check** in parallel before commits. Use **direct Read/Grep** for quick single-file lookups (faster than agents).
 
+## Mandatory Skills
+
+These skills MUST be invoked proactively — do not wait for the user to ask.
+
+| Trigger | Skill | When |
+|---------|-------|------|
+| Any Kalshi API work (REST or WS) | `kalshi-api-research` | BEFORE writing code |
+| Order placement, position tracking, fees | `safety-audit` | AFTER changes |
+| position_ledger.py, bid_adjuster.py changes | `position-scenarios` | AFTER changes |
+| Any bug or unexpected behavior | `superpowers:systematic-debugging` | BEFORE proposing fixes |
+| New feature or behavior change | `superpowers:brainstorming` | BEFORE coding |
+| Implementing from a plan | `superpowers:subagent-driven-development` | During implementation |
+
 ## Key Conventions
 
 - **Async-first:** Use `async`/`await` for all I/O (HTTP, WebSocket, file). No blocking calls in the event loop.

@@ -85,6 +85,8 @@ Applied in: `TradingEngine` — `on_top_of_market_change()` calls `_generate_jum
 
 **Why not deduplicate at the toast layer:** The proposal queue deduplicates proposals by key, but toasts are fire-and-forget UI events. Deduplication must happen at the call site — the periodic sweep simply skips the toast.
 
+**Toast accumulation danger:** Textual's `self.notify()` creates a `ToastHolder` widget with its own asyncio task. High-frequency notifications (e.g., jump detection on 80 tickers) can accumulate thousands of tasks, freezing the event loop. `_notify` has a two-layer throttle: 30s dedup + 10 msgs/10s rate limit. Prefer `logger.info()` over `_notify()` for high-frequency non-actionable state changes. See [[decisions#2026-03-16 — Toast notification accumulation freeze]].
+
 ## Deferred action queue (blocked by precondition)
 
 When an action is blocked by a precondition (e.g., dual-jump tiebreaker — only the most-behind side adjusts first), the blocked action is remembered and automatically re-evaluated when the precondition clears. This avoids relying on external events that may never fire.
@@ -199,6 +201,16 @@ When a god-class method grows past ~200 lines with nested branches, extract it a
 Applied in: `rebalance.py` — `compute_rebalance_proposal()` (pure, ~120 lines) + `execute_rebalance()` (async, ~180 lines) extracted from `engine.py`'s `check_imbalances()` + `_execute_rebalance()`. Engine's `check_imbalances` became a 15-line loop. See [[decisions#2026-03-13 — Rebalance extraction from TradingEngine]].
 
 **Why not a class:** A `RebalanceExecutor` class would need injected references to rest_client, adjuster, scanner, and notify callback — making it a mini-engine with its own lifecycle. Functions receive these as parameters, have no state to manage, and can't get out of sync.
+
+## Guard interval-triggered workers with exclusive=True
+
+When a Textual `@work(thread=False)` method is called from `set_interval`, it MUST use `exclusive=True, group="name"`. Without it, if the work takes longer than the interval, workers accumulate unboundedly. With slow I/O (REST timeouts), this causes hundreds of orphaned tasks that overwhelm the asyncio scheduler — freezing the event loop even though no individual call is blocking.
+
+Applied in: `_poll_trades` (30s interval, each batch spawns 40+ REST calls), `_poll_queue` (3s interval). Both now use `exclusive=True`. `_poll_account` already had a manual `_poll_in_progress` flag — `exclusive=True` is the framework-native equivalent.
+
+**Why not just a flag:** `exclusive=True` also cancels the previous worker's in-flight tasks, freeing resources. A boolean flag only prevents new starts — the old worker and its spawned tasks keep running.
+
+See [[decisions#2026-03-16 — UI freeze: task accumulation from unbounded asyncio.gather]].
 
 ## Batch widget updates in Textual
 

@@ -96,7 +96,7 @@ Key changes:
 
 **Context:** 129 vs 107 contract imbalance (22 contracts, exceeding unit size). Initially detection-only; extended to executable rebalance.
 
-**Decision:** Two-step rebalance: (1) reduce over-side resting, (2) catch-up bid on under-side. Equalization target: `max(over_filled, under_committed)`. Multi-cycle convergence for gaps > unit_size. See [[patterns#Multi-step execution with fail-safe ordering]] for ordering rationale and [[principles#16. Delta Neutral by Construction]].
+**Decision:** Two-step rebalance: (1) reduce over-side resting, (2) catch-up bid on under-side. Equalization target: `max(over_filled, under_committed)`. Trigger threshold: any non-zero committed delta (`abs(committed_a - committed_b) > 0`). Unit size controls entry/re-entry qty; catch-up must close ANY gap because every unhedged contract is real exposure. See [[patterns#Multi-step execution with fail-safe ordering]] for ordering rationale and [[principles#16. Delta Neutral by Construction]].
 
 ## 2026-03-10 — Status column for engine decision transparency (P20)
 
@@ -260,6 +260,26 @@ Key changes:
 **Context:** Startup re-fetched 196 events via REST (392 API calls, 40 seconds). Persistence only saved event tickers.
 **Decision:** Save full pair data (`games_full.json`: event_ticker, ticker_a, ticker_b, fee_type, fee_rate, close_time, label, sub_title). On startup, restore from cache with zero API calls. Fallback to REST if cache missing.
 **Rationale:** All data needed to create ArbPairs is available at save time. No reason to re-fetch from Kalshi on every restart.
+
+## 2026-03-16 — UI freeze: task accumulation from unbounded asyncio.gather
+
+**Context:** UI froze on WS disconnect. Event loop watchdog (`talos_freeze.log`) caught 561 active tasks. Root cause: `refresh_trades` spawned `asyncio.gather(*[_fetch(t) for t in tickers])` — one REST call per market ticker (40+ with 20 games). `_poll_trades` (30s interval) had no `exclusive` guard, so when the API was slow, new batches launched while old ones were still in-flight. After a few cycles: 500+ tasks overwhelmed the asyncio scheduler.
+**Decision:** (1) `_poll_trades` and `_poll_queue` now use `@work(thread=False, exclusive=True, group=...)` — Textual cancels the previous worker before starting a new one. (2) `refresh_trades` now uses `Semaphore(5)` to cap concurrent REST calls per batch. (3) Non-recursive `start_feed` reconnection loop (while True instead of recursive await). (4) Notification dedup (30s window) for recurring toasts. (5) Silent bulk `tracker.check` during refresh_account. (6) Batched SQLite commits in `log_market_snapshots`.
+**Rationale:** The freeze was NOT from blocking I/O (all REST calls are async). It was from task scheduling overhead — asyncio with 500+ tasks spends more time context-switching than doing useful work. The `exclusive=True` pattern is critical for any Textual `@work` method called from `set_interval` — without it, slow I/O causes unbounded task growth. See [[patterns#Guard interval-triggered workers with exclusive=True]].
+
+## 2026-03-16 — Toast notification accumulation freeze
+
+**Context:** Auto-accept showed "0 accepted" and no proposals appeared despite the system being fully enabled. Event loop watchdog (`talos_freeze.log`) caught 2,466 active tasks — almost all `ToastHolder` message pumps from Textual's `self.notify()`. Each toast creates a widget with its own asyncio task. `on_top_of_market_change` fired for every orderbook update that changed top-of-market state — with ~80 tickers, thousands of toasts accumulated, blocking the event loop 5-8s every 30s. `_poll_account` (which runs `evaluate_opportunities`, `check_imbalances`, `reevaluate_jumps`) and `_auto_accept_tick` were starved — proposals were never generated.
+**Decision:** (1) Replaced `self._notify()` in `on_top_of_market_change` with `logger.info()` — the Status column already shows jump state. (2) Added rate limit to `_notify`: max 10 unique toasts per 10s window, on top of the existing 30s dedup. This prevents toast task accumulation regardless of notification source.
+**Rationale:** This is a distinct variant of the worker accumulation freeze (see below). Workers accumulate from unbounded `set_interval` calls; toasts accumulate from unbounded `self.notify()` calls. Both create asyncio tasks that overwhelm the scheduler. The fix targets both the specific source (jump toasts → structlog) and the general mechanism (rate limit all notifications). Jump state visibility is preserved via the Status column and structlog — toasts were informational noise in this context.
+
+**Diagnostic shortcut:** Compare `auto_accept_sessions/` file sizes — healthy sessions produce MBs/GBs; broken sessions are 185 bytes (just the session_start event). Also check `talos_freeze.log` task counts before deep code tracing.
+
+## 2026-03-16 — Multi-order toast suppressed; FINAL games enter exit-only pipeline
+
+**Context:** Two bugs: (1) `_reconcile_with_kalshi` fired a "MULTI-ORDER" toast every poll cycle (~10s) when multiple resting orders existed on the same side. Too noisy — decided against toasts for this check. (2) `_check_exit_only` only handled `state == "live"` and `state == "pre"`, missing `state == "post"` (FINAL). Games that reached FINAL without being caught in the "live" window never entered `_exit_only_events`, so `_enforce_all_exit_only` never checked them for auto-removal.
+**Decision:** (1) Removed `self._notify()` from multi-order check; kept `logger.warning` for log analysis. (2) Added `gs.state == "post"` branch in `_check_exit_only` — FINAL games now enter exit-only, which triggers the existing auto-remove path (balanced fills + no resting → remove game). Priority order: "live" first, then "post", then "pre" with time window.
+**Rationale:** (1) Reconciliation health checks should log, not toast — they're informational, not actionable in real-time. (2) The exit-only pipeline is a classify → enforce two-phase system. Classification gates must be exhaustive — any missing state creates invisible stuck games. The "post" case is especially important because it means the game is over and we're just waiting for Kalshi settlement.
 
 ## 2026-03-14 — Disable websockets client-side keepalive pings
 
