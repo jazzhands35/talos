@@ -32,7 +32,7 @@ from talos.portfolio_feed import PortfolioFeed
 from talos.position_feed import PositionFeed
 from talos.position_ledger import PositionLedger, Side, compute_display_positions
 from talos.proposal_queue import ProposalQueue
-from talos.rebalance import compute_rebalance_proposal
+from talos.rebalance import _create_order_group, compute_rebalance_proposal, compute_topup_needs
 from talos.rebalance import execute_rebalance as _execute_rebalance
 from talos.rest_client import KalshiRESTClient
 from talos.scanner import ArbitrageScanner
@@ -1363,9 +1363,58 @@ class TradingEngine:
                 self._feed.book_manager,
             )
             if proposal is None or proposal.rebalance is None:
+                # No catch-up needed — check for mid-unit top-up
+                if not self.is_exit_only(pair.event_ticker):
+                    topup_needs = compute_topup_needs(ledger, pair, snapshot)
+                    for side, (qty, price) in topup_needs.items():
+                        ok, reason = ledger.is_placement_safe(
+                            side, qty, price, rate=pair.fee_rate
+                        )
+                        if not ok:
+                            self._notify(
+                                f"Top-up BLOCKED ({side.value}): {reason}",
+                                "warning",
+                            )
+                            continue
+                        ticker = pair.ticker_a if side == Side.A else pair.ticker_b
+                        group = await _create_order_group(
+                            self._rest, pair.event_ticker, side.value, qty
+                        )
+                        try:
+                            await self._rest.create_order(
+                                ticker=ticker,
+                                action="buy",
+                                side="no",
+                                no_price=price,
+                                count=qty,
+                                order_group_id=group,
+                            )
+                            self._notify(
+                                f"Top-up {pair.event_ticker} {side.value}:"
+                                f" {qty} @ {price}c",
+                                "information",
+                            )
+                            logger.info(
+                                "topup_placed",
+                                event_ticker=pair.event_ticker,
+                                side=side.value,
+                                qty=qty,
+                                price=price,
+                            )
+                        except Exception as e:
+                            self._notify(
+                                f"Top-up FAILED ({side.value}):"
+                                f" {type(e).__name__}: {e}",
+                                "error",
+                            )
+                            logger.exception(
+                                "topup_error",
+                                event_ticker=pair.event_ticker,
+                                side=side.value,
+                            )
                 continue
 
-            # Auto-execute — no ProposalQueue
+            # Auto-execute catch-up — no ProposalQueue
             await _execute_rebalance(
                 proposal.rebalance,
                 rest_client=self._rest,

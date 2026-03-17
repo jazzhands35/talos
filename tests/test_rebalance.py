@@ -12,10 +12,9 @@ from talos.models.proposal import ProposedRebalance
 from talos.models.strategy import ArbPair, Opportunity
 from talos.orderbook import OrderBookManager
 from talos.position_ledger import PositionLedger, Side
-from talos.rebalance import compute_rebalance_proposal, execute_rebalance
+from talos.rebalance import compute_rebalance_proposal, compute_topup_needs, execute_rebalance
 from talos.rest_client import KalshiRESTClient
 from talos.scanner import ArbitrageScanner
-
 
 # ── Helpers ──────────────────────────────────────────────────────────
 
@@ -745,3 +744,61 @@ class TestFreshSyncBeforeCatchup:
             ticker="TK-B", action="buy", side="no",
             no_price=48, count=10, order_group_id="grp-test",
         )
+
+
+# ── Top-up detection tests ───────────────────────────────────────────
+
+
+class TestTopUpDetection:
+    def test_both_sides_need_topup(self):
+        pair = _make_pair()
+        ledger = PositionLedger(event_ticker="EVT-1", unit_size=20)
+        ledger.record_fill(Side.A, 15, 45)
+        ledger.record_fill(Side.B, 12, 48)
+        snapshot = _make_snapshot(no_a=45, no_b=48)
+        result = compute_topup_needs(ledger, pair, snapshot)
+        assert result == {Side.A: (5, 45), Side.B: (8, 48)}
+
+    def test_one_side_has_resting_skipped(self):
+        pair = _make_pair()
+        ledger = PositionLedger(event_ticker="EVT-1", unit_size=20)
+        ledger.record_fill(Side.A, 15, 45)
+        ledger.record_resting(Side.A, "ord-a", 5, 45)
+        ledger.record_fill(Side.B, 15, 48)
+        snapshot = _make_snapshot(no_a=45, no_b=48)
+        result = compute_topup_needs(ledger, pair, snapshot)
+        assert Side.A not in result
+        assert result == {Side.B: (5, 48)}
+
+    def test_complete_unit_no_topup(self):
+        pair = _make_pair()
+        ledger = PositionLedger(event_ticker="EVT-1", unit_size=20)
+        ledger.record_fill(Side.A, 20, 45)
+        ledger.record_fill(Side.B, 20, 48)
+        snapshot = _make_snapshot(no_a=45, no_b=48)
+        result = compute_topup_needs(ledger, pair, snapshot)
+        assert result == {}
+
+    def test_no_snapshot_no_topup(self):
+        pair = _make_pair()
+        ledger = PositionLedger(event_ticker="EVT-1", unit_size=20)
+        ledger.record_fill(Side.A, 15, 45)
+        ledger.record_fill(Side.B, 12, 48)
+        result = compute_topup_needs(ledger, pair, None)
+        assert result == {}
+
+    def test_imbalanced_committed_no_topup(self):
+        pair = _make_pair()
+        ledger = PositionLedger(event_ticker="EVT-1", unit_size=20)
+        ledger.record_fill(Side.A, 30, 45)
+        ledger.record_fill(Side.B, 15, 48)
+        snapshot = _make_snapshot(no_a=45, no_b=48)
+        result = compute_topup_needs(ledger, pair, snapshot)
+        assert result == {}
+
+    def test_zero_fills_no_topup(self):
+        pair = _make_pair()
+        ledger = PositionLedger(event_ticker="EVT-1", unit_size=20)
+        snapshot = _make_snapshot(no_a=45, no_b=48)
+        result = compute_topup_needs(ledger, pair, snapshot)
+        assert result == {}

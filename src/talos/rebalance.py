@@ -183,6 +183,51 @@ def compute_rebalance_proposal(
     )
 
 
+def compute_topup_needs(
+    ledger: PositionLedger,
+    pair: ArbPair,
+    snapshot: Opportunity | None,
+) -> dict[Side, tuple[int, int]]:
+    """Compute top-up needs for mid-unit sides with no resting bids.
+
+    Returns dict mapping Side → (qty, price) for each side needing top-up.
+    Only fires when committed counts are equal (catch-up handles imbalances).
+    Pure function — no I/O.
+    """
+    if snapshot is None:
+        return {}
+
+    filled_a = ledger.filled_count(Side.A)
+    filled_b = ledger.filled_count(Side.B)
+
+    # Only fire when both sides are in the same completed-unit "tier".
+    # A cross-unit gap means catch-up should close it first.
+    if filled_a // ledger.unit_size != filled_b // ledger.unit_size:
+        return {}
+
+    needs: dict[Side, tuple[int, int]] = {}
+    for side in (Side.A, Side.B):
+        filled = ledger.filled_count(side)
+        resting = ledger.resting_count(side)
+
+        if filled == 0:
+            continue
+        if resting > 0:
+            continue
+
+        filled_in_unit = filled % ledger.unit_size
+        if filled_in_unit == 0:
+            continue
+
+        qty = ledger.unit_size - filled_in_unit
+        price = snapshot.no_a if side == Side.A else snapshot.no_b
+        if price <= 0:
+            continue
+        needs[side] = (qty, price)
+
+    return needs
+
+
 # ── Async execution ─────────────────────────────────────────────────
 
 

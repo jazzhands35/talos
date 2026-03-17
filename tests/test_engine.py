@@ -1604,3 +1604,25 @@ class TestAutoRebalance:
         await engine.check_imbalances()
 
         assert rest.create_order.call_count == 1
+
+    @pytest.mark.asyncio
+    async def test_topup_places_orders_for_both_sides(self):
+        """Top-up places orders on both sides when mid-unit with no resting."""
+        engine, rest = _engine_with_pair()
+        ledger = engine.adjuster.get_ledger("EVT-1")
+        ledger.record_fill(Side.A, 15, 45)
+        ledger.record_fill(Side.B, 15, 48)
+
+        engine.scanner._all_snapshots["EVT-1"] = Opportunity(
+            event_ticker="EVT-1", ticker_a="TK-A", ticker_b="TK-B",
+            no_a=45, no_b=48, qty_a=100, qty_b=100,
+            raw_edge=7, fee_edge=0.0, tradeable_qty=100,
+            timestamp="2026-03-16T00:00:00Z",
+        )
+
+        rest.create_order = AsyncMock(return_value=_make_order("TK-A", order_id="new"))
+        rest.create_order_group = AsyncMock(return_value="grp-test")
+
+        await engine.check_imbalances()
+
+        assert rest.create_order.call_count == 2
