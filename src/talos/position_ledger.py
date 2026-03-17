@@ -42,6 +42,7 @@ class _SideState:
         "resting_order_id",
         "resting_count",
         "resting_price",
+        "_placed_at_gen",
     )
 
     def __init__(self) -> None:
@@ -51,6 +52,7 @@ class _SideState:
         self.resting_order_id: str | None = None
         self.resting_count: int = 0
         self.resting_price: int = 0
+        self._placed_at_gen: int | None = None
 
     def reset(self) -> None:
         self.filled_count = 0
@@ -59,6 +61,7 @@ class _SideState:
         self.resting_order_id = None
         self.resting_count = 0
         self.resting_price = 0
+        self._placed_at_gen = None
 
 
 class PositionLedger:
@@ -72,10 +75,17 @@ class PositionLedger:
     def __init__(self, event_ticker: str, unit_size: int = 10) -> None:
         self.event_ticker = event_ticker
         self.unit_size = unit_size
+        self._sync_gen: int = 0
         self._sides: dict[Side, _SideState] = {
             Side.A: _SideState(),
             Side.B: _SideState(),
         }
+
+    # ── Sync generation (stale-sync protection) ────────────────────
+
+    def bump_sync_gen(self) -> None:
+        """Increment sync generation. Call at start of each polling cycle."""
+        self._sync_gen += 1
 
     # ── Per-side accessors ──────────────────────────────────────────
 
@@ -129,24 +139,31 @@ class PositionLedger:
     # ── Safety gate ─────────────────────────────────────────────────
 
     def is_placement_safe(
-        self, side: Side, count: int, price: int, *, rate: float = MAKER_FEE_RATE
+        self, side: Side, count: int, price: int, *, rate: float = MAKER_FEE_RATE,
+        catchup: bool = False,
     ) -> tuple[bool, str]:
         """Check if placing an order is safe. Returns (ok, reason).
 
         Enforces Principles 16 (unit gating), 18 (profitability gate).
         Pass the pair-specific ``rate`` for non-standard fee series.
+
+        When ``catchup=True`` the P16 unit-boundary check is skipped because
+        catch-up orders close an existing imbalance (risk-reducing, not
+        speculative). P18 profitability is always enforced.
         """
         s = self._sides[side]
 
         # P16: resting + filled-in-unit + new must not exceed unit.
         # Modular arithmetic allows re-entry after a complete unit (10/10 → next pair).
-        filled_in_unit = s.filled_count % self.unit_size
-        if filled_in_unit + s.resting_count + count > self.unit_size:
-            return (
-                False,
-                f"would exceed unit: filled_in_unit={filled_in_unit} + "
-                f"resting={s.resting_count} + new={count} > {self.unit_size}",
-            )
+        # Skipped for catch-up orders — closing a gap, not speculative exposure.
+        if not catchup:
+            filled_in_unit = s.filled_count % self.unit_size
+            if filled_in_unit + s.resting_count + count > self.unit_size:
+                return (
+                    False,
+                    f"would exceed unit: filled_in_unit={filled_in_unit} + "
+                    f"resting={s.resting_count} + new={count} > {self.unit_size}",
+                )
 
         # P18: fee-adjusted profitability
         other = self._sides[side.other]
@@ -192,6 +209,19 @@ class PositionLedger:
         s.resting_count = count
         s.resting_price = price
 
+    def record_placement(self, side: Side, order_id: str, count: int, price: int) -> None:
+        """Record optimistic resting state from order placement.
+
+        Like record_resting, but marks the order as unconfirmed so that
+        sync_from_orders won't clear it if given stale data from a poll
+        that started before the order was created.
+        """
+        s = self._sides[side]
+        s.resting_order_id = order_id
+        s.resting_count = count
+        s.resting_price = price
+        s._placed_at_gen = self._sync_gen
+
     def record_cancel(self, side: Side, order_id: str) -> None:
         """Record an order cancellation."""
         s = self._sides[side]
@@ -200,6 +230,7 @@ class PositionLedger:
         s.resting_order_id = None
         s.resting_count = 0
         s.resting_price = 0
+        s._placed_at_gen = None
 
     def reset_pair(self) -> None:
         """Clear state after both sides complete. Ready for next pair."""
@@ -263,6 +294,7 @@ class PositionLedger:
                 s.resting_order_id = resting_list[0][0]
                 s.resting_count = total_resting
                 s.resting_price = resting_list[0][2]
+                s._placed_at_gen = None  # Confirmed by sync
                 if len(resting_list) > 1:
                     logger.info(
                         "multiple_resting_orders_summed",
@@ -272,6 +304,19 @@ class PositionLedger:
                         total_resting=total_resting,
                     )
             else:
+                # Stale-sync guard: if record_placement was called during
+                # the current sync generation, the orders list may predate
+                # the placement. Preserve the optimistic resting state.
+                if s._placed_at_gen is not None and s._placed_at_gen >= self._sync_gen:
+                    logger.info(
+                        "stale_sync_resting_preserved",
+                        event_ticker=self.event_ticker,
+                        side=side.value,
+                        placed_gen=s._placed_at_gen,
+                        sync_gen=self._sync_gen,
+                    )
+                    continue
+
                 if s.resting_order_id is not None:
                     logger.info(
                         "resting_order_cleared",
@@ -282,6 +327,7 @@ class PositionLedger:
                 s.resting_order_id = None
                 s.resting_count = 0
                 s.resting_price = 0
+                s._placed_at_gen = None
 
         # Two-source sync (orders + positions) keeps the ledger accurate.
 
