@@ -14,6 +14,7 @@ class ArbPair(BaseModel):
     fee_type: str = "quadratic_with_maker_fees"
     fee_rate: float = 0.0175
     close_time: str | None = None
+    expected_expiration_time: str | None = None
 
 
 class Opportunity(BaseModel):

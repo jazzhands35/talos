@@ -123,6 +123,22 @@ class TestMarketEnrichedFields:
         assert m.result == "yes"
         assert m.market_type == "binary"
 
+    def test_expected_expiration_time_captured(self) -> None:
+        data = {
+            "ticker": "MKT-1",
+            "event_ticker": "EVT-1",
+            "title": "Test",
+            "status": "open",
+            "expected_expiration_time": "2026-03-19T04:30:00Z",
+        }
+        m = Market.model_validate(data)
+        assert m.expected_expiration_time == "2026-03-19T04:30:00Z"
+
+    def test_expected_expiration_time_absent(self) -> None:
+        data = {"ticker": "MKT-1", "event_ticker": "EVT-1", "title": "T", "status": "open"}
+        m = Market.model_validate(data)
+        assert m.expected_expiration_time is None
+
     def test_defaults(self) -> None:
         data = {"ticker": "MKT-1", "event_ticker": "EVT-1", "title": "T", "status": "open"}
         m = Market.model_validate(data)

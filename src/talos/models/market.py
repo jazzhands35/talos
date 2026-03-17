@@ -41,6 +41,7 @@ class Market(BaseModel):
     open_time: str | None = None
     result: str = ""
     market_type: str = "binary"
+    expected_expiration_time: str | None = None
 
     @model_validator(mode="before")
     @classmethod

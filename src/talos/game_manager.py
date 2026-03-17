@@ -128,6 +128,14 @@ class GameManager:
         close_times = [m.close_time for m in active_markets if m.close_time]
         close_time = min(close_times) if close_times else None
 
+        # Extract expected_expiration_time (same for both markets in an event)
+        exp_times = [
+            m.expected_expiration_time
+            for m in active_markets
+            if m.expected_expiration_time
+        ]
+        expected_expiration_time = exp_times[0] if exp_times else None
+
         # Fetch series for fee metadata (non-critical — default if it fails)
         fee_type = "quadratic_with_maker_fees"
         fee_rate = 0.0175
@@ -155,6 +163,7 @@ class GameManager:
             fee_type=fee_type,
             fee_rate=fee_rate,
             close_time=close_time,
+            expected_expiration_time=expected_expiration_time,
         )
         self._scanner.add_pair(
             event.event_ticker,
@@ -163,6 +172,7 @@ class GameManager:
             fee_type=fee_type,
             fee_rate=fee_rate,
             close_time=close_time,
+            expected_expiration_time=expected_expiration_time,
         )
         if subscribe:
             await self._feed.subscribe(ticker_a)
@@ -213,10 +223,15 @@ class GameManager:
             fee_type=str(data.get("fee_type", "quadratic_with_maker_fees")),
             fee_rate=float(data.get("fee_rate", 0.0175)),
             close_time=str(data["close_time"]) if data.get("close_time") else None,
+            expected_expiration_time=(
+                str(data["expected_expiration_time"])
+                if data.get("expected_expiration_time") else None
+            ),
         )
         self._scanner.add_pair(
             event_ticker, ticker_a, ticker_b,
             fee_type=pair.fee_type, fee_rate=pair.fee_rate, close_time=pair.close_time,
+            expected_expiration_time=pair.expected_expiration_time,
         )
         self._games[event_ticker] = pair
         if "sub_title" in data:

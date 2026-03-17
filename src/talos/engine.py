@@ -553,6 +553,10 @@ class TradingEngine:
 
         # Resolve game status — run in background, don't block startup
         if self._game_status_resolver is not None:
+            for p in self._game_manager.active_games:
+                self._game_status_resolver.set_expiration(
+                    p.event_ticker, p.expected_expiration_time
+                )
             batch = [
                 (p.event_ticker, self._game_manager.subtitles.get(p.event_ticker, ""))
                 for p in self._game_manager.active_games
@@ -1570,6 +1574,10 @@ class TradingEngine:
             for pair in pairs:
                 self._adjuster.add_event(pair)
             if self._game_status_resolver is not None:
+                for p in pairs:
+                    self._game_status_resolver.set_expiration(
+                        p.event_ticker, p.expected_expiration_time
+                    )
                 batch = [
                     (p.event_ticker, self._game_manager.subtitles.get(p.event_ticker, ""))
                     for p in pairs

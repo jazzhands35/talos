@@ -154,14 +154,16 @@ def _fmt_game_status(status: GameStatus | None) -> RichText:
     # state == "pre"
     if status.scheduled_start is None:
         return DIM_DASH
+    is_estimate = status.detail == "~est"
+    prefix = "~" if is_estimate else ""
     now = datetime.now(UTC)
     delta = status.scheduled_start - now
     minutes_left = int(delta.total_seconds() / 60)
     if minutes_left <= 15:
-        return RichText(f"in {minutes_left}m", style=YELLOW, justify="right")
+        return RichText(f"{prefix}in {minutes_left}m", style=YELLOW, justify="right")
     pt = status.scheduled_start.astimezone(_PT)
     time_str = pt.strftime("%I:%M %p").lstrip("0")  # Windows-compatible, no leading zero
-    return RichText(time_str, justify="right")
+    return RichText(f"{prefix}{time_str}", justify="right")
 
 
 def _fmt_status(status: str) -> RichText:

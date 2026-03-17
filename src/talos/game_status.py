@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import os
 import re
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Protocol, runtime_checkable
 
 import httpx
@@ -532,6 +532,37 @@ def _extract_date_from_ticker(event_ticker: str) -> str | None:
     return f"20{year_suffix}{month_num}{int(day):02d}"
 
 
+# ── Expiration-based start time estimation ────────────────────────
+
+# Sport-specific offsets: expected_expiration_time = game_start + offset.
+# Research verified across 11 leagues — see brain/expected-expiration-research.md.
+_EXPIRATION_OFFSETS: dict[str, timedelta] = {
+    "KXUFCFIGHT": timedelta(hours=5),
+    "KXBOXING": timedelta(hours=5),
+}
+_DEFAULT_OFFSET = timedelta(hours=3)
+
+
+def estimate_start_time(
+    expected_expiration: str | None, series_prefix: str
+) -> datetime | None:
+    """Derive estimated game start from Kalshi's expected_expiration_time.
+
+    Returns None if the input is missing or a known placeholder (midnight UTC).
+    """
+    if not expected_expiration:
+        return None
+    try:
+        expiration = datetime.fromisoformat(expected_expiration.replace("Z", "+00:00"))
+    except (ValueError, AttributeError):
+        return None
+    # Midnight UTC is a Boxing placeholder — not a real expiration
+    if expiration.hour == 0 and expiration.minute == 0 and expiration.second == 0:
+        return None
+    offset = _EXPIRATION_OFFSETS.get(series_prefix, _DEFAULT_OFFSET)
+    return expiration - offset
+
+
 class GameStatusResolver:
     """Resolves Kalshi event tickers to live game status via external providers."""
 
@@ -545,6 +576,8 @@ class GameStatusResolver:
         self._http = http
         # Cache: event_ticker -> (status, team_codes, source_key)
         self._cache: dict[str, tuple[GameStatus, tuple[str, str] | None, str]] = {}
+        # Expiration-based start time fallback: event_ticker -> (expected_expiration, prefix)
+        self._expirations: dict[str, tuple[str, str]] = {}
 
     @staticmethod
     def extract_team_codes(event_ticker: str) -> tuple[str, str] | None:
@@ -594,6 +627,14 @@ class GameStatusResolver:
 
         return None
 
+    def set_expiration(
+        self, event_ticker: str, expected_expiration_time: str | None
+    ) -> None:
+        """Store expected_expiration_time for expiration-based start fallback."""
+        if expected_expiration_time:
+            prefix = event_ticker.split("-")[0]
+            self._expirations[event_ticker] = (expected_expiration_time, prefix)
+
     def _prepare_entry(
         self, event_ticker: str, sub_title: str = ""
     ) -> tuple[str, str, str, tuple[str, str] | None, str] | None:
@@ -604,6 +645,16 @@ class GameStatusResolver:
         prefix = event_ticker.split("-")[0]
         source = SOURCE_MAP.get(prefix)
         if source is None and prefix not in TENNIS_SERIES:
+            # Fallback: use expiration-based estimated start time
+            exp_data = self._expirations.get(event_ticker)
+            if exp_data is not None:
+                estimated = estimate_start_time(exp_data[0], exp_data[1])
+                if estimated is not None:
+                    status = GameStatus(
+                        state="pre", scheduled_start=estimated, detail="~est"
+                    )
+                    self._cache[event_ticker] = (status, None, "")
+                    return None
             logger.warning(
                 "unmapped_series_ticker", prefix=prefix, ticker=event_ticker
             )
@@ -649,7 +700,9 @@ class GameStatusResolver:
         for event_ticker, sub_title in items:
             entry = self._prepare_entry(event_ticker, sub_title)
             if entry is None:
-                results[event_ticker] = GameStatus(state="unknown")
+                # _prepare_entry may have cached a fallback (e.g. expiration estimate)
+                cached = self._cache.get(event_ticker)
+                results[event_ticker] = cached[0] if cached else GameStatus(state="unknown")
                 continue
             prefix, sport, league, team_codes, game_date = entry
             source_key = (prefix, sport, league, game_date)
@@ -784,3 +837,4 @@ class GameStatusResolver:
     def remove(self, event_ticker: str) -> None:
         """Remove an event ticker from cache."""
         self._cache.pop(event_ticker, None)
+        self._expirations.pop(event_ticker, None)

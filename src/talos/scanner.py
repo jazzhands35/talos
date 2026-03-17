@@ -38,6 +38,7 @@ class ArbitrageScanner:
         fee_type: str = "quadratic_with_maker_fees",
         fee_rate: float = 0.0175,
         close_time: str | None = None,
+        expected_expiration_time: str | None = None,
     ) -> None:
         """Register a pair of markets to monitor."""
         if any(p.event_ticker == event_ticker for p in self._pairs):
@@ -49,6 +50,7 @@ class ArbitrageScanner:
             fee_type=fee_type,
             fee_rate=fee_rate,
             close_time=close_time,
+            expected_expiration_time=expected_expiration_time,
         )
         self._pairs.append(pair)
         self._pairs_by_ticker.setdefault(ticker_a, []).append(pair)

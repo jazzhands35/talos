@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from unittest.mock import AsyncMock
 
 import pytest
@@ -15,6 +15,7 @@ from talos.game_status import (
     OddsApiProvider,
     PandaScoreProvider,
     _extract_date_from_ticker,
+    estimate_start_time,
 )
 
 # ── GameStatus Model ───────────────────────────────────────────────
@@ -602,7 +603,6 @@ class TestResolverIntegration:
 # ── UI Formatter Tests ───────────────────────────────────────────
 
 
-from datetime import timedelta
 from zoneinfo import ZoneInfo
 
 from talos.ui.widgets import _fmt_game_date, _fmt_game_status
@@ -658,3 +658,131 @@ class TestFmtGameStatus:
     def test_none_status(self) -> None:
         result = _fmt_game_status(None)
         assert "\u2014" in str(result)
+
+    def test_estimated_far_out_has_tilde_prefix(self) -> None:
+        future = datetime.now(UTC) + timedelta(hours=3)
+        gs = GameStatus(state="pre", scheduled_start=future, detail="~est")
+        result = str(_fmt_game_status(gs))
+        assert result.startswith("~")
+        assert "M" in result  # AM or PM
+
+    def test_estimated_imminent_has_tilde_prefix(self) -> None:
+        soon = datetime.now(UTC) + timedelta(minutes=10)
+        gs = GameStatus(state="pre", scheduled_start=soon, detail="~est")
+        result = str(_fmt_game_status(gs))
+        assert "~in " in result
+
+    def test_confirmed_time_no_tilde(self) -> None:
+        future = datetime.now(UTC) + timedelta(hours=3)
+        gs = GameStatus(state="pre", scheduled_start=future, detail="Q1 5:00")
+        result = str(_fmt_game_status(gs))
+        assert not result.startswith("~")
+
+
+# ── Expiration Start Time Estimation ──────────────────────────────
+
+
+class TestEstimateStartTime:
+    """Tests for estimate_start_time() pure function."""
+
+    def test_nba_3h_offset(self) -> None:
+        result = estimate_start_time("2026-03-19T04:30:00Z", "KXNBAGAME")
+        assert result == datetime(2026, 3, 19, 1, 30, tzinfo=UTC)
+
+    def test_ufc_5h_offset(self) -> None:
+        result = estimate_start_time("2026-03-22T02:40:00Z", "KXUFCFIGHT")
+        assert result == datetime(2026, 3, 21, 21, 40, tzinfo=UTC)
+
+    def test_boxing_5h_offset(self) -> None:
+        result = estimate_start_time("2026-04-26T05:00:00Z", "KXBOXING")
+        assert result == datetime(2026, 4, 26, 0, 0, tzinfo=UTC)
+
+    def test_midnight_placeholder_returns_none(self) -> None:
+        """Boxing placeholder: midnight UTC = no real expiration."""
+        result = estimate_start_time("2026-04-12T00:00:00Z", "KXBOXING")
+        assert result is None
+
+    def test_none_input_returns_none(self) -> None:
+        result = estimate_start_time(None, "KXNHLGAME")
+        assert result is None
+
+    def test_empty_string_returns_none(self) -> None:
+        result = estimate_start_time("", "KXNHLGAME")
+        assert result is None
+
+    def test_unknown_prefix_uses_default_3h(self) -> None:
+        result = estimate_start_time("2026-03-22T10:10:00Z", "KXAFLGAME")
+        assert result == datetime(2026, 3, 22, 7, 10, tzinfo=UTC)
+
+    def test_invalid_iso_returns_none(self) -> None:
+        result = estimate_start_time("not-a-date", "KXNHLGAME")
+        assert result is None
+
+
+class TestResolverExpirationFallback:
+    """Tests for expiration-based start time fallback in GameStatusResolver."""
+
+    @pytest.mark.asyncio
+    async def test_unmapped_league_with_expiration_gets_estimated_start(self) -> None:
+        """CBA game with expected_expiration_time → state='pre' with estimated start."""
+        resolver = GameStatusResolver()
+        ticker = "KXCBAGAME-26MAR18SHASHAD"
+        resolver.set_expiration(ticker, "2026-03-18T14:35:00Z")
+        status = await resolver.resolve(ticker)
+        assert status.state == "pre"
+        assert status.scheduled_start == datetime(2026, 3, 18, 11, 35, tzinfo=UTC)
+        assert status.detail == "~est"
+
+    @pytest.mark.asyncio
+    async def test_unmapped_league_without_expiration_stays_unknown(self) -> None:
+        """Unmapped league without expiration data → state='unknown'."""
+        resolver = GameStatusResolver()
+        status = await resolver.resolve("KXFOO-26MAR14AAABBB")
+        assert status.state == "unknown"
+
+    @pytest.mark.asyncio
+    async def test_mapped_league_ignores_expiration(self) -> None:
+        """NHL game uses ESPN, not expiration fallback, even if expiration is set."""
+        mock_provider = AsyncMock()
+        mock_provider.fetch_games.return_value = [
+            ExternalGame(
+                home_team="Rangers", away_team="Bruins",
+                home_abbr="NYR", away_abbr="BOS",
+                scheduled_start=datetime(2026, 3, 14, 19, 0, tzinfo=UTC),
+                state="live", detail="P2 5:00",
+            )
+        ]
+        resolver = GameStatusResolver()
+        resolver._providers["espn"] = mock_provider
+        ticker = "KXNHLGAME-26MAR14BOSNYR"
+        resolver.set_expiration(ticker, "2026-03-14T22:00:00Z")
+        status = await resolver.resolve(ticker, "BOS at NYR (Mar 14)")
+        assert status.state == "live"  # From ESPN, not fallback
+
+    @pytest.mark.asyncio
+    async def test_expiration_removed_on_game_remove(self) -> None:
+        resolver = GameStatusResolver()
+        ticker = "KXCBAGAME-26MAR18SHASHAD"
+        resolver.set_expiration(ticker, "2026-03-18T14:35:00Z")
+        resolver.remove(ticker)
+        assert ticker not in resolver._expirations
+
+    @pytest.mark.asyncio
+    async def test_midnight_placeholder_falls_through_to_unknown(self) -> None:
+        """Boxing midnight placeholder → fallback returns None → state='unknown'."""
+        resolver = GameStatusResolver()
+        ticker = "KXBOXING-26APR12FURYMAKH"
+        resolver.set_expiration(ticker, "2026-04-12T00:00:00Z")
+        status = await resolver.resolve(ticker)
+        assert status.state == "unknown"
+
+    @pytest.mark.asyncio
+    async def test_cached_fallback_returned_by_get(self) -> None:
+        resolver = GameStatusResolver()
+        ticker = "KXAFLGAME-26MAR22NMKWCE"
+        resolver.set_expiration(ticker, "2026-03-22T10:10:00Z")
+        await resolver.resolve(ticker)
+        cached = resolver.get(ticker)
+        assert cached is not None
+        assert cached.state == "pre"
+        assert cached.detail == "~est"

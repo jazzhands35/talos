@@ -115,6 +115,7 @@ class TestGameManager:
             fee_type="quadratic_with_maker_fees",
             fee_rate=0.0175,
             close_time=None,
+            expected_expiration_time=None,
         )
 
     async def test_add_game_subscribes_both_tickers(
