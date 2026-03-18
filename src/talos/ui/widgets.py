@@ -13,7 +13,7 @@ from textual.widgets import DataTable, RichLog, Static
 
 from talos.cpm import format_cpm, format_eta
 from talos.fees import fee_adjusted_cost
-from talos.game_status import GameStatus
+from talos.game_status import ESTIMATED_DETAIL, GameStatus
 from talos.models.position import EventPositionSummary
 from talos.scanner import ArbitrageScanner
 from talos.top_of_market import TopOfMarketTracker
@@ -154,7 +154,7 @@ def _fmt_game_status(status: GameStatus | None) -> RichText:
     # state == "pre"
     if status.scheduled_start is None:
         return DIM_DASH
-    is_estimate = status.detail == "~est"
+    is_estimate = status.detail == ESTIMATED_DETAIL
     prefix = "~" if is_estimate else ""
     now = datetime.now(UTC)
     delta = status.scheduled_start - now

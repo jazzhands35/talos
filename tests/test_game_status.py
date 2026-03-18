@@ -8,6 +8,7 @@ from unittest.mock import AsyncMock
 import pytest
 
 from talos.game_status import (
+    ESTIMATED_DETAIL,
     EspnProvider,
     ExternalGame,
     GameStatus,
@@ -661,14 +662,14 @@ class TestFmtGameStatus:
 
     def test_estimated_far_out_has_tilde_prefix(self) -> None:
         future = datetime.now(UTC) + timedelta(hours=3)
-        gs = GameStatus(state="pre", scheduled_start=future, detail="~est")
+        gs = GameStatus(state="pre", scheduled_start=future, detail=ESTIMATED_DETAIL)
         result = str(_fmt_game_status(gs))
         assert result.startswith("~")
         assert "M" in result  # AM or PM
 
     def test_estimated_imminent_has_tilde_prefix(self) -> None:
         soon = datetime.now(UTC) + timedelta(minutes=10)
-        gs = GameStatus(state="pre", scheduled_start=soon, detail="~est")
+        gs = GameStatus(state="pre", scheduled_start=soon, detail=ESTIMATED_DETAIL)
         result = str(_fmt_game_status(gs))
         assert "~in " in result
 
@@ -731,7 +732,7 @@ class TestResolverExpirationFallback:
         status = await resolver.resolve(ticker)
         assert status.state == "pre"
         assert status.scheduled_start == datetime(2026, 3, 18, 11, 35, tzinfo=UTC)
-        assert status.detail == "~est"
+        assert status.detail == ESTIMATED_DETAIL
 
     @pytest.mark.asyncio
     async def test_unmapped_league_without_expiration_stays_unknown(self) -> None:
@@ -771,7 +772,7 @@ class TestResolverExpirationFallback:
         status = await resolver.resolve(ticker, "COA at SAN (Mar 18)")
         assert status.state == "pre"
         assert status.scheduled_start == datetime(2026, 3, 18, 19, 0, tzinfo=UTC)
-        assert status.detail == "~est"
+        assert status.detail == ESTIMATED_DETAIL
 
     @pytest.mark.asyncio
     async def test_mapped_league_falls_back_on_fetch_error(self) -> None:
@@ -784,7 +785,7 @@ class TestResolverExpirationFallback:
         resolver.set_expiration(ticker, "2026-03-18T22:00:00Z")
         status = await resolver.resolve(ticker, "COA at SAN (Mar 18)")
         assert status.state == "pre"
-        assert status.detail == "~est"
+        assert status.detail == ESTIMATED_DETAIL
 
     @pytest.mark.asyncio
     async def test_expiration_removed_on_game_remove(self) -> None:

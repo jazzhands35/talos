@@ -534,6 +534,8 @@ def _extract_date_from_ticker(event_ticker: str) -> str | None:
 
 # ── Expiration-based start time estimation ────────────────────────
 
+ESTIMATED_DETAIL = "~est"
+
 # Sport-specific offsets: expected_expiration_time = game_start + offset.
 # Research verified across 11 leagues — see brain/expected-expiration-research.md.
 _EXPIRATION_OFFSETS: dict[str, timedelta] = {
@@ -642,9 +644,28 @@ class GameStatusResolver:
             estimated = estimate_start_time(exp_data[0], exp_data[1])
             if estimated is not None:
                 return GameStatus(
-                    state="pre", scheduled_start=estimated, detail="~est"
+                    state="pre", scheduled_start=estimated, detail=ESTIMATED_DETAIL
                 )
         return GameStatus(state="unknown")
+
+    def _resolve_match(
+        self,
+        event_ticker: str,
+        team_codes: tuple[str, str] | None,
+        games: list[ExternalGame],
+    ) -> GameStatus:
+        """Match team codes against games; fall back to expiration estimate."""
+        matched = (
+            self.match_game(team_codes, games)
+            if games and team_codes else None
+        )
+        if matched is not None:
+            return GameStatus(
+                state=matched.state,
+                scheduled_start=matched.scheduled_start,
+                detail=matched.detail,
+            )
+        return self._expiration_fallback(event_ticker)
 
     def _prepare_entry(
         self, event_ticker: str, sub_title: str = ""
@@ -731,18 +752,7 @@ class GameStatusResolver:
                     except Exception:
                         pass
                 for event_ticker, team_codes in event_list:
-                    matched = (
-                        self.match_game(team_codes, all_games)
-                        if all_games and team_codes else None
-                    )
-                    if matched is not None:
-                        status = GameStatus(
-                            state=matched.state,
-                            scheduled_start=matched.scheduled_start,
-                            detail=matched.detail,
-                        )
-                    else:
-                        status = self._expiration_fallback(event_ticker)
+                    status = self._resolve_match(event_ticker, team_codes, all_games)
                     self._cache[event_ticker] = (status, team_codes, prefix)
                     results[event_ticker] = status
                 continue
@@ -768,18 +778,7 @@ class GameStatusResolver:
 
             # Match each event against the fetched games
             for event_ticker, team_codes in event_list:
-                matched = (
-                    self.match_game(team_codes, games)
-                    if games and team_codes else None
-                )
-                if matched is not None:
-                    status = GameStatus(
-                        state=matched.state,
-                        scheduled_start=matched.scheduled_start,
-                        detail=matched.detail,
-                    )
-                else:
-                    status = self._expiration_fallback(event_ticker)
+                status = self._resolve_match(event_ticker, team_codes, games)
                 self._cache[event_ticker] = (status, team_codes, prefix)
                 results[event_ticker] = status
 
