@@ -588,15 +588,20 @@ class TradingEngine:
                             )
                             break
                 except Exception:
-                    pass  # Non-critical — just won't have estimated start
+                    logger.debug(
+                        "backfill_expiration_failed",
+                        event_ticker=pair.event_ticker,
+                    )
 
         await asyncio.gather(*(_fetch(p) for p in pairs))
         count = sum(1 for p in pairs if p.expected_expiration_time)
-        if count:
-            logger.info("backfill_expiration", filled=count, total=len(pairs))
-            # Trigger re-persist so next startup has the data
-            if self._game_manager.on_change:
-                self._game_manager.on_change()
+        missed = len(pairs) - count
+        logger.info(
+            "backfill_expiration", filled=count, missed=missed,
+        )
+        # Trigger re-persist so next startup has the data
+        if count and self._game_manager.on_change:
+            self._game_manager.on_change()
 
     async def refresh_balance(self) -> None:
         """Fetch balance only — fast, independent of order/position sync."""
