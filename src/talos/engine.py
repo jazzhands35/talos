@@ -539,6 +539,13 @@ class TradingEngine:
                         fee_type=pair.fee_type,
                         fee_rate=pair.fee_rate,
                     )
+            # Backfill expected_expiration_time for games from old cache
+            needs_backfill = [
+                p for p in pairs if p.expected_expiration_time is None
+            ]
+            if needs_backfill:
+                await self._backfill_expiration(needs_backfill)
+
             self._initial_games_full = None
             # Only REST-fetch discovered events not already in cache
             all_tickers = [t for t in all_tickers if t not in cached_tickers]
@@ -563,6 +570,29 @@ class TradingEngine:
             ]
             if batch:
                 asyncio.create_task(self._game_status_resolver.resolve_batch(batch))
+
+    async def _backfill_expiration(self, pairs: list[ArbPair]) -> None:
+        """Fetch expected_expiration_time for pairs restored from old cache."""
+        sem = asyncio.Semaphore(10)
+
+        async def _fetch(pair: ArbPair) -> None:
+            async with sem:
+                try:
+                    market = await self._rest.get_market(pair.ticker_a)
+                    if market.expected_expiration_time:
+                        pair.expected_expiration_time = (
+                            market.expected_expiration_time
+                        )
+                except Exception:
+                    pass  # Non-critical — just won't have estimated start
+
+        await asyncio.gather(*(_fetch(p) for p in pairs))
+        count = sum(1 for p in pairs if p.expected_expiration_time)
+        if count:
+            logger.info("backfill_expiration", filled=count, total=len(pairs))
+            # Trigger re-persist so next startup has the data
+            if self._game_manager.on_change:
+                self._game_manager.on_change()
 
     async def refresh_balance(self) -> None:
         """Fetch balance only — fast, independent of order/position sync."""

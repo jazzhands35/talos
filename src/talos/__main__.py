@@ -108,6 +108,7 @@ def main() -> None:
                 "fee_type": p.fee_type,
                 "fee_rate": p.fee_rate,
                 "close_time": p.close_time,
+                "expected_expiration_time": p.expected_expiration_time,
                 "label": game_mgr.labels.get(p.event_ticker, ""),
                 "sub_title": game_mgr.subtitles.get(p.event_ticker, ""),
             }
