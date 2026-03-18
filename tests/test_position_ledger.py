@@ -633,12 +633,14 @@ class TestStaleSyncProtection:
         # evaluate_opportunities running with the verify-synced state.
         # The stale sync can only run in a DIFFERENT concurrent task.
 
-    def test_record_cancel_clears_gen_guard(self):
-        """Explicit cancel should clear the generation guard."""
+    def test_record_cancel_sets_gen_guard(self):
+        """Cancel sets gen guard to protect from stale sync overwrite."""
         ledger = PositionLedger(event_ticker="EVT-1", unit_size=20)
         ledger.record_placement(Side.A, "ord-A", 20, 15)
         ledger.record_cancel(Side.A, "ord-A")
-        assert ledger._sides[Side.A]._placed_at_gen is None
+        # Gen guard is SET (not cleared) so stale sync can't re-populate
+        assert ledger._sides[Side.A]._placed_at_gen is not None
+        assert ledger._sides[Side.A].resting_order_id is None
 
     def test_reset_pair_clears_gen_guard(self):
         """Reset should clear the generation guard."""

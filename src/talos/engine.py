@@ -16,6 +16,7 @@ import structlog
 from talos.automation_config import AutomationConfig
 from talos.bid_adjuster import BidAdjuster
 from talos.cpm import CPMTracker
+from talos.errors import KalshiRateLimitError
 from talos.fees import MAKER_FEE_RATE
 from talos.game_manager import GameManager
 from talos.game_status import GameStatusResolver
@@ -114,6 +115,8 @@ class TradingEngine:
         self._settled_markets: dict[str, dict[str, str]] = {}  # event_ticker -> {ticker: result}
         self._order_placed_at: dict[str, float] = {}  # order_id -> monotonic timestamp
         self._exit_only_events: set[str] = set()  # events in exit-only mode
+        self._game_started_events: set[str] = set()  # events where game is live/final
+        self._last_jump_eval: dict[str, tuple[int, int]] = {}  # ticker -> (book_top, resting)
 
         # Wire portfolio feed callbacks
         if self._portfolio_feed is not None:
@@ -251,9 +254,11 @@ class TradingEngine:
 
         filled_a = ledger.filled_count(Side.A)
         filled_b = ledger.filled_count(Side.B)
+        game_started = event_ticker in self._game_started_events
 
-        if filled_a == filled_b:
-            # Balanced — cancel everything
+        if game_started or filled_a == filled_b:
+            # Game started OR balanced — cancel everything on both sides
+            reason = "game_started" if game_started else "balanced"
             for side in (Side.A, Side.B):
                 order_id = ledger.resting_order_id(side)
                 if order_id is not None:
@@ -264,7 +269,7 @@ class TradingEngine:
                             event_ticker=event_ticker,
                             side=side.value,
                             order_id=order_id,
-                            reason="balanced",
+                            reason=reason,
                         )
                     except Exception:
                         logger.warning(
@@ -367,23 +372,31 @@ class TradingEngine:
 
                 if gs.state == "live":
                     self._exit_only_events.add(event_ticker)
+                    self._game_started_events.add(event_ticker)
                     self._enforce_exit_only_sync(event_ticker)
                     name = self._display_name(event_ticker)
-                    self._notify(f"Exit-only AUTO: {name} (live)", "warning")
+                    self._notify(
+                        f"GAME LIVE: {name} — cancelling all resting", "error", toast=True,
+                    )
                     logger.info(
                         "exit_only_auto_trigger",
                         event_ticker=event_ticker,
                         reason="live",
+                        cancel_all=True,
                     )
                 elif gs.state == "post":
                     self._exit_only_events.add(event_ticker)
+                    self._game_started_events.add(event_ticker)
                     self._enforce_exit_only_sync(event_ticker)
                     name = self._display_name(event_ticker)
-                    self._notify(f"Exit-only AUTO: {name} (FINAL)", "warning")
+                    self._notify(
+                        f"GAME FINAL: {name} — cancelling all resting", "error", toast=True,
+                    )
                     logger.info(
                         "exit_only_auto_trigger",
                         event_ticker=event_ticker,
                         reason="final",
+                        cancel_all=True,
                     )
                 elif (
                     gs.state == "pre"
@@ -430,6 +443,7 @@ class TradingEngine:
                     filled=filled_a,
                 )
                 self._exit_only_events.discard(event_ticker)
+                self._game_started_events.discard(event_ticker)
                 await self.remove_game(event_ticker)
                 continue
 
@@ -769,8 +783,8 @@ class TradingEngine:
     async def refresh_trades(self) -> None:
         """Fetch recent trades for CPM tracking.
 
-        Limits concurrency to 5 parallel requests to avoid spawning
-        hundreds of tasks when the API is slow.
+        Limits concurrency to 5 parallel requests and caps the entire
+        batch at 30s to prevent task storms when the API is slow.
         """
         tickers = self._active_market_tickers()
         if not tickers:
@@ -787,7 +801,15 @@ class TradingEngine:
                     logger.warning("trade_fetch_failed", ticker=ticker, exc_info=True)
                     return None
 
-        results = await asyncio.gather(*[_fetch(t) for t in tickers])
+        try:
+            results = await asyncio.wait_for(
+                asyncio.gather(*[_fetch(t) for t in tickers]),
+                timeout=30.0,
+            )
+        except TimeoutError:
+            logger.warning("refresh_trades_timeout", ticker_count=len(tickers))
+            return
+
         for result in results:
             if result is not None:
                 ticker, trades = result
@@ -1261,6 +1283,9 @@ class TradingEngine:
         from freezing the event loop. The Status column already shows
         jumped state, and proposals handle the response.
         """
+        # Invalidate jump-eval cache — real WS transition, force re-evaluation
+        self._last_jump_eval.pop(ticker, None)
+
         resting = self._tracker.resting_price(ticker)
         evt = self._adjuster.resolve_event(ticker)
         label = self._display_name(evt) if evt else ticker
@@ -1366,6 +1391,14 @@ class TradingEngine:
                         for k in pending_keys
                     )
                     if not has_proposal:
+                        # Skip if book top and resting price haven't changed
+                        # since the last evaluation — same HOLD would result.
+                        book_top = self._tracker.book_top_price(ticker) or 0
+                        resting = self._tracker.resting_price(ticker) or 0
+                        eval_key = (book_top, resting)
+                        if eval_key == self._last_jump_eval.get(ticker):
+                            continue
+                        self._last_jump_eval[ticker] = eval_key
                         self._generate_jump_proposal(ticker)
 
     async def check_imbalances(self) -> None:
@@ -1602,6 +1635,8 @@ class TradingEngine:
                         remaining_count=order.remaining_count,
                         source="auto_accept" if self._auto_config.enabled else "manual",
                     )
+        except KalshiRateLimitError:
+            raise  # Let auto-accept back off
         except Exception as e:
             self._notify(f"Order error: {type(e).__name__}: {e}", "error", toast=True)
             logger.exception("place_bids_error")
@@ -1717,12 +1752,23 @@ class TradingEngine:
         if envelope.kind == "adjustment" and envelope.adjustment is not None:
             try:
                 await self._adjuster.execute(envelope.adjustment, self._rest)
+                # Invalidate jump-eval cache — resting price changed
+                adj_pair = self._find_pair(envelope.adjustment.event_ticker)
+                if adj_pair is not None:
+                    adj_ticker = (
+                        adj_pair.ticker_a
+                        if envelope.adjustment.side == "A"
+                        else adj_pair.ticker_b
+                    )
+                    self._last_jump_eval.pop(adj_ticker, None)
                 adj_name = self._display_name(envelope.adjustment.event_ticker)
                 self._notify(
                     f"Adjusted: {adj_name}"
                     f" {envelope.adjustment.side}"
                     f" \u2192 {envelope.adjustment.new_price}c",
                 )
+            except KalshiRateLimitError:
+                raise  # Let auto-accept back off
             except Exception as e:
                 self._notify(f"Adjustment FAILED: {type(e).__name__}: {e}", "error", toast=True)
                 logger.exception(
@@ -1807,12 +1853,12 @@ class TradingEngine:
         if pair is None:
             return
         try:
-            orders_a = await self._rest.get_orders(ticker=pair.ticker_a, limit=200)
-            orders_b = await self._rest.get_orders(ticker=pair.ticker_b, limit=200)
-            orders = orders_a + orders_b
+            orders = await self._rest.get_all_orders(event_ticker=event_ticker)
             ledger = self._adjuster.get_ledger(event_ticker)
             ledger.sync_from_orders(orders, ticker_a=pair.ticker_a, ticker_b=pair.ticker_b)
-            positions = await self._rest.get_positions(limit=200)
+            positions = await self._rest.get_positions(
+                event_ticker=event_ticker, limit=200,
+            )
             pos_map = {p.ticker: p for p in positions}
             pos_a = pos_map.get(pair.ticker_a)
             pos_b = pos_map.get(pair.ticker_b)
@@ -1832,7 +1878,14 @@ class TradingEngine:
                 committed_b=ledger.total_committed(Side.B),
                 delta=ledger.current_delta(),
             )
-        except Exception:
+        except KalshiRateLimitError:
+            # Verify is non-critical — the action already succeeded and the
+            # 30s polling cycle will sync. Don't alarm the operator.
+            logger.debug(
+                "post_action_verify_rate_limited",
+                event_ticker=event_ticker,
+            )
+        except Exception as e:
             logger.warning(
                 "post_action_verify_failed",
                 event_ticker=event_ticker,
@@ -1840,7 +1893,7 @@ class TradingEngine:
             )
             name = self._display_name(event_ticker)
             self._notify(
-                f"Verify FAILED for {name} — position data may be stale",
+                f"Verify FAILED for {name} ({type(e).__name__}) — position data may be stale",
                 "warning",
                 toast=True,
             )

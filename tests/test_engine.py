@@ -312,9 +312,10 @@ class TestPolling:
     @pytest.mark.asyncio
     async def test_refresh_account_syncs_ledger(self):
         engine, rest = _engine_with_pair()
-        # Use resting-only orders — empty ledger matches (no fills)
+        # Both sides resting — balanced so rebalance doesn't cancel
         orders = [
             _make_order("TK-A", order_id="ord-a", fill_count=0, remaining_count=10, no_price=45),
+            _make_order("TK-B", order_id="ord-b", fill_count=0, remaining_count=10, no_price=48),
         ]
         rest.get_balance.return_value = Balance(balance=1000, portfolio_value=1000)
         rest.get_all_orders.return_value = orders
@@ -866,15 +867,15 @@ class TestCheckImbalances:
         engine.proposal_queue.add(proposal)
 
         rest.cancel_order = AsyncMock()
-        # Verification sync happens after step 1 (per-ticker fetches)
-        rest.get_orders = AsyncMock(return_value=[])
+        # Verification sync happens after action (single event-scoped fetch)
+        rest.get_all_orders = AsyncMock(return_value=[])
         rest.get_positions = AsyncMock(return_value=[])
 
         await engine.approve_proposal(key)
 
         rest.cancel_order.assert_called_once_with("ord-a")
         # Post-action verification did run
-        assert rest.get_orders.call_count == 2  # one per ticker
+        rest.get_all_orders.assert_called_once()
         rest.get_positions.assert_called_once()
 
     @pytest.mark.asyncio
@@ -914,7 +915,7 @@ class TestCheckImbalances:
 
         rest.cancel_order = AsyncMock()
         # Verify fails — API unreachable after action
-        rest.get_orders = AsyncMock(side_effect=RuntimeError("API down"))
+        rest.get_all_orders = AsyncMock(side_effect=RuntimeError("API down"))
 
         notifications: list[tuple[str, str]] = []
         engine.on_notification = lambda msg, sev, toast=False: notifications.append((msg, sev))

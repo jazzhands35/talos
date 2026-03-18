@@ -281,6 +281,35 @@ class TestComputeRebalanceProposal:
         assert result.rebalance is not None
         assert result.rebalance.catchup_qty == 30  # full gap: 50 - 20
 
+    def test_catchup_skipped_when_unprofitable(self):
+        """Catch-up is omitted from proposal when arb is unprofitable after fees.
+
+        Regression test: prevents the catch-up BLOCKED spam where every cycle
+        proposes a catch-up that immediately fails the P18 profitability gate.
+        The cancel step (step 1) is still included — only catch-up is omitted.
+        """
+        pair = _make_pair()
+        ledger = PositionLedger(event_ticker="EVT-1", unit_size=20)
+        # Over-side (A) has fills at expensive price 55 + resting to cancel
+        ledger.record_fill(Side.A, 20, 55)
+        ledger.record_resting(Side.A, "ord-a", 10, 55)
+        # Under-side (B) has fills at 48
+        ledger.record_fill(Side.B, 15, 48)
+        # Snapshot offers B at 48 — arb: fee_adj(48) + fee_adj(55) ≈ 103.87 >= 100
+        snapshot = _make_snapshot(no_a=55, no_b=48)
+
+        result = compute_rebalance_proposal(
+            "EVT-1", ledger, pair, snapshot, "Test", _books_with_data(no_a=55, no_b=48)
+        )
+        assert result is not None
+        assert result.rebalance is not None
+        # Cancel step is present (reduce over-side resting)
+        assert result.rebalance.current_resting == 10
+        assert result.rebalance.target_resting == 0
+        # Catch-up is omitted (unprofitable)
+        assert result.rebalance.catchup_qty == 0
+        assert result.rebalance.catchup_ticker is None
+
     def test_catchup_full_gap_not_capped(self):
         """Catch-up quantity is the full gap, not capped at unit_size."""
         pair = _make_pair()
@@ -795,6 +824,23 @@ class TestTopUpDetection:
         ledger = PositionLedger(event_ticker="EVT-1", unit_size=20)
         ledger.record_fill(Side.A, 30, 45)
         ledger.record_fill(Side.B, 15, 48)
+        snapshot = _make_snapshot(no_a=45, no_b=48)
+        result = compute_topup_needs(ledger, pair, snapshot)
+        assert result == {}
+
+    def test_onesided_topup_blocked_when_would_create_imbalance(self):
+        """One-sided top-up that would make this side over-committed is blocked.
+
+        Regression test for cancel→top-up→cancel thrashing loop:
+        State: A has 4 filled + 8 resting (committed=12), B has 12 filled + 0 resting.
+        Top-up B by 8 would bring committed_b to 20 > committed_a 12,
+        which rebalance would immediately cancel — infinite loop.
+        """
+        pair = _make_pair()
+        ledger = PositionLedger(event_ticker="EVT-1", unit_size=20)
+        ledger.record_fill(Side.A, 4, 45)
+        ledger.record_resting(Side.A, "ord-a", 8, 45)
+        ledger.record_fill(Side.B, 12, 48)
         snapshot = _make_snapshot(no_a=45, no_b=48)
         result = compute_topup_needs(ledger, pair, snapshot)
         assert result == {}

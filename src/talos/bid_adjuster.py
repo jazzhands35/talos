@@ -358,14 +358,20 @@ class BidAdjuster:
         side = Side(proposal.side)
         ledger = self._ledgers[proposal.event_ticker]
 
-        # Staleness check: verify the proposal's order still matches ledger state
+        # Staleness check: verify the proposal's order still matches ledger state.
+        # Silently dismiss if stale — this commonly happens when rebalance
+        # cancelled the order between proposal creation and execution.
         current_resting = ledger.resting_order_id(side)
         if current_resting != proposal.cancel_order_id:
-            self.clear_proposal(proposal.event_ticker, side)
-            raise ValueError(
-                f"Stale proposal: expected resting order {proposal.cancel_order_id}, "
-                f"but ledger has {current_resting}"
+            logger.info(
+                "adjustment_stale_dismissed",
+                event_ticker=proposal.event_ticker,
+                side=side.value,
+                expected=proposal.cancel_order_id,
+                actual=current_resting,
             )
+            self.clear_proposal(proposal.event_ticker, side)
+            return
 
         # Find the ticker for this side
         ticker = self._side_ticker(proposal.event_ticker, side)
@@ -377,6 +383,17 @@ class BidAdjuster:
             proposal.cancel_order_id,
         )
         total_count = fresh_order.fill_count + fresh_order.remaining_count
+
+        # Skip if the order is already at the target price (avoids AMEND_ORDER_NO_OP)
+        if fresh_order.no_price == proposal.new_price:
+            logger.info(
+                "adjustment_already_at_target",
+                event_ticker=proposal.event_ticker,
+                side=side.value,
+                price=proposal.new_price,
+            )
+            self.clear_proposal(proposal.event_ticker, side)
+            return
 
         logger.info(
             "adjustment_amend",

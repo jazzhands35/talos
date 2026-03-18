@@ -136,6 +136,17 @@ class PositionLedger:
     def both_sides_complete(self) -> bool:
         return self.is_unit_complete(Side.A) and self.is_unit_complete(Side.B)
 
+    def has_pending_change(self) -> bool:
+        """True if either side has an unconfirmed placement or cancel.
+
+        When set, the ledger's resting state may not match Kalshi's actual
+        state. Callers should wait for sync confirmation before acting.
+        """
+        return (
+            self._sides[Side.A]._placed_at_gen is not None
+            or self._sides[Side.B]._placed_at_gen is not None
+        )
+
     # ── Safety gate ─────────────────────────────────────────────────
 
     def is_placement_safe(
@@ -223,14 +234,32 @@ class PositionLedger:
         s._placed_at_gen = self._sync_gen
 
     def record_cancel(self, side: Side, order_id: str) -> None:
-        """Record an order cancellation."""
+        """Record an order cancellation.
+
+        Sets _placed_at_gen so the stale-sync guard in sync_from_orders
+        won't overwrite the cancel with stale API data that still shows
+        the order as resting (Kalshi's eventual consistency).
+        """
         s = self._sides[side]
         if s.resting_order_id != order_id:
             raise ValueError(f"order_id mismatch: expected {s.resting_order_id}, got {order_id}")
         s.resting_order_id = None
         s.resting_count = 0
         s.resting_price = 0
-        s._placed_at_gen = None
+        # Protect through the NEXT cycle's sync — cancel happens after
+        # bump_sync_gen in the current cycle, so sync_gen is already N.
+        # The next cycle bumps to N+1; we need N+1 >= N+1 to hold.
+        s._placed_at_gen = self._sync_gen + 1
+
+    def mark_side_pending(self, side: Side) -> None:
+        """Mark a side as having an unconfirmed change (stale-sync guard).
+
+        Use when a cancel succeeded on Kalshi but record_cancel can't match
+        the order_id (e.g., WS updated the ledger during the await). The
+        resting state is uncertain — protect from stale sync overwrite and
+        block new bids until the next confirmed sync.
+        """
+        self._sides[side]._placed_at_gen = self._sync_gen + 1
 
     def reset_pair(self) -> None:
         """Clear state after both sides complete. Ready for next pair."""
@@ -290,6 +319,22 @@ class PositionLedger:
             # Resting: trust orders API. Sum across multiple orders.
             resting_list = kalshi_resting[side]
             if resting_list:
+                # Stale-sync guard: if a cancel was recorded during the current
+                # sync gen (resting_order_id is None but API still shows resting),
+                # the API response predates the cancel. Skip to avoid overwriting.
+                if (
+                    s._placed_at_gen is not None
+                    and s._placed_at_gen >= self._sync_gen
+                    and s.resting_order_id is None
+                ):
+                    logger.info(
+                        "stale_sync_resting_skipped",
+                        event_ticker=self.event_ticker,
+                        side=side.value,
+                        placed_gen=s._placed_at_gen,
+                        sync_gen=self._sync_gen,
+                    )
+                    continue
                 total_resting = sum(cnt for _, cnt, _ in resting_list)
                 s.resting_order_id = resting_list[0][0]
                 s.resting_count = total_resting

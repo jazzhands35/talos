@@ -118,6 +118,18 @@ def compute_rebalance_proposal(
             catchup_qty = 0  # Can't determine price — skip catch-up
             catchup_ticker = None
 
+        # Pre-check P18 profitability — skip catch-up if the arb can't
+        # possibly be profitable.  The execution-time check in
+        # execute_rebalance() remains as a safety net with fresh data.
+        if catchup_qty > 0:
+            ok, _ = ledger.is_placement_safe(
+                under, catchup_qty, catchup_price,
+                rate=pair.fee_rate, catchup=True,
+            )
+            if not ok:
+                catchup_qty = 0
+                catchup_ticker = None
+
     # Build step descriptions for the detail text
     steps: list[str] = []
     if reduce_by > 0:
@@ -225,6 +237,16 @@ def compute_topup_needs(
             continue
         needs[side] = (qty, price)
 
+    # Guard: if only ONE side would be topped up, verify it won't create
+    # a committed delta that rebalance immediately cancels (thrashing loop).
+    # Two-sided top-ups are safe — they balance each other.
+    if len(needs) == 1:
+        side = next(iter(needs))
+        qty, _ = needs[side]
+        other = Side.B if side == Side.A else Side.A
+        if ledger.total_committed(side) + qty > ledger.total_committed(other):
+            return {}
+
     return needs
 
 
@@ -256,6 +278,19 @@ async def execute_rebalance(
             assert rebalance.ticker is not None
             if rebalance.target_resting == 0:
                 await rest_client.cancel_order(rebalance.order_id)
+                # Update ledger immediately so next cycle doesn't re-cancel
+                try:
+                    ledger = adjuster.get_ledger(rebalance.event_ticker)
+                    try:
+                        ledger.record_cancel(
+                            Side(rebalance.side), rebalance.order_id
+                        )
+                    except ValueError:
+                        # Order_id mismatch (WS updated ledger during await).
+                        # Still set the gen guard to block stale syncs + new bids.
+                        ledger.mark_side_pending(Side(rebalance.side))
+                except KeyError:
+                    pass  # Ledger missing — sync will fix
                 notify(
                     f"Rebalance step 1: cancelled {rebalance.current_resting}"
                     f" resting on {rebalance.side} ({rebalance.ticker})",
@@ -282,6 +317,17 @@ async def execute_rebalance(
                         rebalance.order_id,
                         reduce_to=rebalance.target_resting,
                     )
+                    # Update ledger so next cycle sees reduced count
+                    try:
+                        ledger = adjuster.get_ledger(rebalance.event_ticker)
+                        ledger.record_resting(
+                            Side(rebalance.side),
+                            rebalance.order_id,
+                            rebalance.target_resting,
+                            rebalance.resting_price,
+                        )
+                    except KeyError:
+                        pass
                     notify(
                         f"Rebalance step 1: {rebalance.side} resting"
                         f" {fresh_order.remaining_count}"
@@ -332,18 +378,23 @@ async def execute_rebalance(
             return
 
         try:
-            orders = await rest_client.get_all_orders()
+            orders = await rest_client.get_all_orders(
+                event_ticker=rebalance.event_ticker,
+            )
             ledger = adjuster.get_ledger(rebalance.event_ticker)
             ledger.sync_from_orders(
                 orders, ticker_a=pair.ticker_a, ticker_b=pair.ticker_b
             )
-        except Exception:
+        except Exception as e:
             logger.warning(
                 "rebalance_fresh_sync_failed",
                 event_ticker=rebalance.event_ticker,
                 exc_info=True,
             )
-            notify("Catch-up BLOCKED: fresh sync failed", "error")
+            notify(
+                f"Catch-up BLOCKED: fresh sync failed ({type(e).__name__})",
+                "error",
+            )
             return
 
         # Re-check with fresh data — recalculate qty

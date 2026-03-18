@@ -157,19 +157,23 @@ class TestPositionGate:
         result = proposer.evaluate(pair, opp, ledger, set(), now=now)
         assert result is None
 
-    def test_one_side_empty_proposes(self) -> None:
+    def test_one_side_empty_blocked_by_committed_delta(self) -> None:
+        """Asymmetric resting (A=5, B=0) creates committed delta — bid blocked.
+
+        Placing equal qty on both sides preserves the delta, and the old
+        resting on A becomes orphaned on Kalshi, causing rebalance thrashing.
+        """
         cfg = AutomationConfig(edge_threshold_cents=1.0, stability_seconds=0)
         proposer = OpportunityProposer(cfg)
         pair = _make_pair()
         opp = _make_opp(fee_edge=2.0)
         ledger = PositionLedger("EVT-1", unit_size=10)
         ledger.record_resting(Side.A, "ord-a", 5, 48)
-        # Side B is empty
+        # Side B is empty → committed_a=5, committed_b=0 → blocked
         now = datetime.now(UTC)
 
         result = proposer.evaluate(pair, opp, ledger, set(), now=now)
-        assert result is not None
-        assert result.kind == "bid"
+        assert result is None
 
 
 # ── Stability Filter ───────────────────────────────────────────────

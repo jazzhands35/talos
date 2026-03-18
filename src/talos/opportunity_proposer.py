@@ -71,6 +71,18 @@ class OpportunityProposer:
             self._stable_since.pop(event, None)
             return None
 
+        # Gate 2a: fill-delta gate — don't place equal bids when fills are imbalanced.
+        # Placing on both sides creates a committed delta that rebalance immediately
+        # cancels, wasting API calls. Let catch-up close the fill gap first.
+        if ledger.filled_count(Side.A) != ledger.filled_count(Side.B):
+            return None
+
+        # Gate 2b: pending-change gate — don't bid while a cancel or placement
+        # hasn't been confirmed by Kalshi sync. Prevents orphaned orders where
+        # the old order survives on Kalshi alongside the new one.
+        if ledger.has_pending_change():
+            return None
+
         # Gate 2: position gate — skip if both sides are covered for the current unit
         if ledger.both_sides_complete() and ledger.filled_count(Side.A) == ledger.filled_count(
             Side.B
@@ -128,6 +140,21 @@ class OpportunityProposer:
             qty = min(need_a, need_b)
             if qty <= 0:
                 return None
+
+        # Gate 6: per-side profitability — don't propose if either side would
+        # fail is_placement_safe (prevents "Bid BLOCKED" spam from place_bids).
+        for side, price in [(Side.A, opportunity.no_a), (Side.B, opportunity.no_b)]:
+            ok, _ = ledger.is_placement_safe(
+                side, qty, price, rate=pair.fee_rate,
+            )
+            if not ok:
+                return None
+
+        # Gate 7: committed-delta — don't place equal bids when committed counts
+        # are already unequal. Placement adds equal qty to both sides, so any
+        # pre-existing delta persists and rebalance immediately cancels one side.
+        if ledger.total_committed(Side.A) != ledger.total_committed(Side.B):
+            return None
 
         bid = ProposedBid(
             event_ticker=event,
