@@ -159,7 +159,7 @@ def _fmt_game_status(status: GameStatus | None) -> RichText:
     now = datetime.now(UTC)
     delta = status.scheduled_start - now
     minutes_left = int(delta.total_seconds() / 60)
-    if minutes_left <= 15:
+    if 0 < minutes_left <= 15:
         return RichText(f"{prefix}in {minutes_left}m", style=YELLOW, justify="right")
     pt = status.scheduled_start.astimezone(_PT)
     time_str = pt.strftime("%I:%M %p").lstrip("0")  # Windows-compatible, no leading zero

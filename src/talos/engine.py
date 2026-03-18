@@ -578,11 +578,15 @@ class TradingEngine:
         async def _fetch(pair: ArbPair) -> None:
             async with sem:
                 try:
-                    market = await self._rest.get_market(pair.ticker_a)
-                    if market.expected_expiration_time:
-                        pair.expected_expiration_time = (
-                            market.expected_expiration_time
-                        )
+                    event = await self._rest.get_event(
+                        pair.event_ticker, with_nested_markets=True
+                    )
+                    for m in event.markets:
+                        if m.expected_expiration_time:
+                            pair.expected_expiration_time = (
+                                m.expected_expiration_time
+                            )
+                            break
                 except Exception:
                     pass  # Non-critical — just won't have estimated start
 
