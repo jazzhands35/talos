@@ -741,8 +741,8 @@ class TestResolverExpirationFallback:
         assert status.state == "unknown"
 
     @pytest.mark.asyncio
-    async def test_mapped_league_ignores_expiration(self) -> None:
-        """NHL game uses ESPN, not expiration fallback, even if expiration is set."""
+    async def test_mapped_league_uses_provider_when_matched(self) -> None:
+        """NHL game uses ESPN when provider matches, not expiration fallback."""
         mock_provider = AsyncMock()
         mock_provider.fetch_games.return_value = [
             ExternalGame(
@@ -758,6 +758,33 @@ class TestResolverExpirationFallback:
         resolver.set_expiration(ticker, "2026-03-14T22:00:00Z")
         status = await resolver.resolve(ticker, "BOS at NYR (Mar 14)")
         assert status.state == "live"  # From ESPN, not fallback
+
+    @pytest.mark.asyncio
+    async def test_mapped_league_falls_back_when_no_match(self) -> None:
+        """AHL game with no provider match uses expiration fallback."""
+        mock_provider = AsyncMock()
+        mock_provider.fetch_games.return_value = []  # No games returned
+        resolver = GameStatusResolver()
+        resolver._providers["odds-api"] = mock_provider
+        ticker = "KXAHLGAME-26MAR18COASAN"
+        resolver.set_expiration(ticker, "2026-03-18T22:00:00Z")
+        status = await resolver.resolve(ticker, "COA at SAN (Mar 18)")
+        assert status.state == "pre"
+        assert status.scheduled_start == datetime(2026, 3, 18, 19, 0, tzinfo=UTC)
+        assert status.detail == "~est"
+
+    @pytest.mark.asyncio
+    async def test_mapped_league_falls_back_on_fetch_error(self) -> None:
+        """Provider throws → expiration fallback activates."""
+        mock_provider = AsyncMock()
+        mock_provider.fetch_games.side_effect = Exception("API down")
+        resolver = GameStatusResolver()
+        resolver._providers["odds-api"] = mock_provider
+        ticker = "KXAHLGAME-26MAR18COASAN"
+        resolver.set_expiration(ticker, "2026-03-18T22:00:00Z")
+        status = await resolver.resolve(ticker, "COA at SAN (Mar 18)")
+        assert status.state == "pre"
+        assert status.detail == "~est"
 
     @pytest.mark.asyncio
     async def test_expiration_removed_on_game_remove(self) -> None:

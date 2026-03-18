@@ -635,6 +635,17 @@ class GameStatusResolver:
             prefix = event_ticker.split("-")[0]
             self._expirations[event_ticker] = (expected_expiration_time, prefix)
 
+    def _expiration_fallback(self, event_ticker: str) -> GameStatus:
+        """Try expiration-based start estimate; return unknown if unavailable."""
+        exp_data = self._expirations.get(event_ticker)
+        if exp_data is not None:
+            estimated = estimate_start_time(exp_data[0], exp_data[1])
+            if estimated is not None:
+                return GameStatus(
+                    state="pre", scheduled_start=estimated, detail="~est"
+                )
+        return GameStatus(state="unknown")
+
     def _prepare_entry(
         self, event_ticker: str, sub_title: str = ""
     ) -> tuple[str, str, str, tuple[str, str] | None, str] | None:
@@ -645,20 +656,12 @@ class GameStatusResolver:
         prefix = event_ticker.split("-")[0]
         source = SOURCE_MAP.get(prefix)
         if source is None and prefix not in TENNIS_SERIES:
-            # Fallback: use expiration-based estimated start time
-            exp_data = self._expirations.get(event_ticker)
-            if exp_data is not None:
-                estimated = estimate_start_time(exp_data[0], exp_data[1])
-                if estimated is not None:
-                    status = GameStatus(
-                        state="pre", scheduled_start=estimated, detail="~est"
-                    )
-                    self._cache[event_ticker] = (status, None, "")
-                    return None
-            logger.warning(
-                "unmapped_series_ticker", prefix=prefix, ticker=event_ticker
-            )
-            self._cache[event_ticker] = (GameStatus(state="unknown"), None, "")
+            status = self._expiration_fallback(event_ticker)
+            if status.state == "unknown":
+                logger.warning(
+                    "unmapped_series_ticker", prefix=prefix, ticker=event_ticker
+                )
+            self._cache[event_ticker] = (status, None, "")
             return None
 
         if source is not None:
@@ -728,18 +731,18 @@ class GameStatusResolver:
                     except Exception:
                         pass
                 for event_ticker, team_codes in event_list:
-                    if not all_games or team_codes is None:
-                        status = GameStatus(state="unknown")
+                    matched = (
+                        self.match_game(team_codes, all_games)
+                        if all_games and team_codes else None
+                    )
+                    if matched is not None:
+                        status = GameStatus(
+                            state=matched.state,
+                            scheduled_start=matched.scheduled_start,
+                            detail=matched.detail,
+                        )
                     else:
-                        matched = self.match_game(team_codes, all_games)
-                        if matched is None:
-                            status = GameStatus(state="unknown")
-                        else:
-                            status = GameStatus(
-                                state=matched.state,
-                                scheduled_start=matched.scheduled_start,
-                                detail=matched.detail,
-                            )
+                        status = self._expiration_fallback(event_ticker)
                     self._cache[event_ticker] = (status, team_codes, prefix)
                     results[event_ticker] = status
                 continue
@@ -758,25 +761,25 @@ class GameStatusResolver:
                 logger.warning("batch_fetch_failed", prefix=prefix)
                 for event_ticker, team_codes in event_list:
                     if event_ticker not in self._cache:
-                        status = GameStatus(state="unknown")
+                        status = self._expiration_fallback(event_ticker)
                         self._cache[event_ticker] = (status, team_codes, prefix)
                         results[event_ticker] = status
                 continue
 
             # Match each event against the fetched games
             for event_ticker, team_codes in event_list:
-                if not games or team_codes is None:
-                    status = GameStatus(state="unknown")
+                matched = (
+                    self.match_game(team_codes, games)
+                    if games and team_codes else None
+                )
+                if matched is not None:
+                    status = GameStatus(
+                        state=matched.state,
+                        scheduled_start=matched.scheduled_start,
+                        detail=matched.detail,
+                    )
                 else:
-                    matched = self.match_game(team_codes, games)
-                    if matched is None:
-                        status = GameStatus(state="unknown")
-                    else:
-                        status = GameStatus(
-                            state=matched.state,
-                            scheduled_start=matched.scheduled_start,
-                            detail=matched.detail,
-                        )
+                    status = self._expiration_fallback(event_ticker)
                 self._cache[event_ticker] = (status, team_codes, prefix)
                 results[event_ticker] = status
 
