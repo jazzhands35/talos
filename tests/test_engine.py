@@ -874,8 +874,9 @@ class TestCheckImbalances:
         await engine.approve_proposal(key)
 
         rest.cancel_order.assert_called_once_with("ord-a")
-        # Post-action verification did run
-        rest.get_all_orders.assert_called_once()
+        # Post-action verification did run (get_all_orders called for
+        # both orphan sweep in _cancel_all_resting and _verify_after_action)
+        assert rest.get_all_orders.call_count == 2
         rest.get_positions.assert_called_once()
 
     @pytest.mark.asyncio
