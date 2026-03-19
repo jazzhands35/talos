@@ -302,11 +302,12 @@ async def execute_rebalance(
                     ledger.mark_side_pending(Side(rebalance.side))
                 except KeyError:
                     pass  # Ledger missing — sync will fix
-                notify(
-                    f"Rebalance step 1: cancelled {cancelled_count}"
-                    f" resting on {rebalance.side} ({rebalance.ticker})",
-                    "information",
-                )
+                if cancelled_count > 0:
+                    notify(
+                        f"Rebalance step 1: cancelled {cancelled_count}"
+                        f" resting on {rebalance.side} ({rebalance.ticker})",
+                        "information",
+                    )
             else:
                 # Use decrease_order for quantity-only reductions (preserves
                 # queue position, simpler semantics than amend).

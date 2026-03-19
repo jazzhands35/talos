@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import structlog
 
+from talos.errors import KalshiAPIError
 from talos.fees import MAKER_FEE_RATE, fee_adjusted_cost
 from talos.models.adjustment import ProposedAdjustment
 from talos.models.strategy import ArbPair
@@ -379,9 +380,23 @@ class BidAdjuster:
         # Fetch the ORDER's own state — amend needs order-specific fill_count,
         # not the ledger aggregate which includes archived orders (P7/P21).
         # See patterns.md "Order-specific APIs need order-specific data".
-        fresh_order = await rest_client.get_order(  # type: ignore[attr-defined]
-            proposal.cancel_order_id,
-        )
+        try:
+            fresh_order = await rest_client.get_order(  # type: ignore[attr-defined]
+                proposal.cancel_order_id,
+            )
+        except KalshiAPIError as e:
+            if e.status_code == 404:
+                # Order no longer exists — cancelled or settled between
+                # proposal creation and execution. Silently dismiss.
+                logger.info(
+                    "adjustment_order_gone",
+                    event_ticker=proposal.event_ticker,
+                    side=side.value,
+                    order_id=proposal.cancel_order_id,
+                )
+                self.clear_proposal(proposal.event_ticker, side)
+                return
+            raise
         total_count = fresh_order.fill_count + fresh_order.remaining_count
 
         # Skip if the order is already at the target price (avoids AMEND_ORDER_NO_OP)
