@@ -46,12 +46,16 @@ logger = structlog.get_logger()
 
 
 def _merge_queue(existing: int | None, incoming: int) -> int:
-    """Conservative queue position merge — keep smallest positive value."""
+    """Conservative queue position merge — keep smallest non-negative value.
+
+    Queue position 0 = front of queue (0 preceding shares). Negative values
+    are defensive guards only — the API should never return them.
+    """
     if existing is None:
         return incoming
-    if incoming <= 0 < existing:
+    if incoming < 0:
         return existing
-    if existing <= 0 < incoming:
+    if existing < 0:
         return incoming
     return min(existing, incoming)
 
@@ -376,7 +380,9 @@ class TradingEngine:
                     self._enforce_exit_only_sync(event_ticker)
                     name = self._display_name(event_ticker)
                     self._notify(
-                        f"GAME LIVE: {name} — cancelling all resting", "error", toast=True,
+                        f"GAME LIVE: {name} — cancelling all resting",
+                        "error",
+                        toast=True,
                     )
                     logger.info(
                         "exit_only_auto_trigger",
@@ -390,7 +396,9 @@ class TradingEngine:
                     self._enforce_exit_only_sync(event_ticker)
                     name = self._display_name(event_ticker)
                     self._notify(
-                        f"GAME FINAL: {name} — cancelling all resting", "error", toast=True,
+                        f"GAME FINAL: {name} — cancelling all resting",
+                        "error",
+                        toast=True,
                     )
                     logger.info(
                         "exit_only_auto_trigger",
@@ -554,9 +562,7 @@ class TradingEngine:
                         fee_rate=pair.fee_rate,
                     )
             # Backfill expected_expiration_time for games from old cache
-            needs_backfill = [
-                p for p in pairs if p.expected_expiration_time is None
-            ]
+            needs_backfill = [p for p in pairs if p.expected_expiration_time is None]
             if needs_backfill:
                 await self._backfill_expiration(needs_backfill)
 
@@ -592,14 +598,10 @@ class TradingEngine:
         async def _fetch(pair: ArbPair) -> None:
             async with sem:
                 try:
-                    event = await self._rest.get_event(
-                        pair.event_ticker, with_nested_markets=True
-                    )
+                    event = await self._rest.get_event(pair.event_ticker, with_nested_markets=True)
                     for m in event.markets:
                         if m.expected_expiration_time:
-                            pair.expected_expiration_time = (
-                                m.expected_expiration_time
-                            )
+                            pair.expected_expiration_time = m.expected_expiration_time
                             break
                 except Exception:
                     logger.debug(
@@ -611,7 +613,9 @@ class TradingEngine:
         count = sum(1 for p in pairs if p.expected_expiration_time)
         missed = len(pairs) - count
         logger.info(
-            "backfill_expiration", filled=count, missed=missed,
+            "backfill_expiration",
+            filled=count,
+            missed=missed,
         )
         # Trigger re-persist so next startup has the data
         if count and self._game_manager.on_change:
@@ -665,7 +669,7 @@ class TradingEngine:
                 if tickers:
                     new_qp = await self._rest.get_queue_positions(market_tickers=tickers)
                     for oid, qp in new_qp.items():
-                        if qp > 0:
+                        if qp >= 0:
                             self._queue_cache[oid] = _merge_queue(self._queue_cache.get(oid), qp)
             except Exception:
                 logger.debug("queue_positions_fetch_failed")
@@ -769,7 +773,7 @@ class TradingEngine:
                 return
             new_qp = await self._rest.get_queue_positions(market_tickers=tickers)
             for oid, qp in new_qp.items():
-                if qp > 0:
+                if qp >= 0:
                     self._queue_cache[oid] = _merge_queue(self._queue_cache.get(oid), qp)
         except Exception:
             logger.debug("queue_poll_failed")
@@ -1441,9 +1445,7 @@ class TradingEngine:
                 if not self.is_exit_only(pair.event_ticker):
                     topup_needs = compute_topup_needs(ledger, pair, snapshot)
                     for side, (qty, price) in topup_needs.items():
-                        ok, reason = ledger.is_placement_safe(
-                            side, qty, price, rate=pair.fee_rate
-                        )
+                        ok, reason = ledger.is_placement_safe(side, qty, price, rate=pair.fee_rate)
                         if not ok:
                             self._notify(
                                 f"Top-up BLOCKED ({side.value}): {reason}",
@@ -1464,8 +1466,7 @@ class TradingEngine:
                                 order_group_id=group,
                             )
                             self._notify(
-                                f"Top-up {pair.event_ticker} {side.value}:"
-                                f" {qty} @ {price}c",
+                                f"Top-up {pair.event_ticker} {side.value}: {qty} @ {price}c",
                                 "information",
                             )
                             logger.info(
@@ -1477,8 +1478,7 @@ class TradingEngine:
                             )
                         except Exception as e:
                             self._notify(
-                                f"Top-up FAILED ({side.value}):"
-                                f" {type(e).__name__}: {e}",
+                                f"Top-up FAILED ({side.value}): {type(e).__name__}: {e}",
                                 "error",
                             )
                             logger.exception(
@@ -1539,7 +1539,9 @@ class TradingEngine:
         evt_for_bid = self._adjuster.resolve_event(bid.ticker_a)
         if evt_for_bid and self.is_exit_only(evt_for_bid):
             label = self._display_name(evt_for_bid)
-            self._notify(f"Bid BLOCKED {label}: exit-only mode (press E to disable)", "error", toast=True)
+            self._notify(
+                f"Bid BLOCKED {label}: exit-only mode (press E to disable)", "error", toast=True
+            )
             logger.error("bid_blocked_exit_only", event_ticker=evt_for_bid)
             return
 
@@ -1563,7 +1565,9 @@ class TradingEngine:
                 ok, reason = ledger.is_placement_safe(side, bid.qty, price, rate=fee_rate)
                 if not ok:
                     name = self._display_name(ledger.event_ticker)
-                    self._notify(f"Bid BLOCKED {name} (side {side.value}): {reason}", "error", toast=True)
+                    self._notify(
+                        f"Bid BLOCKED {name} (side {side.value}): {reason}", "error", toast=True
+                    )
                     logger.error(
                         "bid_blocked_safety_gate",
                         event_ticker=ledger.event_ticker,
@@ -1756,9 +1760,7 @@ class TradingEngine:
                 adj_pair = self._find_pair(envelope.adjustment.event_ticker)
                 if adj_pair is not None:
                     adj_ticker = (
-                        adj_pair.ticker_a
-                        if envelope.adjustment.side == "A"
-                        else adj_pair.ticker_b
+                        adj_pair.ticker_a if envelope.adjustment.side == "A" else adj_pair.ticker_b
                     )
                     self._last_jump_eval.pop(adj_ticker, None)
                 adj_name = self._display_name(envelope.adjustment.event_ticker)
@@ -1857,7 +1859,8 @@ class TradingEngine:
             ledger = self._adjuster.get_ledger(event_ticker)
             ledger.sync_from_orders(orders, ticker_a=pair.ticker_a, ticker_b=pair.ticker_b)
             positions = await self._rest.get_positions(
-                event_ticker=event_ticker, limit=200,
+                event_ticker=event_ticker,
+                limit=200,
             )
             pos_map = {p.ticker: p for p in positions}
             pos_a = pos_map.get(pair.ticker_a)

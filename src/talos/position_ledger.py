@@ -154,7 +154,12 @@ class PositionLedger:
     # ── Safety gate ─────────────────────────────────────────────────
 
     def is_placement_safe(
-        self, side: Side, count: int, price: int, *, rate: float = MAKER_FEE_RATE,
+        self,
+        side: Side,
+        count: int,
+        price: int,
+        *,
+        rate: float = MAKER_FEE_RATE,
         catchup: bool = False,
     ) -> tuple[bool, str]:
         """Check if placing an order is safe. Returns (ok, reason).
@@ -511,15 +516,11 @@ def compute_display_positions(
         # CPM enrichment
         cpm_a = cpm_tracker.cpm(pair.ticker_a)
         cpm_a_partial = cpm_tracker.is_partial(pair.ticker_a)
-        eta_a = (
-            cpm_tracker.eta_minutes(pair.ticker_a, qp_a) if qp_a is not None and qp_a > 0 else None
-        )
+        eta_a = cpm_tracker.eta_minutes(pair.ticker_a, qp_a) if qp_a is not None else None
 
         cpm_b = cpm_tracker.cpm(pair.ticker_b)
         cpm_b_partial = cpm_tracker.is_partial(pair.ticker_b)
-        eta_b = (
-            cpm_tracker.eta_minutes(pair.ticker_b, qp_b) if qp_b is not None and qp_b > 0 else None
-        )
+        eta_b = cpm_tracker.eta_minutes(pair.ticker_b, qp_b) if qp_b is not None else None
 
         summaries.append(
             EventPositionSummary(

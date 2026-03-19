@@ -15,9 +15,12 @@ from textual.notifications import SeverityLevel
 from textual.widgets import DataTable, Footer, Header, Static
 from textual.widgets._data_table import CellDoesNotExist
 
+from datetime import UTC, datetime, timedelta
+
 from talos.auto_accept import AutoAcceptState
 from talos.auto_accept_log import AutoAcceptLogger
 from talos.engine import TradingEngine
+from talos.errors import KalshiRateLimitError
 from talos.models.proposal import ProposalKey
 from talos.models.strategy import BidConfirmation
 from talos.scanner import ArbitrageScanner
@@ -47,6 +50,7 @@ class TalosApp(App):
         ("e", "toggle_exit_only", "Exit-Only"),
         ("c", "scan", "Scan"),
         ("o", "open_in_browser", "Open"),
+        ("l", "copy_activity_log", "Copy Log"),
         ("q", "quit", "Quit"),
     ]
 
@@ -63,6 +67,7 @@ class TalosApp(App):
         self._auto_accept = AutoAcceptState()
         self._poll_in_progress = False
         self._auto_accept_logger: AutoAcceptLogger | None = None
+        self._rate_limit_until: datetime | None = None
 
     def compose(self) -> ComposeResult:
         yield Header()
@@ -143,17 +148,35 @@ class TalosApp(App):
             self._stop_auto_accept()
             return
 
+        # Rate limit backoff — skip ticks until cooldown expires
+        if self._rate_limit_until is not None:
+            if datetime.now(UTC) < self._rate_limit_until:
+                return
+            self._rate_limit_until = None
+
         pending = self._engine.proposal_queue.pending()
         if not pending:
             return
 
-        proposal = pending[0]
+        # Skip HOLDs — they're informational, not actionable. Leaving them
+        # in the queue prevents reevaluate_jumps from re-creating them every
+        # cycle, eliminating the "Dismissed: HOLD" notification flood.
+        # HOLDs get naturally superseded when conditions change.
+        actionable = [p for p in pending if p.kind != "hold"]
+        if not actionable:
+            return
+
+        proposal = actionable[0]
         snapshot = self._capture_state_snapshot()
         try:
             await self._engine.approve_proposal(proposal.key)
             self._auto_accept.accepted_count += 1
             if self._auto_accept_logger:
                 self._auto_accept_logger.log_accepted(proposal, snapshot, self._auto_accept)
+        except KalshiRateLimitError as e:
+            backoff = max(e.retry_after or 2.0, 2.0)
+            self._rate_limit_until = datetime.now(UTC) + timedelta(seconds=backoff)
+            logger.info("auto_accept_rate_limited", backoff_s=backoff)
         except Exception as e:
             logger.exception("auto_accept_error", proposal_key=str(proposal.key))
             if self._auto_accept_logger:
@@ -246,14 +269,19 @@ class TalosApp(App):
 
     # ── Event loop watchdog ─────────────────────────────────────
 
+    _FREEZE_LOG_MAX_BYTES = 10 * 1024 * 1024  # 10 MB
+    _FREEZE_TASK_DUMP_LIMIT = 50  # max tasks to dump per freeze event
+
     @work(thread=False)
     async def _start_watchdog(self) -> None:
         """Detect event loop blocking by measuring sleep accuracy.
 
         Sleeps for 0.5s in a loop. If actual elapsed > 2s, the event
-        loop was blocked — log a warning with all running tasks.
+        loop was blocked — log a warning with a sample of running tasks.
+        Freeze log is capped at 10 MB to prevent disk exhaustion.
         """
         import asyncio
+        import os
         import sys
         import time
 
@@ -265,8 +293,15 @@ class TalosApp(App):
 
             if elapsed > 2.0:
                 tasks = asyncio.all_tasks()
+                task_count = len(tasks)
+                # Only dump a limited sample to avoid massive I/O
                 task_info = []
-                for task in tasks:
+                for i, task in enumerate(tasks):
+                    if i >= self._FREEZE_TASK_DUMP_LIMIT:
+                        task_info.append(
+                            f"  ... and {task_count - self._FREEZE_TASK_DUMP_LIMIT} more tasks"
+                        )
+                        break
                     frames = task.get_stack(limit=5)
                     frame_strs = [
                         f"  {f.f_code.co_filename}:{f.f_lineno} in {f.f_code.co_name}"
@@ -277,11 +312,20 @@ class TalosApp(App):
 
                 full_msg = (
                     f"EVENT LOOP BLOCKED for {elapsed:.1f}s (expected 0.5s)\n"
-                    f"Active tasks ({len(tasks)}):\n" + "\n".join(task_info)
+                    f"Active tasks ({task_count}):\n" + "\n".join(task_info)
                 )
 
-                logger.error("event_loop_blocked", elapsed=elapsed)
+                logger.error("event_loop_blocked", elapsed=elapsed, task_count=task_count)
                 try:
+                    # Truncate log if it exceeds size cap
+                    try:
+                        if os.path.getsize(log_path) > self._FREEZE_LOG_MAX_BYTES:
+                            with open(log_path, "w") as f:
+                                f.write(
+                                    f"[{time.strftime('%H:%M:%S')}] --- log rotated (exceeded 10 MB) ---\n\n"
+                                )
+                    except OSError:
+                        pass
                     with open(log_path, "a") as f:
                         f.write(f"[{time.strftime('%H:%M:%S')}] {full_msg}\n\n")
                 except Exception:
@@ -328,12 +372,20 @@ class TalosApp(App):
         if self._engine is None:
             return
         await self._engine.refresh_queue_positions()
-        self.query_one(OpportunitiesTable).update_positions(self._engine.position_summaries)
+        table = self.query_one(OpportunitiesTable)
+        table.update_positions(self._engine.position_summaries)
+        table._all_dirty = True
 
     @work(thread=False, exclusive=True, group="poll_trades")
     async def _poll_trades(self) -> None:
-        if self._engine is not None:
-            await self._engine.refresh_trades()
+        if self._engine is None:
+            return
+        await self._engine.refresh_trades()
+        # CPM data changed — recompute positions so ETA columns update
+        self._engine._recompute_positions()
+        table = self.query_one(OpportunitiesTable)
+        table.update_positions(self._engine.position_summaries)
+        table._all_dirty = True
 
     def _log_market_snapshots(self) -> None:
         """Log market snapshots every 10s for ML data collection.
@@ -511,6 +563,16 @@ class TalosApp(App):
         series = event_ticker.split("-")[0].lower()
         url = f"https://kalshi.com/markets/{series}/{event_ticker.lower()}"
         webbrowser.open(url)
+
+    def action_copy_activity_log(self) -> None:
+        """Copy activity log contents to clipboard."""
+        log = self.query_one(ActivityLog)
+        text = log.get_plain_text()
+        if text:
+            self.copy_to_clipboard(text)
+            self.notify("Activity log copied to clipboard")
+        else:
+            self.notify("Activity log is empty", severity="warning")
 
     def on_data_table_row_selected(self, event: DataTable.RowSelected) -> None:
         if self._scanner is None:

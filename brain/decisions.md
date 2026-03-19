@@ -27,8 +27,8 @@ Split into pure state machine + async orchestrator. See [[patterns#Pure state + 
 ## 2026-03-06 — Queue position: separate fast polling with conservative merge
 
 **Context:** Queue positions change faster than order state. The 10s `refresh_account` cycle was too slow. Kalshi's dedicated endpoint has inconsistent response schemas across API versions.
-**Decision:** 3s polling via `refresh_queue_positions`, conservative merge cache (`_merge_queue`), only positive values cached/displayed. Zero from API means "no data", not "front of queue".
-**Rationale:** Queue position only improves (monotonically decreasing). Conservative merge (keep smallest positive value) handles data artifacts from API version inconsistencies. See [[patterns#Enrichment caching with split polling cadence]].
+**Decision:** 3s polling via `refresh_queue_positions`, conservative merge cache (`_merge_queue`), all non-negative values cached/displayed. Zero from API means "front of queue" (0 preceding shares per API spec). Cache is pruned every 30s on `refresh_account` to prevent stale entries.
+**Rationale:** Queue position only improves (monotonically decreasing). Conservative merge (keep smallest non-negative value) handles transient API inconsistencies. The 30s prune cycle resets stale cache entries. See [[patterns#Enrichment caching with split polling cadence]].
 
 ## 2026-03-06 — Game persistence: tickers only, re-fetch on startup
 
@@ -292,3 +292,29 @@ Key changes:
 **Context:** WS disconnected with code 1011 "keepalive ping timeout". The `websockets` library sends client-side pings every 20s with 20s timeout. When `refresh_account` blocked the event loop for 5-8s, pong responses couldn't process in time, so the library killed its own connection.
 **Decision:** Set `ping_interval=None, ping_timeout=None` on `websockets.connect()`. Kalshi already sends server-side pings every 10s with body "heartbeat".
 **Rationale:** Client pings are redundant when the server provides keepalive. Disabling them eliminates self-inflicted disconnects. The Kalshi API research skill identified this during investigation.
+
+## 2026-03-17 — Game-start cancel: force-cancel all resting at game start
+
+**Context:** Exit-only mode (30 min before game start) allows behind-side resting orders to catch up to balanced. But when the game actually starts, any remaining resting orders face an informational disadvantage — the market knows the score, our stale orders don't. Analysis of 112 events showed 17 one-sided fills (15.2%) caused -$84.72 in losses, wiping all balanced profit (+$82.49). Of those, 7 events with `game_state_at_fill` of "live" or "post" accounted for -$28.84.
+
+**Decision:** Added `_game_started_events: set[str]` as a second escalation tier above `_exit_only_events`. When `_check_exit_only` detects state "live" or "post", the event is added to both sets. In `_enforce_exit_only`, `_game_started_events` membership short-circuits the balanced/imbalanced logic — ALL resting orders on BOTH sides are cancelled, no behind-side preservation.
+
+**Behavior difference:**
+- **Pre-game exit-only** (30 min before): Gradual wind-down. Behind-side resting preserved so position can converge to balanced.
+- **Game started** (live/post): Hard cancel ALL resting. No exceptions, every enforcement cycle.
+
+**Rationale:** Behind-side preservation makes sense pre-game (market still has time to fill). Once the game starts, the other side of the market has live score information — our resting orders are adversely selected. The state-escalation pattern keeps the implementation minimal (one `or` in the existing enforcement branch) while the `_game_started_events` set is independent of the exit-only toggle (user can't un-start a game). See [[patterns#Multi-step execution with fail-safe ordering]].
+
+## 2026-03-18 — Scope per-action API calls to single event
+
+**Context:** "Catch-up BLOCKED: fresh sync failed" errors flooding the UI during auto-accept. Also frequent "Verify FAILED" warnings. Root cause: `execute_rebalance` called `get_all_orders()` with no filter — fetching ALL orders across 50+ events, paginating through hundreds of records. `_verify_after_action` called `get_positions(limit=200)` also unfiltered. With auto-accept cycling ~1 action/second, each action triggered 3+ unfiltered API calls, hitting Kalshi's rate limit and causing cascading failures.
+
+**Decision:** Three rounds of fixes:
+
+1. **Scope filtering:** `rebalance.py` catch-up: `get_all_orders()` → `get_all_orders(event_ticker=...)`. Verify: `get_positions(limit=200)` → `get_positions(event_ticker=..., limit=200)`. Verify orders: 2× `get_orders(ticker=...)` → 1× `get_all_orders(event_ticker=...)` (3 API calls → 2 per verify).
+2. **Error surfacing:** All error handlers now include `type(e).__name__` in notifications. `KalshiRateLimitError` in verify silently logged at debug level (non-critical — action already succeeded, 30s poll catches up).
+3. **Rate-limit backoff:** `KalshiRateLimitError` re-raised from engine's adjustment and bid handlers (not swallowed). Auto-accept tick catches it and sets a cooldown timer (`retry_after` from header, minimum 2s). Subsequent ticks skip until cooldown expires. Proposal stays in queue and retries automatically.
+
+**Not changed:** `refresh_account()` at lines 644 and 703 — these are the 30-second global safety net, intentionally fetching all data. Filtering these would require N calls (one per event) instead of 1, making things worse.
+
+**Rationale:** Per-action calls only need data for one event. Filtering reduces response from hundreds of records (multi-page) to 2-4 records (single page). Rate-limit errors are categorically different from action failures — they signal "slow down," not "this broke." Swallowing them at the action layer prevents the scheduler from backing off, causing cascading failures. See [[patterns#API call scope must match call frequency]] and [[patterns#Rate limit errors propagate to the scheduler]].

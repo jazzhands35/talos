@@ -320,7 +320,30 @@ class KalshiRESTClient:
 
         Prefers ``queue_position_fp`` (dollar-denominated) over ``queue_position``
         when both are present.  Handles alternate response keys across API versions.
+
+        When ``market_tickers`` exceeds 50, batches into multiple requests to
+        avoid CloudFront's URI length limit (414 error on ~8K+ URLs).
         """
+        if market_tickers and len(market_tickers) > 50:
+            result: dict[str, int] = {}
+            for i in range(0, len(market_tickers), 50):
+                chunk = market_tickers[i : i + 50]
+                batch = await self._get_queue_positions_single(
+                    event_ticker=event_ticker, market_tickers=chunk
+                )
+                result.update(batch)
+            return result
+        return await self._get_queue_positions_single(
+            event_ticker=event_ticker, market_tickers=market_tickers
+        )
+
+    async def _get_queue_positions_single(
+        self,
+        *,
+        event_ticker: str | None = None,
+        market_tickers: list[str] | None = None,
+    ) -> dict[str, int]:
+        """Single batch queue position fetch (≤50 tickers)."""
         params: dict[str, Any] = {}
         if event_ticker:
             params["event_ticker"] = event_ticker

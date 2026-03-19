@@ -426,12 +426,12 @@ class OpportunitiesTable(DataTable):
 
             q_a = (
                 RichText(str(pos.leg_a.queue_position), justify="right")
-                if pos.leg_a.queue_position
+                if pos.leg_a.queue_position is not None
                 else DIM_DASH
             )
             q_b = (
                 RichText(str(pos.leg_b.queue_position), justify="right")
-                if pos.leg_b.queue_position
+                if pos.leg_b.queue_position is not None
                 else DIM_DASH
             )
             cpm_a = RichText(format_cpm(pos.leg_a.cpm, pos.leg_a.cpm_partial), justify="right")
@@ -562,9 +562,12 @@ class ActivityLog(RichLog):
     to prevent asyncio task accumulation from freezing the event loop.
     """
 
+    def __init__(self, **kwargs: object) -> None:
+        super().__init__(**kwargs)  # type: ignore[arg-type]
+        self._plain_lines: list[str] = []
+
     def on_mount(self) -> None:
-        self.write(RichText("ACTIVITY", style=RichStyle(color=BLUE, bold=True)))
-        self.write("")
+        self.border_title = "Activity"
 
     def log_activity(self, message: str, severity: str = "information") -> None:
         """Append a timestamped, color-coded message."""
@@ -575,3 +578,11 @@ class ActivityLog(RichLog):
         line.append(f"  {ts}  ", style=RichStyle(color=SURFACE2))
         line.append(message, style=style)
         self.write(line)
+        self._plain_lines.append(f"{ts}  {message}")
+        # Keep buffer bounded
+        if len(self._plain_lines) > 500:
+            self._plain_lines = self._plain_lines[-500:]
+
+    def get_plain_text(self) -> str:
+        """Return all log lines as plain text for clipboard copy."""
+        return "\n".join(self._plain_lines)
