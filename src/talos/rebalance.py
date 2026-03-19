@@ -280,7 +280,7 @@ async def execute_rebalance(
                 # Cancel ALL resting orders on this side — not just the
                 # one tracked in the ledger. Orphaned orders from previous
                 # sessions or race conditions may exist on Kalshi.
-                cancelled_count = await _cancel_all_resting(
+                cancelled_count, cancelled_ids = await _cancel_all_resting(
                     rest_client,
                     rebalance.event_ticker,
                     rebalance.ticker,
@@ -295,9 +295,10 @@ async def execute_rebalance(
                         )
                     except ValueError:
                         pass  # Order_id mismatch — mark_side_pending below
-                    # Always set gen guard after cancel — even if record_cancel
-                    # succeeded, there may be orphaned orders that were also
-                    # cancelled and need one sync cycle to clear.
+                    # Register ALL cancelled IDs so sync_from_orders filters
+                    # them out until Kalshi's GET confirms they're gone.
+                    for oid in cancelled_ids:
+                        ledger.mark_order_cancelled(oid)
                     ledger.mark_side_pending(Side(rebalance.side))
                 except KeyError:
                     pass  # Ledger missing — sync will fix
@@ -494,18 +495,20 @@ async def _cancel_all_resting(
     event_ticker: str,
     ticker: str,
     primary_order_id: str,
-) -> int:
+) -> tuple[int, list[str]]:
     """Cancel all resting NO-buy orders on a specific ticker.
 
     First cancels the primary order_id (from the proposal), then fetches
     all orders for the event and cancels any other resting orders on the
-    same ticker. Returns total count of contracts cancelled.
+    same ticker. Returns (total_contracts_cancelled, list_of_order_ids).
     """
     total_cancelled = 0
+    cancelled_ids: list[str] = []
 
     # Cancel the primary order first
     try:
         await rest_client.cancel_order(primary_order_id)
+        cancelled_ids.append(primary_order_id)
     except KalshiAPIError:
         pass  # Already cancelled or not found — continue to sweep
 
@@ -527,6 +530,7 @@ async def _cancel_all_resting(
             try:
                 await rest_client.cancel_order(order.order_id)
                 total_cancelled += order.remaining_count
+                cancelled_ids.append(order.order_id)
                 logger.info(
                     "orphan_order_cancelled",
                     event_ticker=event_ticker,
@@ -543,10 +547,8 @@ async def _cancel_all_resting(
             ticker=ticker,
             exc_info=True,
         )
-        # Fall back to just the primary cancel count
-        total_cancelled = total_cancelled or 0
 
-    return total_cancelled or 1  # At least 1 for the notification
+    return total_cancelled, cancelled_ids
 
 
 def _find_pair(scanner: ArbitrageScanner, event_ticker: str) -> ArbPair | None:

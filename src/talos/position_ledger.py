@@ -80,6 +80,10 @@ class PositionLedger:
             Side.A: _SideState(),
             Side.B: _SideState(),
         }
+        # Order IDs confirmed cancelled by the API but potentially still
+        # returned as "resting" by GET due to Kalshi's eventual consistency.
+        # sync_from_orders filters these out until they disappear from the GET.
+        self._recently_cancelled: set[str] = set()
 
     # ── Sync generation (stale-sync protection) ────────────────────
 
@@ -243,6 +247,7 @@ class PositionLedger:
         s = self._sides[side]
         if s.resting_order_id != order_id:
             raise ValueError(f"order_id mismatch: expected {s.resting_order_id}, got {order_id}")
+        self._recently_cancelled.add(order_id)
         s.resting_order_id = None
         s.resting_count = 0
         s.resting_price = 0
@@ -260,6 +265,14 @@ class PositionLedger:
         block new bids until the next confirmed sync.
         """
         self._sides[side]._placed_at_gen = self._sync_gen + 1
+
+    def mark_order_cancelled(self, order_id: str) -> None:
+        """Register an order_id as confirmed cancelled on Kalshi.
+
+        sync_from_orders will filter this ID out until Kalshi's GET endpoint
+        stops returning it (eventual consistency propagation).
+        """
+        self._recently_cancelled.add(order_id)
 
     def reset_pair(self) -> None:
         """Clear state after both sides complete. Ready for next pair."""
@@ -300,8 +313,11 @@ class PositionLedger:
                 kalshi_filled[side] += order.fill_count
                 kalshi_fill_cost[side] += order.maker_fill_cost + order.taker_fill_cost
                 kalshi_fees[side] += order.maker_fees
-            # Only track resting from active orders
+            # Only track resting from active orders — skip recently cancelled
+            # IDs that Kalshi's GET may still return due to eventual consistency
             if order.remaining_count > 0 and order.status in ("resting", "executed"):
+                if order.order_id in self._recently_cancelled:
+                    continue
                 kalshi_resting[side].append((order.order_id, order.remaining_count, order.no_price))
 
         for side in (Side.A, Side.B):
@@ -373,6 +389,17 @@ class PositionLedger:
                 s.resting_count = 0
                 s.resting_price = 0
                 s._placed_at_gen = None
+
+        # Prune recently-cancelled IDs that are confirmed gone from the GET.
+        # Keep only IDs that were still returned as resting (filtered above).
+        if self._recently_cancelled:
+            still_stale = set()
+            for order in orders:
+                if order.order_id in self._recently_cancelled:
+                    if order.remaining_count > 0 and order.status in ("resting", "executed"):
+                        still_stale.add(order.order_id)
+            # IDs not in still_stale are confirmed gone — remove them
+            self._recently_cancelled = still_stale
 
         # Two-source sync (orders + positions) keeps the ledger accurate.
 
