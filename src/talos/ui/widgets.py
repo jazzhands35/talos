@@ -199,6 +199,17 @@ def _fmt_status(status: str) -> RichText:
     return RichText(status)
 
 
+def _fmt_freshness(age_seconds: float | None) -> RichText:
+    """Format freshness dot based on seconds since last WS update."""
+    if age_seconds is None:
+        return RichText("○", style="dim", justify="center")
+    if age_seconds < 5.0:
+        return RichText("●", style=GREEN, justify="center")
+    if age_seconds < 30.0:
+        return RichText("●", style=YELLOW, justify="center")
+    return RichText("●", style=RED, justify="center")
+
+
 class OpportunitiesTable(DataTable):
     """Live-updating arbitrage opportunities table with position data."""
 
@@ -234,6 +245,7 @@ class OpportunitiesTable(DataTable):
         self._needs_resort: bool = False
         self._dirty_events: set[str] = set()  # event tickers with changes since last render
         self._all_dirty: bool = True  # first render rebuilds everything
+        self._freshness: dict[str, float | None] = {}  # market_ticker -> age in seconds
 
     def set_resolver(self, resolver: Any) -> None:
         """Set the game status resolver for Date/Game columns."""
@@ -246,6 +258,10 @@ class OpportunitiesTable(DataTable):
     def update_statuses(self, statuses: dict[str, str]) -> None:
         """Store event status strings for all monitored events."""
         self._event_statuses = statuses
+
+    def update_freshness(self, ages: dict[str, float | None]) -> None:
+        """Store per-market freshness ages for next render."""
+        self._freshness = ages
 
     def mark_dirty(self, event_ticker: str) -> None:
         """Mark an event as needing a table row refresh."""

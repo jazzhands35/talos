@@ -5,6 +5,8 @@ Thin UI shell — all trading logic lives in TradingEngine.
 
 from __future__ import annotations
 
+import time
+from datetime import UTC, datetime, timedelta
 from typing import cast
 
 import structlog
@@ -14,8 +16,6 @@ from textual.containers import Horizontal
 from textual.notifications import SeverityLevel
 from textual.widgets import DataTable, Footer, Header, Static
 from textual.widgets._data_table import CellDoesNotExist
-
-from datetime import UTC, datetime, timedelta
 
 from talos.auto_accept import AutoAcceptState
 from talos.auto_accept_log import AutoAcceptLogger
@@ -449,6 +449,22 @@ class TalosApp(App):
         """Mark an event for table refresh on next cycle."""
         self.query_one(OpportunitiesTable).mark_dirty(event_ticker)
 
+    def _update_freshness(self) -> None:
+        """Compute orderbook age per market and push to table."""
+        if self._engine is None:
+            return
+        table = self.query_one(OpportunitiesTable)
+        now = time.time()
+        ages: dict[str, float | None] = {}
+        book_manager = self._engine._feed.book_manager
+        for ticker in book_manager.tickers:
+            book = book_manager.get_book(ticker)
+            if book is None or book.last_update <= 0.0:
+                ages[ticker] = None
+            else:
+                ages[ticker] = now - book.last_update
+        table.update_freshness(ages)
+
     def refresh_opportunities(self) -> None:
         """Update the opportunities table from scanner state.
 
@@ -464,6 +480,7 @@ class TalosApp(App):
             table.update_statuses(self._engine.event_statuses)
         tracker = self._engine.tracker if self._engine else None
         table.refresh_from_scanner(self._scanner, tracker)
+        self._update_freshness()
 
     def on_data_table_header_selected(self, event: DataTable.HeaderSelected) -> None:
         """Forward header clicks to the opportunities table for sorting."""
