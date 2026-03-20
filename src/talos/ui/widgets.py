@@ -17,7 +17,7 @@ from talos.game_status import ESTIMATED_DETAIL, GameStatus
 from talos.models.position import EventPositionSummary
 from talos.scanner import ArbitrageScanner
 from talos.top_of_market import TopOfMarketTracker
-from talos.ui.theme import BLUE, GREEN, PEACH, RED, SUBTEXT0, SURFACE2, YELLOW
+from talos.ui.theme import BLUE, GREEN, PEACH, RED, SUBTEXT0, SURFACE0, SURFACE2, YELLOW
 
 
 def _fmt_cents(value: int) -> RichText:
@@ -279,6 +279,7 @@ class OpportunitiesTable(DataTable):
         self._dirty_events.add(event_ticker)
 
     _SEP_STYLE = RichStyle(color=SURFACE2)
+    _PAIR_BG = RichStyle(bgcolor=SURFACE0)
 
     def on_mount(self) -> None:
         self.cursor_type = "row"
@@ -299,6 +300,15 @@ class OpportunitiesTable(DataTable):
         self.add_column("Status", width=16)  # 11: Event status
         self.add_column(RichText("Locked", justify=r), width=10)  # 12: Locked profit
         self.add_column(RichText("Expos", justify=r), width=10)  # 13: Exposure
+
+    def _get_row_style(self, row_index: int, base_style: RichStyle) -> RichStyle:  # type: ignore[override]
+        """Pair striping: alternate background per event pair (every 2 rows)."""
+        if row_index < 0:
+            return super()._get_row_style(row_index, base_style)
+        pair_index = row_index // 2
+        if pair_index % 2:
+            return base_style + self._PAIR_BG
+        return base_style
 
     def _render_line_in_row(  # type: ignore[override]
         self, *args: Any, **kwargs: Any
