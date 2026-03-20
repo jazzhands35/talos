@@ -54,16 +54,18 @@ Footer {{
 
 #account-panel {{
     width: 2fr;
+    min-width: 24;
     border: solid {SURFACE1};
+    border-title-color: {BLUE};
     background: {SURFACE0};
     padding: 0 1;
-    height: auto;
-    max-height: 12;
+    height: 100%;
 }}
 
 #activity-log {{
     width: 3fr;
     border: solid {SURFACE1};
+    border-title-color: {BLUE};
     background: {SURFACE0};
     padding: 0 1;
     height: auto;

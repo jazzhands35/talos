@@ -633,6 +633,7 @@ class PortfolioPanel(Static):
         self._invested_7d: int = 0
 
     def on_mount(self) -> None:
+        self.border_title = "Portfolio"
         self._render_content()
 
     def update_balance(self, balance_cents: int, portfolio_cents: int) -> None:
@@ -679,7 +680,6 @@ class PortfolioPanel(Static):
         last_7d = _fmt_pnl_with_roi(self._pnl_7d, self._invested_7d)
 
         self.update(
-            f"PORTFOLIO\n\n"
             f"Cash:      {cash}\n"
             f"Locked In: {locked}\n"
             f"Exposure:  {exposure}\n"
