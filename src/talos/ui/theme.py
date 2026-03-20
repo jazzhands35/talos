@@ -59,7 +59,7 @@ Footer {{
     border-title-color: {BLUE};
     background: {SURFACE0};
     padding: 0 1;
-    height: 100%;
+    height: 1fr;
 }}
 
 #activity-log {{
@@ -68,8 +68,7 @@ Footer {{
     border-title-color: {BLUE};
     background: {SURFACE0};
     padding: 0 1;
-    height: auto;
-    max-height: 12;
+    height: 1fr;
 }}
 
 #order-log {{
@@ -77,8 +76,7 @@ Footer {{
     border: solid {SURFACE1};
     background: {SURFACE0};
     padding: 0 1;
-    height: auto;
-    max-height: 12;
+    height: 1fr;
 }}
 
 .panel-title {{
