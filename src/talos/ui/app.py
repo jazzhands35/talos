@@ -407,6 +407,19 @@ class TalosApp(App):
             settlements = await self._engine._rest.get_settlements(limit=200)
             from talos.settlement_tracker import aggregate_settlements, reconcile_event
 
+            # Populate cache if available
+            cache = getattr(self._engine, "_settlement_cache", None)
+            if cache is not None:
+                est_map = {
+                    s.event_ticker: int(s.locked_profit_cents)
+                    for s in self._engine.position_summaries
+                }
+                cache.upsert_batch(
+                    settlements,
+                    est_pnl_map=est_map,
+                    subtitles=self._engine.game_manager.subtitles,
+                )
+
             agg = aggregate_settlements([s.model_dump() for s in settlements])
             panel = self.query_one(PortfolioPanel)
             panel.update_pnl(
@@ -648,11 +661,44 @@ class TalosApp(App):
     async def _open_settlement_history(self) -> None:
         if self._engine is None:
             return
-        try:
-            settlements = await self._engine._rest.get_settlements(limit=200)
-        except Exception as e:
-            self.notify(f"Failed to fetch settlements: {e}", severity="error")
-            return
+        cache = getattr(self._engine, "_settlement_cache", None)
+        if cache is not None:
+            try:
+                new_settlements = await self._engine._rest.get_settlements(limit=200)
+            except Exception as e:
+                self.notify(f"Failed to fetch settlements: {e}", severity="error")
+                new_settlements = []
+            if new_settlements:
+                # Build est_pnl map from live positions
+                est_map = {
+                    s.event_ticker: int(s.locked_profit_cents)
+                    for s in self._engine.position_summaries
+                }
+                cache.upsert_batch(
+                    new_settlements,
+                    est_pnl_map=est_map,
+                    subtitles=self._engine.game_manager.subtitles,
+                )
+            # Read everything from cache
+            cached = cache.settlements_as_models()
+            settlements = [s for s, _, _ in cached]
+            est_pnl_map: dict[str, int] = {}
+            subtitles: dict[str, str] = {}
+            for s, est, sub in cached:
+                if est is not None:
+                    est_pnl_map[s.event_ticker] = est
+                if sub:
+                    subtitles[s.event_ticker] = sub
+        else:
+            # No cache — fetch directly
+            try:
+                settlements = await self._engine._rest.get_settlements(limit=200)
+            except Exception as e:
+                self.notify(f"Failed to fetch settlements: {e}", severity="error")
+                return
+            est_pnl_map = {}
+            subtitles = dict(self._engine.game_manager.subtitles)
+
         if not settlements:
             self.notify("No settlements found", severity="information")
             return
@@ -660,7 +706,8 @@ class TalosApp(App):
             SettlementHistoryScreen(
                 settlements,
                 position_summaries=self._engine.position_summaries,
-                subtitles=self._engine.game_manager.subtitles,
+                subtitles=subtitles,
+                est_pnl_map=est_pnl_map,
             )
         )
 

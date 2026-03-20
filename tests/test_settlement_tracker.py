@@ -1,9 +1,12 @@
-"""Tests for settlement P&L aggregation."""
+"""Tests for settlement P&L aggregation and cache."""
 
+import tempfile
 from datetime import datetime
+from pathlib import Path
 from zoneinfo import ZoneInfo
 
-from talos.settlement_tracker import aggregate_settlements, reconcile_event
+from talos.models.portfolio import Settlement
+from talos.settlement_tracker import SettlementCache, aggregate_settlements, reconcile_event
 
 PT = ZoneInfo("America/Los_Angeles")
 
@@ -51,3 +54,71 @@ def test_reconcile_mismatch():
     assert result is not None
     assert result["difference"] == 40
     assert result["event_ticker"] == "EVT-TEST"
+
+
+class TestSettlementCache:
+    def test_upsert_and_read(self, tmp_path: Path) -> None:
+        """Upsert a settlement and read it back."""
+        cache = SettlementCache(tmp_path / "test.db")
+        s = Settlement(
+            ticker="MKT-A",
+            event_ticker="EVT-1",
+            revenue=1000,
+            no_total_cost=380,
+            market_result="no",
+            no_count=10,
+            settled_time="2026-03-20T12:00:00Z",
+        )
+        cache.upsert(s, est_pnl_cents=70, sub_title="Team A vs Team B")
+        rows = cache.all_settlements()
+        assert len(rows) == 1
+        assert rows[0]["ticker"] == "MKT-A"
+        assert rows[0]["est_pnl_cents"] == 70
+        assert rows[0]["sub_title"] == "Team A vs Team B"
+        cache.close()
+
+    def test_upsert_preserves_est_pnl(self, tmp_path: Path) -> None:
+        """Re-upserting without est_pnl should not overwrite existing value."""
+        cache = SettlementCache(tmp_path / "test.db")
+        s = Settlement(
+            ticker="MKT-A",
+            event_ticker="EVT-1",
+            revenue=1000,
+            no_total_cost=380,
+            settled_time="2026-03-20T12:00:00Z",
+        )
+        cache.upsert(s, est_pnl_cents=70)
+        # Re-upsert without est_pnl
+        cache.upsert(s, est_pnl_cents=None)
+        rows = cache.all_settlements()
+        assert rows[0]["est_pnl_cents"] == 70  # preserved!
+        cache.close()
+
+    def test_latest_settled_time(self, tmp_path: Path) -> None:
+        """latest_settled_time returns the most recent time."""
+        cache = SettlementCache(tmp_path / "test.db")
+        for i, ts in enumerate(["2026-03-18T12:00:00Z", "2026-03-20T12:00:00Z", "2026-03-19T12:00:00Z"]):
+            s = Settlement(ticker=f"MKT-{i}", event_ticker=f"EVT-{i}", settled_time=ts)
+            cache.upsert(s)
+        assert cache.latest_settled_time() == "2026-03-20T12:00:00Z"
+        cache.close()
+
+    def test_settlements_as_models(self, tmp_path: Path) -> None:
+        """settlements_as_models returns (Settlement, est_pnl, sub_title) tuples."""
+        cache = SettlementCache(tmp_path / "test.db")
+        s = Settlement(
+            ticker="MKT-A",
+            event_ticker="EVT-1",
+            revenue=1000,
+            no_total_cost=380,
+            settled_time="2026-03-20T12:00:00Z",
+        )
+        cache.upsert(s, est_pnl_cents=70, sub_title="A vs B")
+        result = cache.settlements_as_models()
+        assert len(result) == 1
+        settlement, est, sub = result[0]
+        assert settlement.ticker == "MKT-A"
+        assert settlement.revenue == 1000
+        assert est == 70
+        assert sub == "A vs B"
+        cache.close()

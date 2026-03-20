@@ -49,6 +49,7 @@ def main() -> None:
     from talos.market_feed import MarketFeed
     from talos.orderbook import OrderBookManager
     from talos.data_collector import DataCollector
+    from talos.settlement_tracker import SettlementCache
     from talos.persistence import (
         load_saved_games, load_saved_games_full, load_settings,
         save_games, save_games_full, save_settings,
@@ -79,7 +80,9 @@ def main() -> None:
     position_feed = PositionFeed(ws_client=ws)
     game_mgr = GameManager(rest, feed, scanner)
     game_status_resolver = GameStatusResolver()
-    data_collector = DataCollector(Path(__file__).resolve().parents[2] / "talos_data.db")
+    db_dir = Path(__file__).resolve().parents[2]
+    data_collector = DataCollector(db_dir / "talos_data.db")
+    settlement_cache = SettlementCache(db_dir / "talos_data.db")
 
     # Wire scanner + tracker to book updates
     _app_ref: list[TalosApp] = []  # populated after app creation
@@ -132,6 +135,7 @@ def main() -> None:
         position_feed=position_feed,
         game_status_resolver=game_status_resolver,
         data_collector=data_collector,
+        settlement_cache=settlement_cache,
     )
 
     # Wire unit size persistence

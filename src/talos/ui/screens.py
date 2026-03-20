@@ -445,11 +445,13 @@ class SettlementHistoryScreen(ModalScreen[None]):
         settlements: list[Settlement],
         position_summaries: list[EventPositionSummary] | None = None,
         subtitles: dict[str, str] | None = None,
+        est_pnl_map: dict[str, int] | None = None,
     ) -> None:
         super().__init__()
         self._settlements = settlements
         self._positions = {s.event_ticker: s for s in (position_summaries or [])}
         self._subtitles = subtitles or {}
+        self._est_pnl_map = est_pnl_map or {}
 
     def compose(self) -> ComposeResult:
         with Vertical(id="settlement-dialog"):
@@ -553,18 +555,23 @@ class SettlementHistoryScreen(ModalScreen[None]):
         total_cost = sum(s.no_total_cost + s.yes_total_cost for s in legs)
         actual_pnl = total_revenue - total_cost
 
-        # Event-level estimated P&L from position tracker
+        # Event-level estimated P&L: prefer live position, fall back to cache
         pos = self._positions.get(evt_ticker)
+        est_pnl_cents: int | None = None
         if pos is not None:
-            est_pnl = pos.locked_profit_cents
-            est_str = self._fmt_dollars(int(est_pnl))
+            est_pnl_cents = int(pos.locked_profit_cents)
+        elif evt_ticker in self._est_pnl_map:
+            est_pnl_cents = self._est_pnl_map[evt_ticker]
+
+        if est_pnl_cents is not None:
+            est_str = self._fmt_dollars(est_pnl_cents)
         else:
             est_str = RichText("—", style="dim", justify="right")
 
         actual_str = self._fmt_dollars(actual_pnl)
 
         # Highlight discrepancy
-        if pos is not None and abs(int(pos.locked_profit_cents) - actual_pnl) > 5:
+        if est_pnl_cents is not None and abs(est_pnl_cents - actual_pnl) > 5:
             actual_str = RichText(str(actual_str), style=YELLOW, justify="right")
 
         time_str = settled_dt.strftime("%I:%M %p").lstrip("0")

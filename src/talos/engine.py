@@ -16,7 +16,7 @@ import structlog
 from talos.automation_config import AutomationConfig
 from talos.bid_adjuster import BidAdjuster
 from talos.cpm import CPMTracker
-from talos.errors import KalshiRateLimitError
+from talos.errors import KalshiAPIError, KalshiRateLimitError
 from talos.fees import MAKER_FEE_RATE
 from talos.game_manager import GameManager
 from talos.game_status import GameStatusResolver
@@ -86,6 +86,7 @@ class TradingEngine:
         position_feed: PositionFeed | None = None,
         game_status_resolver: GameStatusResolver | None = None,
         data_collector: object | None = None,
+        settlement_cache: object | None = None,
     ) -> None:
         self._scanner = scanner
         self._game_manager = game_manager
@@ -102,6 +103,7 @@ class TradingEngine:
         self._lifecycle_feed = lifecycle_feed
         self._game_status_resolver = game_status_resolver
         self._data_collector = data_collector
+        self._settlement_cache = settlement_cache
         self._position_feed = position_feed
         self._proposer = OpportunityProposer(self._auto_config)
 
@@ -1069,6 +1071,16 @@ class TradingEngine:
                 no_count=s.no_count,
                 yes_count=s.yes_count,
             )
+            # Cache settlement with our estimated P&L (still available at this point)
+            if self._settlement_cache is not None:
+                est_pnl: int | None = None
+                sub = ""
+                for ps in self._position_summaries:
+                    if ps.event_ticker == s.event_ticker:
+                        est_pnl = int(ps.locked_profit_cents)
+                        break
+                sub = self._game_manager.subtitles.get(s.event_ticker, "")
+                self._settlement_cache.upsert(s, est_pnl_cents=est_pnl, sub_title=sub)
         except Exception:
             logger.warning("settlement_fetch_failed", ticker=ticker, exc_info=True)
 
@@ -1642,8 +1654,36 @@ class TradingEngine:
         except KalshiRateLimitError:
             raise  # Let auto-accept back off
         except Exception as e:
-            self._notify(f"Order error: {type(e).__name__}: {e}", "error", toast=True)
-            logger.exception("place_bids_error")
+            event_ticker = bid.ticker_a.rsplit("-", 1)[0] if "-" in bid.ticker_a else ""
+            label = self._display_name(event_ticker) if event_ticker else bid.ticker_a
+            self._notify(f"Order error ({label}): {type(e).__name__}: {e}", "error", toast=True)
+            logger.exception(
+                "place_bids_error",
+                event_ticker=event_ticker,
+                ticker_a=bid.ticker_a,
+                ticker_b=bid.ticker_b,
+            )
+            # Record failure cooldown to prevent the proposer from endlessly
+            # re-proposing the same bid (e.g. post-only cross where the
+            # orderbook condition persists).
+            if event_ticker:
+                self._proposer.record_placement_failure(event_ticker)
+            # "post only cross" means our local book is stale — the price we
+            # tried would immediately match on Kalshi's real book. Resubscribe
+            # to get a fresh snapshot and correct our local state.
+            is_cross = (
+                isinstance(e, KalshiAPIError)
+                and "post only cross" in str(e).lower()
+            )
+            if is_cross:
+                for ticker in (bid.ticker_a, bid.ticker_b):
+                    await self._feed.unsubscribe(ticker)
+                    await self._feed.subscribe(ticker)
+                logger.info(
+                    "orderbook_resync_after_cross",
+                    ticker_a=bid.ticker_a,
+                    ticker_b=bid.ticker_b,
+                )
 
     async def add_games(self, urls: list[str], source: str = "scan") -> None:
         """Add games by URL."""
@@ -2098,9 +2138,9 @@ class TradingEngine:
     async def _recover_stale_books(self) -> None:
         """Resubscribe to any tickers with stale orderbooks.
 
-        A single dropped WS message marks a book stale permanently.
-        Unsubscribe+resubscribe triggers a fresh snapshot from Kalshi,
-        which resets the stale flag and restores the live delta stream.
+        Books are considered stale if no snapshot or delta has been received
+        within the staleness threshold (120s). Unsubscribe+resubscribe triggers
+        a fresh snapshot from Kalshi, resetting the update timestamp.
         """
         stale = self._feed.book_manager.stale_tickers()
         if not stale:
