@@ -18,23 +18,50 @@ from talos.scanner import ArbitrageScanner
 logger = structlog.get_logger()
 
 SCAN_SERIES = [
-    "KXNHLGAME", "KXNBAGAME", "KXMLBGAME", "KXNFLGAME", "KXWNBAGAME",
-    "KXCFBGAME", "KXCBBGAME", "KXMLSGAME", "KXEPLGAME",
+    "KXNHLGAME",
+    "KXNBAGAME",
+    "KXMLBGAME",
+    "KXNFLGAME",
+    "KXWNBAGAME",
+    "KXCFBGAME",
+    "KXCBBGAME",
+    "KXMLSGAME",
+    "KXEPLGAME",
     "KXAHLGAME",
-    "KXLOLGAME", "KXCS2GAME", "KXVALGAME", "KXDOTA2GAME", "KXCODGAME",
-    "KXATPMATCH", "KXWTAMATCH", "KXATPCHALLENGERMATCH", "KXWTACHALLENGERMATCH",
+    "KXLOLGAME",
+    "KXCS2GAME",
+    "KXVALGAME",
+    "KXDOTA2GAME",
+    "KXCODGAME",
+    "KXATPMATCH",
+    "KXWTAMATCH",
+    "KXATPCHALLENGERMATCH",
+    "KXWTACHALLENGERMATCH",
     "KXATPDOUBLES",
     # Soccer — European leagues
-    "KXLALIGAGAME", "KXBUNDESLIGAGAME", "KXSERIEAGAME", "KXLIGUE1GAME",
-    "KXUCLGAME", "KXLIGAMXGAME", "KXKLEAGUEGAME",
+    "KXLALIGAGAME",
+    "KXBUNDESLIGAGAME",
+    "KXSERIEAGAME",
+    "KXLIGUE1GAME",
+    "KXUCLGAME",
+    "KXLIGAMXGAME",
+    "KXKLEAGUEGAME",
     # Hockey — international
-    "KXSHLGAME", "KXKHLGAME",
+    "KXSHLGAME",
+    "KXKHLGAME",
     # Basketball — international
-    "KXEUROLEAGUEGAME", "KXNBLGAME", "KXBBLGAME", "KXCBAGAME", "KXKBLGAME",
+    "KXEUROLEAGUEGAME",
+    "KXNBLGAME",
+    "KXBBLGAME",
+    "KXCBAGAME",
+    "KXKBLGAME",
     # MMA / Boxing
-    "KXUFCFIGHT", "KXBOXING",
+    "KXUFCFIGHT",
+    "KXBOXING",
     # Cricket
-    "KXT20MATCH", "KXIPL", "KXCRICKETODIMATCH",
+    "KXT20MATCH",
+    "KXIPL",
+    "KXCRICKETODIMATCH",
     # Rugby
     "KXRUGBYNRLMATCH",
     # Aussie Rules
@@ -44,13 +71,17 @@ SCAN_SERIES = [
     # Darts (tournament — works at finals)
     "KXPREMDARTS",
     # Chess (tournament — works at finals)
-    "KXCHESSWORLDCHAMPION", "KXCHESSCANDIDATES",
+    "KXCHESSWORLDCHAMPION",
+    "KXCHESSCANDIDATES",
     # Motorsport (tournament — works at finals)
-    "KXF1", "KXNASCARRACE", "KXINDYCARRACE",
+    "KXF1",
+    "KXNASCARRACE",
+    "KXINDYCARRACE",
     # Golf (tournament — works at finals)
     "KXPGATOUR",
     # Tournament winner (only shows when down to 2 active markets / finals)
-    "KXIWMEN", "KXIWWMN",
+    "KXIWMEN",
+    "KXIWWMN",
 ]
 
 
@@ -152,9 +183,7 @@ class GameManager:
 
         # Extract expected_expiration_time (same for both markets in an event)
         exp_times = [
-            m.expected_expiration_time
-            for m in active_markets
-            if m.expected_expiration_time
+            m.expected_expiration_time for m in active_markets if m.expected_expiration_time
         ]
         expected_expiration_time = exp_times[0] if exp_times else None
 
@@ -217,9 +246,7 @@ class GameManager:
         for sep in (" vs ", " at ", " vs. "):
             label = label.replace(sep, "-")
         self._labels[event.event_ticker] = label
-        self._leg_labels[event.event_ticker] = extract_leg_labels(
-            event.sub_title or event.title
-        )
+        self._leg_labels[event.event_ticker] = extract_leg_labels(event.sub_title or event.title)
 
         if self.on_change:
             self.on_change()
@@ -250,12 +277,17 @@ class GameManager:
             close_time=str(data["close_time"]) if data.get("close_time") else None,
             expected_expiration_time=(
                 str(data["expected_expiration_time"])
-                if data.get("expected_expiration_time") else None
+                if data.get("expected_expiration_time")
+                else None
             ),
         )
         self._scanner.add_pair(
-            event_ticker, ticker_a, ticker_b,
-            fee_type=pair.fee_type, fee_rate=pair.fee_rate, close_time=pair.close_time,
+            event_ticker,
+            ticker_a,
+            ticker_b,
+            fee_type=pair.fee_type,
+            fee_rate=pair.fee_rate,
+            close_time=pair.close_time,
             expected_expiration_time=pair.expected_expiration_time,
         )
         self._games[event_ticker] = pair
@@ -342,8 +374,10 @@ class GameManager:
             async with sem:
                 try:
                     return await self._rest.get_events(
-                        series_ticker=series, status="open",
-                        with_nested_markets=True, limit=200,
+                        series_ticker=series,
+                        status="open",
+                        with_nested_markets=True,
+                        limit=200,
                     )
                 except Exception:
                     return []
@@ -364,8 +398,10 @@ class GameManager:
             async with sem:
                 try:
                     return await self._rest.get_events(
-                        series_ticker=series, status="open",
-                        with_nested_markets=True, limit=200,
+                        series_ticker=series,
+                        status="open",
+                        with_nested_markets=True,
+                        limit=200,
                     )
                 except Exception:
                     logger.warning("scan_series_failed", series=series, exc_info=True)

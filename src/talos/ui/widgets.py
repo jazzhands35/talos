@@ -285,19 +285,19 @@ class OpportunitiesTable(DataTable):
         self.zebra_stripes = False  # We handle pair striping ourselves
         r = "right"
         c = "center"
-        self.add_column(RichText("", justify=c), width=2)       # 0: Freshness dot
-        self.add_column("Team")                                   # 1: Team name
-        self.add_column("Lg", width=5)                           # 2: League
-        self.add_column(RichText("Game", justify=r), width=9)    # 3: Game status
-        self.add_column(RichText("NO", justify=r), width=5)      # 4: NO price
-        self.add_column(RichText("Vol", justify=r), width=6)     # 5: Volume
-        self.add_column(RichText("Pos", justify=r), width=14)    # 6: Position
-        self.add_column(RichText("Queue", justify=r), width=6)   # 7: Queue position
-        self.add_column(RichText("CPM", justify=r), width=8)     # 8: Contracts/min
-        self.add_column(RichText("ETA", justify=r), width=7)     # 9: Est. time to fill
-        self.add_column(RichText("Edge", justify=r), width=6)    # 10: Fee-adjusted edge
-        self.add_column("Status", width=16)                       # 11: Event status
-        self.add_column(RichText("Locked", justify=r), width=10) # 12: Locked profit
+        self.add_column(RichText("", justify=c), width=2)  # 0: Freshness dot
+        self.add_column("Team")  # 1: Team name
+        self.add_column("Lg", width=5)  # 2: League
+        self.add_column(RichText("Game", justify=r), width=9)  # 3: Game status
+        self.add_column(RichText("NO", justify=r), width=5)  # 4: NO price
+        self.add_column(RichText("Vol", justify=r), width=6)  # 5: Volume
+        self.add_column(RichText("Pos", justify=r), width=14)  # 6: Position
+        self.add_column(RichText("Queue", justify=r), width=6)  # 7: Queue position
+        self.add_column(RichText("CPM", justify=r), width=8)  # 8: Contracts/min
+        self.add_column(RichText("ETA", justify=r), width=7)  # 9: Est. time to fill
+        self.add_column(RichText("Edge", justify=r), width=6)  # 10: Fee-adjusted edge
+        self.add_column("Status", width=16)  # 11: Event status
+        self.add_column(RichText("Locked", justify=r), width=10)  # 12: Locked profit
         self.add_column(RichText("Expos", justify=r), width=10)  # 13: Exposure
 
     def _render_line_in_row(  # type: ignore[override]
@@ -434,14 +434,10 @@ class OpportunitiesTable(DataTable):
                         col_key = self.ordered_columns[col_idx].key
                         self.update_cell(key_b, col_key, value)
 
-    def _build_row_pair(
-        self, opp: Any, tracker: TopOfMarketTracker | None
-    ) -> tuple[tuple, tuple]:
+    def _build_row_pair(self, opp: Any, tracker: TopOfMarketTracker | None) -> tuple[tuple, tuple]:
         """Build two row tuples (row1=team_a, row2=team_b) for one event."""
         # Team names
-        team_a, team_b = self._leg_labels.get(
-            opp.event_ticker, (opp.ticker_a, opp.ticker_b)
-        )
+        team_a, team_b = self._leg_labels.get(opp.event_ticker, (opp.ticker_a, opp.ticker_b))
 
         # Freshness dots
         dot_a = _fmt_freshness(self._freshness.get(opp.ticker_a))
@@ -534,16 +530,38 @@ class OpportunitiesTable(DataTable):
 
         # Row 1: team A + shared event-level info
         row1 = (
-            dot_a, team_a, league, game_col,
-            no_a, vol_a, pos_a, q_a, cpm_a, eta_a,
-            edge_str, status, locked_str, exposure_str,
+            dot_a,
+            team_a,
+            league,
+            game_col,
+            no_a,
+            vol_a,
+            pos_a,
+            q_a,
+            cpm_a,
+            eta_a,
+            edge_str,
+            status,
+            locked_str,
+            exposure_str,
         )
 
         # Row 2: team B only — shared columns blank
         row2 = (
-            dot_b, team_b, "", "",
-            no_b, vol_b, pos_b, q_b, cpm_b, eta_b,
-            "", "", "", "",
+            dot_b,
+            team_b,
+            "",
+            "",
+            no_b,
+            vol_b,
+            pos_b,
+            q_b,
+            cpm_b,
+            eta_b,
+            "",
+            "",
+            "",
+            "",
         )
 
         return row1, row2

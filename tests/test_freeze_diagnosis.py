@@ -52,6 +52,7 @@ def _make_engine(*, n_pairs: int = 0, with_data_collector: bool = False) -> Trad
     game_mgr.labels = {}
     game_mgr.subtitles = {}
     game_mgr.volumes_24h = {}
+    game_mgr.leg_labels = {}
 
     engine = TradingEngine(
         scanner=scanner,
