@@ -45,15 +45,16 @@ def aggregate_settlements(
 
         revenue = s.get("revenue", 0)
         cost = s.get("no_total_cost", 0) + s.get("yes_total_cost", 0)
+        profit = revenue - cost
 
         if settled_dt >= today_start:
-            buckets["today_pnl"] += revenue
+            buckets["today_pnl"] += profit
             buckets["today_invested"] += cost
         if yesterday_start <= settled_dt < today_start:
-            buckets["yesterday_pnl"] += revenue
+            buckets["yesterday_pnl"] += profit
             buckets["yesterday_invested"] += cost
         if settled_dt >= week_start:
-            buckets["week_pnl"] += revenue
+            buckets["week_pnl"] += profit
             buckets["week_invested"] += cost
 
     return buckets

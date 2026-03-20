@@ -19,7 +19,7 @@ def test_aggregate_today():
     ]
 
     result = aggregate_settlements(settlements, now_pt)
-    assert result["today_pnl"] == 960  # 640 + 320 revenue
+    assert result["today_pnl"] == 260  # (640-400) + (320-300) = 240+20 profit
     assert result["today_invested"] == 700  # 400 + 300 cost
 
 
