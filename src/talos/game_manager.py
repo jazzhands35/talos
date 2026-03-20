@@ -75,6 +75,27 @@ def parse_kalshi_url(url_or_ticker: str) -> str:
     return url_or_ticker.strip().upper()
 
 
+def extract_leg_labels(sub_title: str) -> tuple[str, str]:
+    """Extract per-leg team names from event sub_title.
+
+    Handles formats like:
+    - "Boston Bruins vs Washington Capitals (Mar 19)"
+    - "Wake Forest at Virginia Tech (Mar 10)"
+
+    Returns (team_a, team_b) tuple. Falls back to (full, full) if unparseable.
+    """
+    if not sub_title:
+        return ("", "")
+    label = sub_title
+    if "(" in label:
+        label = label[: label.rfind("(")].strip()
+    for sep in (" vs ", " vs. ", " at "):
+        if sep in label:
+            parts = label.split(sep, 1)
+            return (parts[0].strip(), parts[1].strip())
+    return (label, label)
+
+
 class GameManager:
     """Orchestrates game setup, teardown, and ties layers together.
 
@@ -93,6 +114,7 @@ class GameManager:
         self._games: dict[str, ArbPair] = {}
         self._labels: dict[str, str] = {}
         self._subtitles: dict[str, str] = {}
+        self._leg_labels: dict[str, tuple[str, str]] = {}
         self._volumes_24h: dict[str, int] = {}  # market_ticker -> 24h volume
         self.on_change: Callable[[], None] | None = None
 
@@ -195,6 +217,9 @@ class GameManager:
         for sep in (" vs ", " at ", " vs. "):
             label = label.replace(sep, "-")
         self._labels[event.event_ticker] = label
+        self._leg_labels[event.event_ticker] = extract_leg_labels(
+            event.sub_title or event.title
+        )
 
         if self.on_change:
             self.on_change()
@@ -236,6 +261,9 @@ class GameManager:
         self._games[event_ticker] = pair
         if "sub_title" in data:
             self._subtitles[event_ticker] = str(data["sub_title"])
+            self._leg_labels[event_ticker] = extract_leg_labels(str(data["sub_title"]))
+        elif "label" in data:
+            self._leg_labels[event_ticker] = (str(data["label"]), str(data["label"]))
         if "label" in data:
             self._labels[event_ticker] = str(data["label"])
         if self.on_change:
@@ -273,6 +301,7 @@ class GameManager:
             return
         self._labels.pop(event_ticker, None)
         self._subtitles.pop(event_ticker, None)
+        self._leg_labels.pop(event_ticker, None)
         self._volumes_24h.pop(pair.ticker_a, None)
         self._volumes_24h.pop(pair.ticker_b, None)
         self._scanner.remove_pair(event_ticker)
@@ -289,6 +318,7 @@ class GameManager:
             pair = self._games.pop(ticker)
             self._labels.pop(ticker, None)
             self._subtitles.pop(ticker, None)
+            self._leg_labels.pop(ticker, None)
             self._volumes_24h.pop(pair.ticker_a, None)
             self._volumes_24h.pop(pair.ticker_b, None)
             self._scanner.remove_pair(ticker)
@@ -368,6 +398,11 @@ class GameManager:
     def subtitles(self) -> dict[str, str]:
         """Event ticker -> raw sub_title from Kalshi."""
         return dict(self._subtitles)
+
+    @property
+    def leg_labels(self) -> dict[str, tuple[str, str]]:
+        """Event ticker -> (team_a, team_b) display labels."""
+        return dict(self._leg_labels)
 
     @property
     def volumes_24h(self) -> dict[str, int]:
