@@ -47,8 +47,7 @@ Footer {{
 }}
 
 #bottom-panels {{
-    height: auto;
-    max-height: 12;
+    height: 12;
     layout: horizontal;
 }}
 
