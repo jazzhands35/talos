@@ -25,7 +25,10 @@ from talos.models.proposal import ProposalKey
 from talos.models.strategy import BidConfirmation
 from talos.scanner import ArbitrageScanner
 from talos.ui.proposal_panel import ProposalPanel
-from talos.ui.screens import AddGamesScreen, AutoAcceptScreen, BidScreen, ScanScreen, UnitSizeScreen
+from talos.ui.screens import (
+    AddGamesScreen, AutoAcceptScreen, BidScreen, ScanScreen,
+    SettlementHistoryScreen, UnitSizeScreen,
+)
 from talos.ui.theme import APP_CSS
 from talos.ui.widgets import ActivityLog, OpportunitiesTable, OrderLog, PortfolioPanel
 
@@ -55,6 +58,7 @@ class TalosApp(App):
         ("e", "toggle_exit_only", "Exit-Only"),
         ("c", "scan", "Scan"),
         ("o", "open_in_browser", "Open"),
+        ("h", "settlement_history", "History"),
         ("l", "copy_activity_log", "Copy Log"),
         ("q", "quit", "Quit"),
     ]
@@ -635,6 +639,30 @@ class TalosApp(App):
         series = event_ticker.split("-")[0].lower()
         url = f"https://kalshi.com/markets/{series}/{event_ticker.lower()}"
         webbrowser.open(url)
+
+    def action_settlement_history(self) -> None:
+        if self._engine is not None:
+            self._open_settlement_history()
+
+    @work(thread=False, exclusive=True, group="settlement_history")
+    async def _open_settlement_history(self) -> None:
+        if self._engine is None:
+            return
+        try:
+            settlements = await self._engine._rest.get_settlements(limit=200)
+        except Exception as e:
+            self.notify(f"Failed to fetch settlements: {e}", severity="error")
+            return
+        if not settlements:
+            self.notify("No settlements found", severity="information")
+            return
+        await self.push_screen_wait(
+            SettlementHistoryScreen(
+                settlements,
+                position_summaries=self._engine.position_summaries,
+                subtitles=self._engine.game_manager.subtitles,
+            )
+        )
 
     def action_copy_activity_log(self) -> None:
         """Copy activity log contents to clipboard."""
