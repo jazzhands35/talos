@@ -474,9 +474,7 @@ class SettlementHistoryScreen(ModalScreen[None]):
         table.add_column(RichText("NO", justify=r), width=5)
         table.add_column(RichText("Qty", justify=r), width=5)
         table.add_column(RichText("Cost", justify=r), width=8)
-        table.add_column(RichText("Revenue", justify=r), width=8)
-        table.add_column(RichText("Profit", justify=r), width=8)
-        table.add_column(RichText("Est P&L", justify=r), width=9)
+        table.add_column(RichText("Est", justify=r), width=9)
         table.add_column(RichText("Actual", justify=r), width=9)
         table.add_column(RichText("Settled", justify=r), width=9)
 
@@ -515,7 +513,7 @@ class SettlementHistoryScreen(ModalScreen[None]):
             sep_text = f"─── {day_label} ─────────────────── Day P&L: {day_pnl_str} ───"
             table.add_row(
                 RichText(sep_text, style=SURFACE2),
-                "", "", "", "", "", "", "", "", "", "",
+                "", "", "", "", "", "", "", "",
                 key=f"day:{day_key}",
             )
             row_idx += 1
@@ -584,8 +582,6 @@ class SettlementHistoryScreen(ModalScreen[None]):
             self._fmt_no_price(leg_a),
             self._fmt_qty(leg_a),
             self._fmt_cost(leg_a),
-            self._fmt_dollars(total_revenue) if total_revenue else RichText("—", style="dim", justify="right"),
-            self._fmt_dollars(actual_pnl),
             est_str,
             actual_str,
             RichText(time_str, justify="right"),
@@ -600,7 +596,7 @@ class SettlementHistoryScreen(ModalScreen[None]):
             self._fmt_no_price(leg_b),
             self._fmt_qty(leg_b),
             self._fmt_cost(leg_b),
-            "", "", "", "", "",
+            "", "", "",
             key=f"{evt_ticker}:b",
         )
 

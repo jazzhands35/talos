@@ -180,6 +180,6 @@ class TestSettlementScreenRender:
             table = screen.query_one("#settlement-table", DataTable)
             # Row at index 1 is the first event row (index 0 is day header)
             row = table.get_row_at(1)
-            # Col 8 = Est P&L
-            est_text = str(row[8])
+            # Col 6 = Est P&L
+            est_text = str(row[6])
             assert "$0.70" in est_text
