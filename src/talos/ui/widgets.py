@@ -310,14 +310,25 @@ class OpportunitiesTable(DataTable):
             return base_style + self._PAIR_BG
         return base_style
 
+    _DIVIDER_STYLE = RichStyle(overline=True)
+
     def _render_line_in_row(  # type: ignore[override]
-        self, *args: Any, **kwargs: Any
+        self,
+        row_key: Any,
+        line_no: int,
+        base_style: Any,
+        cursor_location: Any,
+        hover_location: Any,
     ) -> Any:
-        """Insert faint vertical dividers between columns."""
-        fixed, scrollable = super()._render_line_in_row(*args, **kwargs)
+        """Vertical column dividers + overline separator between event pairs."""
+        fixed, scrollable = super()._render_line_in_row(
+            row_key, line_no, base_style, cursor_location, hover_location,
+        )
         col_count = len(self.ordered_columns)
         if col_count < 2:
             return fixed, scrollable
+
+        # Vertical column separators
         sep = [Segment("\u2502", self._SEP_STYLE)]
         result = [scrollable[0]]
         for i in range(1, col_count):
@@ -325,6 +336,26 @@ class OpportunitiesTable(DataTable):
             result.append(scrollable[i])
         for i in range(col_count, len(scrollable)):
             result.append(scrollable[i])
+
+        # Overline on :a rows (except the very first) to separate event pairs
+        key_str = str(row_key.value) if row_key.value is not None else ""
+        if key_str.endswith(":a") and line_no == 0:
+            row_index = self._row_locations.get(row_key)
+            if row_index is None:
+                row_index = 0
+            if row_index > 0:
+                result = [
+                    [
+                        Segment(
+                            seg.text,
+                            (seg.style or RichStyle()) + self._DIVIDER_STYLE,
+                            seg.control,
+                        )
+                        for seg in cell
+                    ]
+                    for cell in result
+                ]
+
         return fixed, result
 
     def toggle_sort(self, col_idx: int) -> None:
