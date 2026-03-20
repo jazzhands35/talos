@@ -200,14 +200,21 @@ def _fmt_status(status: str) -> RichText:
 
 
 def _fmt_freshness(age_seconds: float | None) -> RichText:
-    """Format freshness dot based on seconds since last WS update."""
+    """Format freshness dot based on seconds since last WS update.
+
+    Uses markup-style spans so the dot color survives cursor highlight.
+    """
     if age_seconds is None:
         return RichText("○", style="dim", justify="center")
     if age_seconds < 5.0:
-        return RichText("●", style=GREEN, justify="center")
-    if age_seconds < 30.0:
-        return RichText("●", style=YELLOW, justify="center")
-    return RichText("●", style=RED, justify="center")
+        color = GREEN
+    elif age_seconds < 30.0:
+        color = YELLOW
+    else:
+        color = RED
+    t = RichText(justify="center")
+    t.append("●", style=RichStyle(color=color, bold=True))
+    return t
 
 
 def _fmt_pnl_with_roi(pnl_cents: int, invested_cents: int) -> str:
