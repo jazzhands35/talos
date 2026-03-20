@@ -101,6 +101,7 @@ class TalosApp(App):
             self.set_interval(3600.0, self._refresh_game_status)
             self.set_interval(300.0, self._refresh_volumes)
             self.set_interval(10.0, self._log_market_snapshots)
+            self.set_interval(300.0, self._poll_settlements)  # every 5 minutes
             self._engine.on_notification = self._on_engine_notification
             self._engine.tracker.on_change = self._engine.on_top_of_market_change
             if self._engine.game_status_resolver is not None:
@@ -391,6 +392,43 @@ class TalosApp(App):
         table = self.query_one(OpportunitiesTable)
         table.update_positions(self._engine.position_summaries)
         table._all_dirty = True
+
+    @work(thread=False, exclusive=True, group="settlements")
+    async def _poll_settlements(self) -> None:
+        if self._engine is None:
+            return
+        try:
+            settlements = await self._engine._rest.get_settlements(limit=200)
+            from talos.settlement_tracker import aggregate_settlements, reconcile_event
+
+            agg = aggregate_settlements([s.model_dump() for s in settlements])
+            panel = self.query_one(PortfolioPanel)
+            panel.update_pnl(
+                today=agg["today_pnl"],
+                yesterday=agg["yesterday_pnl"],
+                last_7d=agg["week_pnl"],
+                invested_today=agg["today_invested"],
+                invested_yesterday=agg["yesterday_invested"],
+                invested_7d=agg["week_invested"],
+            )
+            # Reconciliation: check for discrepancies
+            summaries_by_event = {s.event_ticker: s for s in self._engine.position_summaries}
+            for s in settlements:
+                pos = summaries_by_event.get(s.event_ticker)
+                if pos is None:
+                    continue
+                our_expected = int(pos.locked_profit_cents)
+                disc = reconcile_event(our_expected, s.revenue, s.event_ticker)
+                if disc is not None and abs(disc["difference"]) > 5:
+                    self.query_one(ActivityLog).log_activity(
+                        f"P&L DISCREPANCY {s.event_ticker}: "
+                        f"ours=${disc['our_revenue'] / 100:.2f} "
+                        f"kalshi=${disc['kalshi_revenue'] / 100:.2f} "
+                        f"diff=${disc['difference'] / 100:.2f}",
+                        severity="warning",
+                    )
+        except Exception:
+            pass  # Non-critical — don't crash for P&L display
 
     def _log_market_snapshots(self) -> None:
         """Log market snapshots every 10s for ML data collection.
