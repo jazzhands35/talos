@@ -54,3 +54,31 @@ def test_freshness_dot_never_connected():
     """No data yet (age=None) → dim dot."""
     result = _fmt_freshness(None)
     assert "○" in str(result)
+
+
+from unittest.mock import MagicMock
+from talos.ui.widgets import OpportunitiesTable
+
+
+def test_build_two_rows_returns_pair():
+    """_build_row_pair returns two tuples (row1, row2)."""
+    table = OpportunitiesTable()
+    table._leg_labels = {"EVT-TEST": ("Boston Bruins", "Washington Capitals")}
+    table._freshness = {"MKT-A": 1.0, "MKT-B": 2.0}
+
+    opp = MagicMock()
+    opp.event_ticker = "EVT-TEST"
+    opp.ticker_a = "MKT-A"
+    opp.ticker_b = "MKT-B"
+    opp.no_a = 42
+    opp.no_b = 44
+    opp.fee_edge = 3.2
+
+    row1, row2 = table._build_row_pair(opp, tracker=None)
+    # Row 1 should have team name "Boston Bruins"
+    assert "Boston Bruins" in str(row1[1])
+    # Row 2 should have team name "Washington Capitals"
+    assert "Washington Capitals" in str(row2[1])
+    # Both rows have 14 cells
+    assert len(row1) == 14
+    assert len(row2) == 14

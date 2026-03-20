@@ -32,6 +32,11 @@ from talos.ui.widgets import AccountPanel, ActivityLog, OpportunitiesTable, Orde
 logger = structlog.get_logger()
 
 
+def _event_ticker_from_row_key(raw_key: str) -> str:
+    """Strip :a or :b suffix from two-row layout row keys."""
+    return raw_key.rsplit(":", 1)[0] if ":" in raw_key else raw_key
+
+
 class TalosApp(App):
     """Talos arbitrage trading dashboard."""
 
@@ -476,6 +481,7 @@ class TalosApp(App):
             table._all_dirty = True  # test mode — no WS dirty tracking
         if self._engine is not None:
             table.update_labels(self._engine.game_manager.labels)
+            table.update_leg_labels(self._engine.game_manager.leg_labels)
             table.update_volumes(self._engine.game_manager.volumes_24h)
             table.update_statuses(self._engine.event_statuses)
         tracker = self._engine.tracker if self._engine else None
@@ -574,7 +580,7 @@ class TalosApp(App):
         if table.cursor_row is None or table.row_count == 0:
             return
         cell_key = table.coordinate_to_cell_key(table.cursor_coordinate)
-        event_ticker = str(cell_key.row_key.value)
+        event_ticker = _event_ticker_from_row_key(str(cell_key.row_key.value))
         if not event_ticker:
             return
         series = event_ticker.split("-")[0].lower()
@@ -594,7 +600,7 @@ class TalosApp(App):
     def on_data_table_row_selected(self, event: DataTable.RowSelected) -> None:
         if self._scanner is None:
             return
-        event_ticker = str(event.row_key.value)
+        event_ticker = _event_ticker_from_row_key(str(event.row_key.value))
         opp = self._scanner.get_opportunity(event_ticker)
         if opp is None:
             opp = self._scanner.all_snapshots.get(event_ticker)
@@ -617,7 +623,7 @@ class TalosApp(App):
         if table.cursor_row is not None:
             try:
                 row_key, _ = table.coordinate_to_cell_key(table.cursor_coordinate)
-                event_ticker = str(row_key.value)
+                event_ticker = _event_ticker_from_row_key(str(row_key.value))
                 self._remove_game(event_ticker)
             except CellDoesNotExist:
                 logger.debug("remove_game_no_selection")
@@ -742,7 +748,7 @@ class TalosApp(App):
             return
         try:
             cell_key = table.coordinate_to_cell_key(table.cursor_coordinate)
-            event_ticker = str(cell_key.row_key.value)
+            event_ticker = _event_ticker_from_row_key(str(cell_key.row_key.value))
         except CellDoesNotExist:
             return
         if not event_ticker:

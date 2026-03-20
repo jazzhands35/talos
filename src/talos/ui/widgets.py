@@ -221,22 +221,19 @@ class OpportunitiesTable(DataTable):
 
     # Column index -> sort key extractor from (opp, positions, volumes, resolver, labels)
     _SORT_KEYS: dict[int, str] = {
-        0: "label",  # Event name
-        1: "sport",  # Sport
-        2: "league",  # League
-        3: "no_a",  # NO-A price
-        4: "no_b",  # NO-B price
-        5: "fee_edge",  # Edge
-        6: "vol_a",  # V-A (24h volume)
-        7: "vol_b",  # V-B (24h volume)
-        8: "start",  # Date
-        9: "state",  # Game status
+        1: "label",  # Team name (col 1) — sorts by event label
+        2: "league",  # Lg (col 2)
+        3: "state",  # Game (col 3)
+        4: "no_a",  # NO (col 4) — sorts by leg A price
+        5: "vol_a",  # Vol (col 5)
+        10: "fee_edge",  # Edge (col 10)
     }
 
     def __init__(self, **kwargs: Any) -> None:
         super().__init__(**kwargs)
         self._positions: dict[str, EventPositionSummary] = {}
         self._labels: dict[str, str] = {}
+        self._leg_labels: dict[str, tuple[str, str]] = {}
         self._resolver: Any = None
         self._volumes_24h: dict[str, int] = {}
         self._event_statuses: dict[str, str] = {}
@@ -263,6 +260,10 @@ class OpportunitiesTable(DataTable):
         """Store per-market freshness ages for next render."""
         self._freshness = ages
 
+    def update_leg_labels(self, labels: dict[str, tuple[str, str]]) -> None:
+        """Store per-event (team_a, team_b) labels."""
+        self._leg_labels = labels
+
     def mark_dirty(self, event_ticker: str) -> None:
         """Mark an event as needing a table row refresh."""
         self._dirty_events.add(event_ticker)
@@ -271,28 +272,23 @@ class OpportunitiesTable(DataTable):
 
     def on_mount(self) -> None:
         self.cursor_type = "row"
-        self.zebra_stripes = True
+        self.zebra_stripes = False  # We handle pair striping ourselves
         r = "right"
-        self.add_column("Event")
-        self.add_column("Spt", width=4)
-        self.add_column("Lg", width=5)
-        self.add_column(RichText("NO-A", justify=r))
-        self.add_column(RichText("NO-B", justify=r))
-        self.add_column(RichText("Edge", justify=r))
-        self.add_column(RichText("V-A", justify=r), width=6)
-        self.add_column(RichText("V-B", justify=r), width=6)
-        self.add_column(RichText("Date", justify=r), width=6)
-        self.add_column(RichText("Game", justify=r), width=9)
-        self.add_column(RichText("Pos-A", justify=r), width=14)
-        self.add_column(RichText("Pos-B", justify=r), width=14)
-        self.add_column(RichText("Q-A", justify=r), width=10)
-        self.add_column(RichText("CPM-A", justify=r), width=8)
-        self.add_column(RichText("ETA-A", justify=r), width=7)
-        self.add_column(RichText("Q-B", justify=r), width=10)
-        self.add_column(RichText("CPM-B", justify=r), width=8)
-        self.add_column(RichText("ETA-B", justify=r), width=7)
-        self.add_column("Status", width=16)
-        self.add_column(RichText("P&L", justify=r), width=16)
+        c = "center"
+        self.add_column(RichText("", justify=c), width=2)       # 0: Freshness dot
+        self.add_column("Team")                                   # 1: Team name
+        self.add_column("Lg", width=5)                           # 2: League
+        self.add_column(RichText("Game", justify=r), width=9)    # 3: Game status
+        self.add_column(RichText("NO", justify=r), width=5)      # 4: NO price
+        self.add_column(RichText("Vol", justify=r), width=6)     # 5: Volume
+        self.add_column(RichText("Pos", justify=r), width=14)    # 6: Position
+        self.add_column(RichText("Queue", justify=r), width=6)   # 7: Queue position
+        self.add_column(RichText("CPM", justify=r), width=8)     # 8: Contracts/min
+        self.add_column(RichText("ETA", justify=r), width=7)     # 9: Est. time to fill
+        self.add_column(RichText("Edge", justify=r), width=6)    # 10: Fee-adjusted edge
+        self.add_column("Status", width=16)                       # 11: Event status
+        self.add_column(RichText("Locked", justify=r), width=10) # 12: Locked profit
+        self.add_column(RichText("Expos", justify=r), width=10)  # 13: Exposure
 
     def _render_line_in_row(  # type: ignore[override]
         self, *args: Any, **kwargs: Any
@@ -327,26 +323,20 @@ class OpportunitiesTable(DataTable):
             return opp.raw_edge  # default sort; reverse=True gives descending
         key_name = self._SORT_KEYS.get(col)
         if key_name == "label":
+            labels = self._leg_labels.get(opp.event_ticker)
+            if labels:
+                return labels[0].lower()
             return (self._labels.get(opp.event_ticker) or opp.event_ticker).lower()
-        if key_name == "sport" or key_name == "league":
+        if key_name == "league":
             prefix = opp.event_ticker.split("-")[0]
             pair = _SPORT_LEAGUE.get(prefix, ("~", "~"))
-            return pair[0].lower() if key_name == "sport" else pair[1].lower()
+            return pair[1].lower()
         if key_name == "no_a":
             return opp.no_a
-        if key_name == "no_b":
-            return opp.no_b
         if key_name == "fee_edge":
             return opp.fee_edge
         if key_name == "vol_a":
             return self._volumes_24h.get(opp.ticker_a, 0)
-        if key_name == "vol_b":
-            return self._volumes_24h.get(opp.ticker_b, 0)
-        if key_name == "start":
-            gs = self._resolver.get(opp.event_ticker) if self._resolver else None
-            if gs and gs.scheduled_start:
-                return gs.scheduled_start.timestamp()
-            return 0.0
         if key_name == "state":
             gs = self._resolver.get(opp.event_ticker) if self._resolver else None
             order = {"live": 0, "pre": 1, "post": 2, "unknown": 3}
@@ -372,8 +362,12 @@ class OpportunitiesTable(DataTable):
             return
 
         all_snaps = scanner.all_snapshots
-        current_keys = {row_key.value for row_key in self.rows}
-        new_keys = set(all_snaps.keys())
+        current_events = {
+            str(k.value).rsplit(":", 1)[0]
+            for k in self.rows
+            if k.value is not None and ":" in str(k.value)
+        }
+        new_events = set(all_snaps.keys())
 
         # On sort click: clear and re-add in sorted order
         if self._needs_resort:
@@ -386,10 +380,11 @@ class OpportunitiesTable(DataTable):
             with self.app.batch_update():
                 self.clear()
                 for opp in sorted_opps:
-                    self.add_row(*self._build_row(opp, tracker), key=opp.event_ticker)
+                    row1, row2 = self._build_row_pair(opp, tracker)
+                    self.add_row(*row1, key=f"{opp.event_ticker}:a")
+                    self.add_row(*row2, key=f"{opp.event_ticker}:b")
             return
 
-        # Normal refresh: update in place, preserving row order and highlight
         sorted_opps = sorted(all_snaps.values(), key=lambda o: o.raw_edge, reverse=True)
 
         dirty = self._dirty_events
@@ -398,27 +393,66 @@ class OpportunitiesTable(DataTable):
         self._all_dirty = False
 
         with self.app.batch_update():
-            for key in current_keys - new_keys:
-                if key is not None:
-                    self.remove_row(key)
+            # Remove events no longer tracked
+            for evt in current_events - new_events:
+                self.remove_row(f"{evt}:a")
+                self.remove_row(f"{evt}:b")
+
             for opp in sorted_opps:
-                is_new = opp.event_ticker not in current_keys
+                key_a = f"{opp.event_ticker}:a"
+                key_b = f"{opp.event_ticker}:b"
+                is_new = opp.event_ticker not in current_events
+
                 if is_new:
-                    self.add_row(*self._build_row(opp, tracker), key=opp.event_ticker)
+                    row1, row2 = self._build_row_pair(opp, tracker)
+                    self.add_row(*row1, key=key_a)
+                    self.add_row(*row2, key=key_b)
                 elif all_dirty or opp.event_ticker in dirty:
-                    # Only rebuild rows that changed — skip unchanged cells
-                    row_data = self._build_row(opp, tracker)
-                    old_row = self.get_row(opp.event_ticker)
-                    for col_idx, value in enumerate(row_data):
-                        if col_idx < len(old_row) and str(old_row[col_idx]) == str(value):
+                    row1, row2 = self._build_row_pair(opp, tracker)
+                    # Update row A
+                    old_a = self.get_row(key_a)
+                    for col_idx, value in enumerate(row1):
+                        if col_idx < len(old_a) and str(old_a[col_idx]) == str(value):
                             continue
                         col_key = self.ordered_columns[col_idx].key
-                        self.update_cell(opp.event_ticker, col_key, value)
+                        self.update_cell(key_a, col_key, value)
+                    # Update row B
+                    old_b = self.get_row(key_b)
+                    for col_idx, value in enumerate(row2):
+                        if col_idx < len(old_b) and str(old_b[col_idx]) == str(value):
+                            continue
+                        col_key = self.ordered_columns[col_idx].key
+                        self.update_cell(key_b, col_key, value)
 
-    def _build_row(self, opp: Any, tracker: TopOfMarketTracker | None) -> tuple:
-        """Build the full row_data tuple for one opportunity."""
+    def _build_row_pair(
+        self, opp: Any, tracker: TopOfMarketTracker | None
+    ) -> tuple[tuple, tuple]:
+        """Build two row tuples (row1=team_a, row2=team_b) for one event."""
+        # Team names
+        team_a, team_b = self._leg_labels.get(
+            opp.event_ticker, (opp.ticker_a, opp.ticker_b)
+        )
+
+        # Freshness dots
+        dot_a = _fmt_freshness(self._freshness.get(opp.ticker_a))
+        dot_b = _fmt_freshness(self._freshness.get(opp.ticker_b))
+
+        # Edge
         edge_str = _fmt_edge(opp.fee_edge)
 
+        # Per-leg price and volume
+        no_a = _fmt_cents(opp.no_a)
+        no_b = _fmt_cents(opp.no_b)
+        vol_a = _fmt_vol(self._volumes_24h.get(opp.ticker_a, 0))
+        vol_b = _fmt_vol(self._volumes_24h.get(opp.ticker_b, 0))
+
+        # Game status (row 1 only)
+        prefix = opp.event_ticker.split("-")[0]
+        _, league = _SPORT_LEAGUE.get(prefix, ("—", "—"))
+        game_status = self._resolver.get(opp.event_ticker) if self._resolver else None
+        game_col = _fmt_game_status(game_status)
+
+        # Position data
         pos = self._positions.get(opp.event_ticker)
         if pos is not None:
             total_a = pos.leg_a.filled_count + pos.leg_a.resting_count
@@ -426,6 +460,7 @@ class OpportunitiesTable(DataTable):
             pos_a = _fmt_pos(pos.leg_a.filled_count, total_a, pos.leg_a.no_price)
             pos_b = _fmt_pos(pos.leg_b.filled_count, total_b, pos.leg_b.no_price)
 
+            # Highlight imbalanced legs
             fa, fb = pos.leg_a.filled_count, pos.leg_b.filled_count
             ra, rb = pos.leg_a.resting_count, pos.leg_b.resting_count
             ta, tb = fa + ra, fb + rb
@@ -458,13 +493,27 @@ class OpportunitiesTable(DataTable):
             eta_b = RichText(
                 format_eta(pos.leg_b.eta_minutes, pos.leg_b.cpm_partial), justify="right"
             )
-            net = pos.locked_profit_cents - pos.exposure_cents
-            pnl = _fmt_pnl(net, pos.kalshi_pnl)
+
+            # Locked and Exposure
+            locked = pos.locked_profit_cents
+            if locked > 0:
+                locked_str = RichText(f"${locked / 100:.2f}", style=GREEN, justify="right")
+            elif locked == 0:
+                locked_str = DIM_DASH
+            else:
+                locked_str = RichText(f"-${abs(locked) / 100:.2f}", style=RED, justify="right")
+
+            exposure = pos.exposure_cents
+            if exposure > 0:
+                exposure_str = RichText(f"${exposure / 100:.2f}", style=RED, justify="right")
+            else:
+                exposure_str = DIM_DASH
+
             status = _fmt_status(pos.status)
         else:
             pos_a = pos_b = q_a = q_b = DIM_DASH
             cpm_a = cpm_b = eta_a = eta_b = DIM_DASH
-            pnl = DIM_DASH
+            locked_str = exposure_str = DIM_DASH
             status = _fmt_status(self._event_statuses.get(opp.event_ticker, ""))
 
         if tracker is not None:
@@ -473,36 +522,21 @@ class OpportunitiesTable(DataTable):
             if tracker.is_at_top(opp.ticker_b) is False:
                 q_b = RichText(f"!! {q_b}", style=YELLOW, justify="right")
 
-        display_name = self._labels.get(opp.event_ticker, opp.event_ticker)
-        prefix = opp.event_ticker.split("-")[0]
-        sport, league = _SPORT_LEAGUE.get(prefix, ("—", "—"))
-        vol_a = _fmt_vol(self._volumes_24h.get(opp.ticker_a, 0))
-        vol_b = _fmt_vol(self._volumes_24h.get(opp.ticker_b, 0))
-        game_status = self._resolver.get(opp.event_ticker) if self._resolver else None
-        game_date = _fmt_game_date(game_status.scheduled_start if game_status else None)
-        game_col = _fmt_game_status(game_status)
-        return (
-            display_name,
-            sport,
-            league,
-            _fmt_cents(opp.no_a),
-            _fmt_cents(opp.no_b),
-            edge_str,
-            vol_a,
-            vol_b,
-            game_date,
-            game_col,
-            pos_a,
-            pos_b,
-            q_a,
-            cpm_a,
-            eta_a,
-            q_b,
-            cpm_b,
-            eta_b,
-            status,
-            pnl,
+        # Row 1: team A + shared event-level info
+        row1 = (
+            dot_a, team_a, league, game_col,
+            no_a, vol_a, pos_a, q_a, cpm_a, eta_a,
+            edge_str, status, locked_str, exposure_str,
         )
+
+        # Row 2: team B only — shared columns blank
+        row2 = (
+            dot_b, team_b, "", "",
+            no_b, vol_b, pos_b, q_b, cpm_b, eta_b,
+            "", "", "", "",
+        )
+
+        return row1, row2
 
 
 class AccountPanel(Static):
