@@ -27,7 +27,7 @@ from talos.scanner import ArbitrageScanner
 from talos.ui.proposal_panel import ProposalPanel
 from talos.ui.screens import AddGamesScreen, AutoAcceptScreen, BidScreen, ScanScreen, UnitSizeScreen
 from talos.ui.theme import APP_CSS
-from talos.ui.widgets import AccountPanel, ActivityLog, OpportunitiesTable, OrderLog
+from talos.ui.widgets import ActivityLog, OpportunitiesTable, OrderLog, PortfolioPanel
 
 logger = structlog.get_logger()
 
@@ -82,7 +82,7 @@ class TalosApp(App):
         )
         yield OpportunitiesTable(id="opportunities-table")
         with Horizontal(id="bottom-panels"):
-            yield AccountPanel(id="account-panel")
+            yield PortfolioPanel(id="account-panel")
             yield ActivityLog(id="activity-log")
             yield OrderLog(id="order-log")
         yield Footer()
@@ -351,7 +351,7 @@ class TalosApp(App):
         if self._engine is None:
             return
         await self._engine.refresh_balance()
-        self.query_one(AccountPanel).update_balance(
+        self.query_one(PortfolioPanel).update_balance(
             self._engine.balance, self._engine.portfolio_value
         )
 
@@ -484,6 +484,15 @@ class TalosApp(App):
             table.update_leg_labels(self._engine.game_manager.leg_labels)
             table.update_volumes(self._engine.game_manager.volumes_24h)
             table.update_statuses(self._engine.event_statuses)
+            # Push portfolio summaries
+            panel = self.query_one(PortfolioPanel)
+            summaries = self._engine.position_summaries
+            total_locked = sum(s.locked_profit_cents for s in summaries)
+            total_exposure = sum(s.exposure_cents for s in summaries)
+            total_invested = sum(
+                s.leg_a.total_fill_cost + s.leg_b.total_fill_cost for s in summaries
+            )
+            panel.update_portfolio_summary(total_locked, total_exposure, total_invested)
         tracker = self._engine.tracker if self._engine else None
         table.refresh_from_scanner(self._scanner, tracker)
         self._update_freshness()

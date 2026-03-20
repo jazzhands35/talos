@@ -1,7 +1,9 @@
 """Tests for table redesign features."""
 
+from unittest.mock import MagicMock
+
 from talos.game_manager import extract_leg_labels
-from talos.ui.widgets import _fmt_freshness
+from talos.ui.widgets import OpportunitiesTable, _fmt_freshness, _fmt_pnl_with_roi
 
 
 def test_extract_leg_labels_from_subtitle():
@@ -56,8 +58,16 @@ def test_freshness_dot_never_connected():
     assert "○" in str(result)
 
 
-from unittest.mock import MagicMock
-from talos.ui.widgets import OpportunitiesTable
+def test_pnl_with_roi_positive():
+    result = _fmt_pnl_with_roi(640, 15600)  # $6.40 P&L on $156 invested
+    assert "$6.40" in result
+    assert "4.1%" in result
+
+
+def test_pnl_with_roi_zero_invested():
+    """Zero invested → no ROI shown."""
+    result = _fmt_pnl_with_roi(0, 0)
+    assert "%" not in result
 
 
 def test_build_two_rows_returns_pair():

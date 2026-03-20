@@ -210,6 +210,16 @@ def _fmt_freshness(age_seconds: float | None) -> RichText:
     return RichText("●", style=RED, justify="center")
 
 
+def _fmt_pnl_with_roi(pnl_cents: int, invested_cents: int) -> str:
+    """Format P&L with ROI percentage: '$6.40 (4.1%)'."""
+    dollars = pnl_cents / 100
+    label = f"${dollars:.2f}" if dollars >= 0 else f"-${abs(dollars):.2f}"
+    if invested_cents > 0:
+        roi = (pnl_cents / invested_cents) * 100
+        label += f" ({roi:.1f}%)"
+    return label
+
+
 class OpportunitiesTable(DataTable):
     """Live-updating arbitrage opportunities table with position data."""
 
@@ -539,25 +549,80 @@ class OpportunitiesTable(DataTable):
         return row1, row2
 
 
-class AccountPanel(Static):
-    """Displays account balance."""
+class PortfolioPanel(Static):
+    """Portfolio summary: cash, locked, exposure, invested, historical P&L."""
 
     def __init__(self, **kwargs: Any) -> None:
         super().__init__(**kwargs)
-        self._balance_text = "Cash: —\nPortfolio: —"
+        self._cash: int = 0
+        self._portfolio: int = 0
+        self._locked: float = 0.0
+        self._exposure: int = 0
+        self._invested: int = 0
+        self._pnl_today: int = 0
+        self._pnl_yesterday: int = 0
+        self._pnl_7d: int = 0
+        self._invested_today: int = 0
+        self._invested_yesterday: int = 0
+        self._invested_7d: int = 0
 
     def on_mount(self) -> None:
         self._render_content()
 
     def update_balance(self, balance_cents: int, portfolio_cents: int) -> None:
-        """Update the balance display."""
-        self._balance_text = (
-            f"Cash:      ${balance_cents / 100:,.2f}\nPortfolio: ${portfolio_cents / 100:,.2f}"
-        )
+        self._cash = balance_cents
+        self._portfolio = portfolio_cents
+        self._render_content()
+
+    def update_portfolio_summary(
+        self,
+        locked: float,
+        exposure: int,
+        invested: int,
+    ) -> None:
+        self._locked = locked
+        self._exposure = exposure
+        self._invested = invested
+        self._render_content()
+
+    def update_pnl(
+        self,
+        today: int,
+        yesterday: int,
+        last_7d: int,
+        invested_today: int = 0,
+        invested_yesterday: int = 0,
+        invested_7d: int = 0,
+    ) -> None:
+        self._pnl_today = today
+        self._pnl_yesterday = yesterday
+        self._pnl_7d = last_7d
+        self._invested_today = invested_today
+        self._invested_yesterday = invested_yesterday
+        self._invested_7d = invested_7d
         self._render_content()
 
     def _render_content(self) -> None:
-        self.update(f"ACCOUNT\n\n{self._balance_text}")
+        cash = f"${self._cash / 100:,.2f}"
+        locked = f"${self._locked / 100:,.2f}"
+        exposure = f"${self._exposure / 100:,.2f}"
+        invested = f"${self._invested / 100:,.2f}"
+
+        today = _fmt_pnl_with_roi(self._pnl_today, self._invested_today)
+        yesterday = _fmt_pnl_with_roi(self._pnl_yesterday, self._invested_yesterday)
+        last_7d = _fmt_pnl_with_roi(self._pnl_7d, self._invested_7d)
+
+        self.update(
+            f"PORTFOLIO\n\n"
+            f"Cash:      {cash}\n"
+            f"Locked In: {locked}\n"
+            f"Exposure:  {exposure}\n"
+            f"Invested:  {invested}\n"
+            f"───────────────────\n"
+            f"Today:     {today}\n"
+            f"Yesterday: {yesterday}\n"
+            f"Last 7d:   {last_7d}"
+        )
 
 
 class OrderLog(Static):
