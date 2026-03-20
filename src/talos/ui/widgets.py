@@ -618,19 +618,8 @@ class OpportunitiesTable(DataTable):
 class PortfolioPanel(Static):
     """Portfolio summary: cash, locked, exposure, invested, historical P&L."""
 
-    _PLACEHOLDER = (
-        "Cash:      —\n"
-        "Locked In: —\n"
-        "Exposure:  —\n"
-        "Invested:  —\n"
-        "───────────────────\n"
-        "Today:     —\n"
-        "Yesterday: —\n"
-        "Last 7d:   —"
-    )
-
     def __init__(self, **kwargs: Any) -> None:
-        super().__init__(self._PLACEHOLDER, **kwargs)
+        super().__init__("", **kwargs)
         self._cash: int = 0
         self._portfolio: int = 0
         self._locked: float = 0.0
@@ -646,10 +635,30 @@ class PortfolioPanel(Static):
     def on_mount(self) -> None:
         self.border_title = "Portfolio"
 
+    def render(self) -> str:
+        """Compute content each frame — bypasses Static.update() entirely."""
+        cash = f"${self._cash / 100:,.2f}"
+        locked = f"${self._locked / 100:,.2f}"
+        exposure = f"${self._exposure / 100:,.2f}"
+        invested = f"${self._invested / 100:,.2f}"
+        today = _fmt_pnl_with_roi(self._pnl_today, self._invested_today)
+        yesterday = _fmt_pnl_with_roi(self._pnl_yesterday, self._invested_yesterday)
+        last_7d = _fmt_pnl_with_roi(self._pnl_7d, self._invested_7d)
+        return (
+            f"Cash:      {cash}\n"
+            f"Locked In: {locked}\n"
+            f"Exposure:  {exposure}\n"
+            f"Invested:  {invested}\n"
+            f"───────────────────\n"
+            f"Today:     {today}\n"
+            f"Yesterday: {yesterday}\n"
+            f"Last 7d:   {last_7d}"
+        )
+
     def update_balance(self, balance_cents: int, portfolio_cents: int) -> None:
         self._cash = balance_cents
         self._portfolio = portfolio_cents
-        self._render_content()
+        self.refresh()
 
     def update_portfolio_summary(
         self,
@@ -660,7 +669,7 @@ class PortfolioPanel(Static):
         self._locked = locked
         self._exposure = exposure
         self._invested = invested
-        self._render_content()
+        self.refresh()
 
     def update_pnl(
         self,
@@ -677,28 +686,7 @@ class PortfolioPanel(Static):
         self._invested_today = invested_today
         self._invested_yesterday = invested_yesterday
         self._invested_7d = invested_7d
-        self._render_content()
-
-    def _render_content(self) -> None:
-        cash = f"${self._cash / 100:,.2f}"
-        locked = f"${self._locked / 100:,.2f}"
-        exposure = f"${self._exposure / 100:,.2f}"
-        invested = f"${self._invested / 100:,.2f}"
-
-        today = _fmt_pnl_with_roi(self._pnl_today, self._invested_today)
-        yesterday = _fmt_pnl_with_roi(self._pnl_yesterday, self._invested_yesterday)
-        last_7d = _fmt_pnl_with_roi(self._pnl_7d, self._invested_7d)
-
-        self.update(
-            f"Cash:      {cash}\n"
-            f"Locked In: {locked}\n"
-            f"Exposure:  {exposure}\n"
-            f"Invested:  {invested}\n"
-            f"───────────────────\n"
-            f"Today:     {today}\n"
-            f"Yesterday: {yesterday}\n"
-            f"Last 7d:   {last_7d}"
-        )
+        self.refresh()
 
 
 class OrderLog(Static):
