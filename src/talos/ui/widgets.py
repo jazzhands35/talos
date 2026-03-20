@@ -618,8 +618,19 @@ class OpportunitiesTable(DataTable):
 class PortfolioPanel(Static):
     """Portfolio summary: cash, locked, exposure, invested, historical P&L."""
 
+    _PLACEHOLDER = (
+        "Cash:      —\n"
+        "Locked In: —\n"
+        "Exposure:  —\n"
+        "Invested:  —\n"
+        "───────────────────\n"
+        "Today:     —\n"
+        "Yesterday: —\n"
+        "Last 7d:   —"
+    )
+
     def __init__(self, **kwargs: Any) -> None:
-        super().__init__(**kwargs)
+        super().__init__(self._PLACEHOLDER, **kwargs)
         self._cash: int = 0
         self._portfolio: int = 0
         self._locked: float = 0.0
@@ -634,7 +645,6 @@ class PortfolioPanel(Static):
 
     def on_mount(self) -> None:
         self.border_title = "Portfolio"
-        self._render_content()
 
     def update_balance(self, balance_cents: int, portfolio_cents: int) -> None:
         self._cash = balance_cents
