@@ -111,6 +111,8 @@ class TalosApp(App):
             self._start_auto_accept(24.0)
             self._start_feed()
             self._start_watchdog()
+            self._poll_balance()  # show cash immediately
+            self._poll_settlements()  # fetch settlement P&L immediately
 
     # ── Engine callbacks ──────────────────────────────────────────
 
