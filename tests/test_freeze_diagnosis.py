@@ -309,7 +309,8 @@ class TestLevel5DataCollector:
                 elapsed = time.monotonic() - t0
                 assert elapsed < 2.0, f"Snapshot write blocked for {elapsed:.1f}s"
         finally:
-            engine._data_collector.close()
+            if engine._data_collector is not None:
+                engine._data_collector.close()
             db_path.unlink(missing_ok=True)
 
 

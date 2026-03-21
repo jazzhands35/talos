@@ -29,7 +29,7 @@ def test_proposed_adjustment_rejects_invalid_side():
     with pytest.raises(ValueError):
         ProposedAdjustment(
             event_ticker="EVT-1",
-            side="C",  # invalid
+            side="C",  # type: ignore[arg-type]  # intentionally invalid
             action="follow_jump",
             cancel_order_id="order-123",
             cancel_count=10,

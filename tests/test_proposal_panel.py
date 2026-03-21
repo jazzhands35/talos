@@ -80,7 +80,7 @@ async def test_panel_shows_proposal_summary():
         # Check that a proposal-row child exists with the summary text
         rows = panel.query(".proposal-row")
         assert len(rows) == 1
-        assert "EVT-1" in rows[0].content
+        assert "EVT-1" in rows[0].content  # type: ignore[attr-defined]
 
 
 @pytest.mark.asyncio

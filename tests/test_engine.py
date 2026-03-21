@@ -1124,30 +1124,36 @@ class TestStaleBookRecovery:
         engine, _, books = _engine_with_real_feed()
         # No books are stale — subscribe/unsubscribe should not be called
         await engine._recover_stale_books()
-        engine._feed.unsubscribe.assert_not_called()
-        engine._feed.subscribe.assert_not_called()
+        engine._feed.unsubscribe.assert_not_called()  # type: ignore[attr-defined]
+        engine._feed.subscribe.assert_not_called()  # type: ignore[attr-defined]
 
     @pytest.mark.asyncio
     async def test_stale_book_triggers_resubscribe(self):
         engine, _, books = _engine_with_real_feed()
         # Mark TK-A as stale
-        books.get_book("TK-A").last_update = time.time() - 121.0
+        book_a = books.get_book("TK-A")
+        assert book_a is not None
+        book_a.last_update = time.time() - 121.0
 
         await engine._recover_stale_books()
 
-        engine._feed.unsubscribe.assert_called_once_with("TK-A")
-        engine._feed.subscribe.assert_called_once_with("TK-A")
+        engine._feed.unsubscribe.assert_called_once_with("TK-A")  # type: ignore[attr-defined]
+        engine._feed.subscribe.assert_called_once_with("TK-A")  # type: ignore[attr-defined]
 
     @pytest.mark.asyncio
     async def test_multiple_stale_books_all_recovered(self):
         engine, _, books = _engine_with_real_feed()
-        books.get_book("TK-A").last_update = time.time() - 121.0
-        books.get_book("TK-B").last_update = time.time() - 121.0
+        book_a = books.get_book("TK-A")
+        assert book_a is not None
+        book_a.last_update = time.time() - 121.0
+        book_b = books.get_book("TK-B")
+        assert book_b is not None
+        book_b.last_update = time.time() - 121.0
 
         await engine._recover_stale_books()
 
-        assert engine._feed.unsubscribe.call_count == 2
-        assert engine._feed.subscribe.call_count == 2
+        assert engine._feed.unsubscribe.call_count == 2  # type: ignore[attr-defined]
+        assert engine._feed.subscribe.call_count == 2  # type: ignore[attr-defined]
 
     @pytest.mark.asyncio
     async def test_stale_non_active_ticker_ignored(self):
@@ -1157,18 +1163,22 @@ class TestStaleBookRecovery:
             "TK-ORPHAN",
             OrderBookSnapshot(market_ticker="TK-ORPHAN", market_id="m3", yes=[], no=[[50, 10]]),
         )
-        books.get_book("TK-ORPHAN").last_update = time.time() - 121.0
+        orphan = books.get_book("TK-ORPHAN")
+        assert orphan is not None
+        orphan.last_update = time.time() - 121.0
 
         await engine._recover_stale_books()
 
-        engine._feed.unsubscribe.assert_not_called()
-        engine._feed.subscribe.assert_not_called()
+        engine._feed.unsubscribe.assert_not_called()  # type: ignore[attr-defined]
+        engine._feed.subscribe.assert_not_called()  # type: ignore[attr-defined]
 
     @pytest.mark.asyncio
     async def test_resubscribe_failure_does_not_crash(self):
         engine, _, books = _engine_with_real_feed()
-        books.get_book("TK-A").last_update = time.time() - 121.0
-        engine._feed.unsubscribe.side_effect = RuntimeError("WS disconnected")
+        book_a = books.get_book("TK-A")
+        assert book_a is not None
+        book_a.last_update = time.time() - 121.0
+        engine._feed.unsubscribe.side_effect = RuntimeError("WS disconnected")  # type: ignore[attr-defined]
 
         # Should not raise
         await engine._recover_stale_books()
@@ -1177,7 +1187,9 @@ class TestStaleBookRecovery:
     async def test_refresh_account_calls_recovery(self):
         """refresh_account triggers stale book recovery before main logic."""
         engine, rest, books = _engine_with_real_feed()
-        books.get_book("TK-A").last_update = time.time() - 121.0
+        book_a = books.get_book("TK-A")
+        assert book_a is not None
+        book_a.last_update = time.time() - 121.0
 
         rest.get_balance.return_value = Balance(balance=1000, portfolio_value=1000)
         rest.get_all_orders.return_value = []
@@ -1186,8 +1198,8 @@ class TestStaleBookRecovery:
         await engine.refresh_account()
 
         # Recovery should have been called (unsubscribe + subscribe for TK-A)
-        engine._feed.unsubscribe.assert_called_once_with("TK-A")
-        engine._feed.subscribe.assert_called_once_with("TK-A")
+        engine._feed.unsubscribe.assert_called_once_with("TK-A")  # type: ignore[attr-defined]
+        engine._feed.subscribe.assert_called_once_with("TK-A")  # type: ignore[attr-defined]
 
 
 class TestPortfolioFeedWiring:
