@@ -42,22 +42,26 @@ def main() -> None:
 
     from talos.auth import KalshiAuth
     from talos.bid_adjuster import BidAdjuster
+    from talos.data_collector import DataCollector
     from talos.engine import TradingEngine
     from talos.game_manager import GameManager
     from talos.game_status import GameStatusResolver
     from talos.lifecycle_feed import LifecycleFeed
     from talos.market_feed import MarketFeed
     from talos.orderbook import OrderBookManager
-    from talos.data_collector import DataCollector
-    from talos.settlement_tracker import SettlementCache
     from talos.persistence import (
-        load_saved_games, load_saved_games_full, load_settings,
-        save_games, save_games_full, save_settings,
+        load_saved_games,
+        load_saved_games_full,
+        load_settings,
+        save_games,
+        save_games_full,
+        save_settings,
     )
     from talos.portfolio_feed import PortfolioFeed
     from talos.position_feed import PositionFeed
     from talos.rest_client import KalshiRESTClient
     from talos.scanner import ArbitrageScanner
+    from talos.settlement_tracker import SettlementCache
     from talos.suggestion_log import SuggestionLog
     from talos.ticker_feed import TickerFeed
     from talos.top_of_market import TopOfMarketTracker

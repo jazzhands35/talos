@@ -40,7 +40,7 @@ _GAMES_FULL_FILE = Path(__file__).resolve().parents[2] / "games_full.json"
 
 
 def save_games_full(
-    games: list[dict[str, str | float]], path: Path | None = None
+    games: list[dict[str, str | float | None]], path: Path | None = None
 ) -> None:
     """Save full game data so startup can skip REST calls."""
     games_file = path or _GAMES_FULL_FILE

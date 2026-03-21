@@ -6,6 +6,7 @@ Pure detection (compute_rebalance_proposal) and async execution
 
 from __future__ import annotations
 
+import contextlib
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
@@ -66,11 +67,13 @@ def compute_rebalance_proposal(
         return None
 
     # No resting + markets closed -> settled with imbalance, nothing actionable
-    if ledger.resting_count(Side.A) == 0 and ledger.resting_count(Side.B) == 0:
-        if not book_manager.best_ask(pair.ticker_a) and not book_manager.best_ask(
-            pair.ticker_b
-        ):
-            return None
+    if (
+        ledger.resting_count(Side.A) == 0
+        and ledger.resting_count(Side.B) == 0
+        and not book_manager.best_ask(pair.ticker_a)
+        and not book_manager.best_ask(pair.ticker_b)
+    ):
+        return None
 
     delta = committed_a - committed_b
     # Any non-zero committed delta = unhedged exposure. Unit size controls
@@ -289,12 +292,10 @@ async def execute_rebalance(
                 # Update ledger immediately so next cycle doesn't re-cancel
                 try:
                     ledger = adjuster.get_ledger(rebalance.event_ticker)
-                    try:
+                    with contextlib.suppress(ValueError):
                         ledger.record_cancel(
                             Side(rebalance.side), rebalance.order_id
                         )
-                    except ValueError:
-                        pass  # Order_id mismatch — mark_side_pending below
                     # Register ALL cancelled IDs so sync_from_orders filters
                     # them out until Kalshi's GET confirms they're gone.
                     for oid in cancelled_ids:

@@ -129,6 +129,9 @@ class KalshiWSClient:
 
     async def connect(self) -> None:
         """Open the WebSocket connection with auth headers."""
+        # Clear stale subscription state from any prior connection
+        self._sid_to_channel.clear()
+        self._sid_to_seq.clear()
         headers = self._auth.headers("GET", "/trade-api/ws/v2")
         self._ws = await websockets.connect(
             self._ws_url,
@@ -257,6 +260,7 @@ class KalshiWSClient:
                 )
                 if self._on_seq_gap is not None:
                     await self._on_seq_gap(sid, channel)
+                return  # Don't dispatch the stale message; resubscribe will send a fresh snapshot
             self._sid_to_seq[sid] = seq
 
         # Parse message into model and dispatch to callback
@@ -311,3 +315,6 @@ class KalshiWSClient:
         finally:
             logger.error("ws_listen_loop_exited")
             self._ws = None
+            # Clear subscription state — sids from dead connection are invalid
+            self._sid_to_channel.clear()
+            self._sid_to_seq.clear()

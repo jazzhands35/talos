@@ -354,17 +354,17 @@ class TestSyncFromPositions:
         assert ledger.filled_total_cost(Side.A) == 1380  # 30 * 46
 
     def test_partial_augmentation(self):
-        """Orders captured some fills, positions patches the rest."""
+        """Orders captured some fills, positions patches the rest with higher cost."""
         ledger = PositionLedger(event_ticker="EVT-1", unit_size=10)
         ledger.record_fill(Side.A, count=10, price=46)  # partial from orders
-        # Positions says 30 total
+        # Positions says 30 total — cost is authoritative (more complete)
         ledger.sync_from_positions(
             position_fills={Side.A: 30, Side.B: 0},
             position_costs={Side.A: 1380, Side.B: 0},
         )
         assert ledger.filled_count(Side.A) == 30
-        # Cost kept from orders (non-zero), not overwritten
-        assert ledger.filled_total_cost(Side.A) == 460  # 10 * 46
+        # Positions cost overrides partial orders cost (higher = more complete)
+        assert ledger.filled_total_cost(Side.A) == 1380  # 30 * 46
 
     def test_cost_patched_even_when_fills_equal(self):
         """Positions API provides cost when orders had none."""
@@ -575,8 +575,9 @@ class TestStaleSyncProtection:
         # Gen 2: next poll with fresh data — order is gone (fully filled)
         ledger.bump_sync_gen()  # gen = 2
         fresh_orders = [
-            _make_order("TK-A", fill_count=20, remaining_count=0,
-                        order_id="ord-A", status="executed"),
+            _make_order(
+                "TK-A", fill_count=20, remaining_count=0, order_id="ord-A", status="executed"
+            ),
         ]
         ledger.sync_from_orders(fresh_orders, ticker_a="TK-A", ticker_b="TK-B")
 
@@ -595,8 +596,7 @@ class TestStaleSyncProtection:
 
         # Same gen, but this sync includes the order (e.g., _verify_after_action)
         orders = [
-            _make_order("TK-A", fill_count=0, remaining_count=20,
-                        order_id="ord-A"),
+            _make_order("TK-A", fill_count=0, remaining_count=20, order_id="ord-A"),
         ]
         ledger.sync_from_orders(orders, ticker_a="TK-A", ticker_b="TK-B")
 
@@ -615,8 +615,7 @@ class TestStaleSyncProtection:
 
         # _verify_after_action: sync with fresh data (order visible)
         verify_orders = [
-            _make_order("TK-A", fill_count=0, remaining_count=20,
-                        order_id="ord-A"),
+            _make_order("TK-A", fill_count=0, remaining_count=20, order_id="ord-A"),
         ]
         ledger.sync_from_orders(verify_orders, ticker_a="TK-A", ticker_b="TK-B")
         assert ledger.resting_count(Side.A) == 20

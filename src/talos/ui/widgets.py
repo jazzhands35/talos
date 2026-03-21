@@ -124,10 +124,7 @@ def _fmt_vol(volume: int) -> RichText:
     """Format 24h volume as compact number."""
     if volume == 0:
         return DIM_DASH
-    if volume >= 1000:
-        label = f"{volume / 1000:.1f}k"
-    else:
-        label = str(volume)
+    label = f"{volume / 1000:.1f}k" if volume >= 1000 else str(volume)
     return RichText(label, justify="right")
 
 

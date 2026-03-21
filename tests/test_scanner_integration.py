@@ -27,8 +27,7 @@ def _make_event(
     market_status: str = "active",
 ) -> Event:
     markets = [
-        _make_market(f"{event_ticker}-M{i}", status=market_status)
-        for i in range(num_markets)
+        _make_market(f"{event_ticker}-M{i}", status=market_status) for i in range(num_markets)
     ]
     return Event(
         event_ticker=event_ticker,

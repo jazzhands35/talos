@@ -26,6 +26,7 @@ class OpportunityProposer:
         self._config = config
         self._stable_since: dict[str, datetime] = {}  # event_ticker -> first seen
         self._rejected_at: dict[str, datetime] = {}  # event_ticker -> rejection time
+        self._failed_at: dict[str, datetime] = {}  # event_ticker -> placement failure time
 
     def stability_elapsed(self, event_ticker: str, now: datetime | None = None) -> float | None:
         """Seconds since edge was first seen, or None if not tracking."""
@@ -112,6 +113,17 @@ class OpportunityProposer:
             elapsed = (now - rejected_at).total_seconds()
             if elapsed < self._config.rejection_cooldown_seconds:
                 return None
+
+        # Gate 4b: placement failure cooldown — prevents re-proposing when the
+        # last attempt failed (e.g. post-only cross). The orderbook condition
+        # that caused the failure likely persists, so use a longer cooldown.
+        failed_at = self._failed_at.get(event)
+        if failed_at is not None:
+            elapsed = (now - failed_at).total_seconds()
+            if elapsed < self._config.placement_failure_cooldown_seconds:
+                return None
+            # Cooldown expired — clear the failure record
+            del self._failed_at[event]
 
         # Gate 5: stability filter
         if self._config.stability_seconds > 0:
@@ -201,6 +213,17 @@ class OpportunityProposer:
         if now is None:
             now = datetime.now(UTC)
         self._rejected_at[event_ticker] = now
+        self._stable_since.pop(event_ticker, None)
+
+    def record_placement_failure(self, event_ticker: str, now: datetime | None = None) -> None:
+        """Record placement failure time, clear stability timer.
+
+        Called when place_bids fails (e.g. post-only cross). Prevents
+        re-proposing until placement_failure_cooldown_seconds expires.
+        """
+        if now is None:
+            now = datetime.now(UTC)
+        self._failed_at[event_ticker] = now
         self._stable_since.pop(event_ticker, None)
 
     def record_approval(self, event_ticker: str) -> None:

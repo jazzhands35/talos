@@ -17,6 +17,7 @@ def mock_ws() -> KalshiWSClient:
     ws = MagicMock(spec=KalshiWSClient)
     ws.subscribe = AsyncMock()
     ws.unsubscribe = AsyncMock()
+    ws.update_subscription = AsyncMock()
     ws.disconnect = AsyncMock()
     ws.listen = AsyncMock()
     ws.on_seq_gap = MagicMock()
@@ -45,9 +46,10 @@ class TestSubscribe:
 
 
 class TestUnsubscribe:
-    async def test_unsubscribe_calls_ws_with_sid(
+    async def test_unsubscribe_last_ticker_kills_sid(
         self, feed: MarketFeed, mock_ws: KalshiWSClient, mock_books: OrderBookManager
     ) -> None:
+        """Unsubscribing the last ticker on a sid kills the whole subscription."""
         await feed.subscribe("MKT-1")
         # Simulate receiving a message that maps ticker to sid
         snapshot = OrderBookSnapshot(
@@ -59,6 +61,26 @@ class TestUnsubscribe:
         await feed._on_message(snapshot, sid=5, seq=1)
         await feed.unsubscribe("MKT-1")
         mock_ws.unsubscribe.assert_called_once_with([5])  # type: ignore[union-attr]
+        mock_ws.update_subscription.assert_not_called()  # type: ignore[union-attr]
+
+    async def test_unsubscribe_with_siblings_uses_update(
+        self, feed: MarketFeed, mock_ws: KalshiWSClient, mock_books: OrderBookManager
+    ) -> None:
+        """Unsubscribing one ticker from a bulk sub uses update_subscription, not unsubscribe."""
+        # Simulate bulk subscription: 2 tickers sharing sid=5
+        feed._ticker_to_sid["MKT-1"] = 5
+        feed._ticker_to_sid["MKT-2"] = 5
+        feed._subscribed_tickers.update(["MKT-1", "MKT-2"])
+
+        await feed.unsubscribe("MKT-1")
+        # Should NOT kill the whole sid
+        mock_ws.unsubscribe.assert_not_called()  # type: ignore[union-attr]
+        # Should use update_subscription to remove just MKT-1
+        mock_ws.update_subscription.assert_called_once_with(  # type: ignore[union-attr]
+            5, ["MKT-1"], action="delete_markets"
+        )
+        # MKT-2 should still be mapped
+        assert feed._ticker_to_sid.get("MKT-2") == 5
 
     async def test_unsubscribe_removes_from_book_manager(
         self, feed: MarketFeed, mock_books: OrderBookManager
@@ -195,6 +217,31 @@ class TestSeqGapRecovery:
         mock_ws.subscribe.assert_called_once_with("orderbook_delta", "MKT-1")  # type: ignore[union-attr]
         # Old sid mapping should be cleared
         assert "MKT-1" not in feed._ticker_to_sid
+
+    async def test_seq_gap_bulk_resubscribes_all_tickers(
+        self, feed: MarketFeed, mock_ws: KalshiWSClient
+    ) -> None:
+        """On seq gap for a shared sid, should resubscribe ALL tickers, not just the first."""
+        # Simulate bulk subscription: 3 tickers sharing a single sid
+        feed._ticker_to_sid["MKT-1"] = 10
+        feed._ticker_to_sid["MKT-2"] = 10
+        feed._ticker_to_sid["MKT-3"] = 10
+        # A different sid should be untouched
+        feed._ticker_to_sid["MKT-OTHER"] = 99
+
+        await feed._on_seq_gap(10, "orderbook_delta")
+
+        mock_ws.unsubscribe.assert_called_once_with([10])  # type: ignore[union-attr]
+        # Should use bulk subscribe with all 3 tickers
+        call_args = mock_ws.subscribe.call_args  # type: ignore[union-attr]
+        assert call_args[0][0] == "orderbook_delta"
+        assert sorted(call_args[1]["market_tickers"]) == ["MKT-1", "MKT-2", "MKT-3"]
+        # All 3 stale mappings should be cleared
+        assert "MKT-1" not in feed._ticker_to_sid
+        assert "MKT-2" not in feed._ticker_to_sid
+        assert "MKT-3" not in feed._ticker_to_sid
+        # Unrelated sid should be untouched
+        assert feed._ticker_to_sid["MKT-OTHER"] == 99
 
     async def test_seq_gap_unknown_sid_no_crash(
         self, feed: MarketFeed, mock_ws: KalshiWSClient

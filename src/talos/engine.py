@@ -7,11 +7,16 @@ The TUI delegates to this engine rather than managing trading state directly.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 from collections.abc import Callable
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
 import structlog
+
+if TYPE_CHECKING:
+    from talos.data_collector import DataCollector
+    from talos.settlement_tracker import SettlementCache
 
 from talos.automation_config import AutomationConfig
 from talos.bid_adjuster import BidAdjuster
@@ -85,8 +90,8 @@ class TradingEngine:
         lifecycle_feed: LifecycleFeed | None = None,
         position_feed: PositionFeed | None = None,
         game_status_resolver: GameStatusResolver | None = None,
-        data_collector: object | None = None,
-        settlement_cache: object | None = None,
+        data_collector: DataCollector | None = None,
+        settlement_cache: SettlementCache | None = None,
     ) -> None:
         self._scanner = scanner
         self._game_manager = game_manager
@@ -123,6 +128,8 @@ class TradingEngine:
         self._exit_only_events: set[str] = set()  # events in exit-only mode
         self._game_started_events: set[str] = set()  # events where game is live/final
         self._last_jump_eval: dict[str, tuple[int, int]] = {}  # ticker -> (book_top, resting)
+        self._stale_candidates: set[str] = set()  # two-strike stale position cleanup
+        self._initial_sync_done: bool = False  # gate bids until first refresh_account
 
         # Wire portfolio feed callbacks
         if self._portfolio_feed is not None:
@@ -239,6 +246,23 @@ class TradingEngine:
             self._enforce_exit_only_sync(event_ticker)
             return True
 
+    async def exit_all(self) -> int:
+        """Put ALL monitored games into exit-only mode. Returns count changed."""
+        count = 0
+        for pair in list(self._scanner.pairs):
+            if pair.event_ticker not in self._exit_only_events:
+                # Set directly instead of toggle_exit_only to avoid per-game toasts
+                self._exit_only_events.add(pair.event_ticker)
+                self._enforce_exit_only_sync(pair.event_ticker)
+                await self._enforce_exit_only(pair.event_ticker)
+                count += 1
+        if count > 0:
+            logger.info("exit_all", count=count)
+            self._notify(f"Exit-only ON for {count} game(s)", "warning", toast=True)
+        else:
+            self._notify("All games already in exit-only mode", toast=True)
+        return count
+
     def _enforce_exit_only_sync(self, event_ticker: str) -> None:
         """Synchronous part of exit-only enforcement — expire proposals."""
         # Expire any pending bid proposals for this event
@@ -262,8 +286,8 @@ class TradingEngine:
         filled_b = ledger.filled_count(Side.B)
         game_started = event_ticker in self._game_started_events
 
-        if game_started or filled_a == filled_b:
-            # Game started OR balanced — cancel everything on both sides
+        if filled_a == filled_b:
+            # Balanced — cancel everything on both sides
             reason = "game_started" if game_started else "balanced"
             for side in (Side.A, Side.B):
                 order_id = ledger.resting_order_id(side)
@@ -642,10 +666,8 @@ class TradingEngine:
         # Bump sync generation so optimistic placements from this cycle
         # are protected against stale-data overwrites.
         for pair in self._scanner.pairs:
-            try:
+            with contextlib.suppress(KeyError):
                 self._adjuster.get_ledger(pair.event_ticker).bump_sync_gen()
-            except KeyError:
-                pass
 
         try:
             # Only fetch resting orders — fill data comes from positions API.
@@ -706,7 +728,7 @@ class TradingEngine:
             # of truth, always). GET /portfolio/orders archives old orders,
             # but GET /portfolio/positions never does. This catches fills
             # invisible to sync_from_orders due to order archival.
-            pos_map: dict[str, Position] = {}
+            pos_map: dict[str, Position] | None = None
             try:
                 market_positions = await self._rest.get_positions(limit=200)
                 pos_map = {p.ticker: p for p in market_positions}
@@ -727,9 +749,16 @@ class TradingEngine:
                         Side.A: pos_a.total_traded if pos_a else 0,
                         Side.B: pos_b.total_traded if pos_b else 0,
                     }
-                    ledger.sync_from_positions(fills, costs)
+                    fees = {
+                        Side.A: pos_a.fees_paid if pos_a else 0,
+                        Side.B: pos_b.fees_paid if pos_b else 0,
+                    }
+                    ledger.sync_from_positions(fills, costs, fees)
+
             except Exception:
                 logger.warning("positions_sync_failed", exc_info=True)
+
+            self._reconcile_stale_positions(pos_map)
 
             self._recompute_positions()
 
@@ -750,7 +779,7 @@ class TradingEngine:
             ]
 
             # Full ledger reconciliation against Kalshi API data
-            self._reconcile_with_kalshi(orders, pos_map)
+            self._reconcile_with_kalshi(orders, pos_map or {})
 
             # Re-evaluate jumped tickers that have no pending proposal (P20)
             self.reevaluate_jumps()
@@ -764,6 +793,10 @@ class TradingEngine:
             # Check exit-only triggers and enforce cancellations
             self._check_exit_only()
             await self._enforce_all_exit_only()
+
+            if not self._initial_sync_done:
+                self._initial_sync_done = True
+                logger.info("initial_sync_complete")
         except Exception:
             logger.exception("refresh_account_error")
 
@@ -1086,6 +1119,8 @@ class TradingEngine:
 
     def _log_event_outcome(self, event_ticker: str, pair: ArbPair) -> None:
         """Log the final outcome of an event with trap analysis."""
+        if self._data_collector is None:
+            return
         try:
             ledger = self._adjuster.get_ledger(event_ticker)
         except KeyError:
@@ -1172,6 +1207,43 @@ class TradingEngine:
 
     # ── Integrity checks ────────────────────────────────────────
 
+    def _reconcile_stale_positions(self, pos_map: dict[str, Position] | None) -> None:
+        """Two-strike cleanup: remove pairs whose positions settled but
+        lifecycle event was missed (WS disconnect, Talos wasn't running).
+
+        Flag on first detection, remove on second consecutive detection
+        to avoid false positives from transient API gaps.
+        """
+        if pos_map is None:
+            return  # API failed — don't flag anything
+
+        current_stale: set[str] = set()
+        for pair in self._scanner.pairs:
+            pos_a = pos_map.get(pair.ticker_a)
+            pos_b = pos_map.get(pair.ticker_b)
+            both_zero = (
+                (pos_a is None or pos_a.position == 0)
+                and (pos_b is None or pos_b.position == 0)
+            )
+            if not both_zero:
+                continue
+            try:
+                ledger = self._adjuster.get_ledger(pair.event_ticker)
+            except KeyError:
+                continue
+            if ledger.filled_count(Side.A) > 0 or ledger.filled_count(Side.B) > 0:
+                current_stale.add(pair.event_ticker)
+
+        to_remove = current_stale & self._stale_candidates
+        for event_ticker in to_remove:
+            logger.info("stale_position_cleanup", event_ticker=event_ticker)
+            self._notify(
+                f"Auto-removed settled: {self._display_name(event_ticker)}",
+                toast=True,
+            )
+            asyncio.create_task(self.remove_game(event_ticker))
+        self._stale_candidates = current_stale
+
     def _reconcile_with_kalshi(
         self,
         orders: list[Order],
@@ -1256,9 +1328,12 @@ class TradingEngine:
                     )
 
                 # Check 3: Fill consistency between orders and positions APIs
-                if pos_fills[side] > 0 and kalshi_fills[side] > 0:
-                    if pos_fills[side] != kalshi_fills[side]:
-                        logger.info(
+                if (
+                    pos_fills[side] > 0
+                    and kalshi_fills[side] > 0
+                    and pos_fills[side] != kalshi_fills[side]
+                ):
+                    logger.info(
                             "reconcile_fill_source_gap",
                             event_ticker=pair.event_ticker,
                             side=sl,
@@ -1269,9 +1344,11 @@ class TradingEngine:
                 # Check 4: Ledger resting vs Kalshi resting
                 # Skip during optimistic placement (stale-sync guard active)
                 ledger_resting = ledger.resting_count(side)
-                if ledger._sides[side]._placed_at_gen is None:
-                    if ledger_resting != kalshi_resting[side]:
-                        logger.warning(
+                if (
+                    ledger._sides[side]._placed_at_gen is None
+                    and ledger_resting != kalshi_resting[side]
+                ):
+                    logger.warning(
                             "reconcile_resting_mismatch",
                             event_ticker=pair.event_ticker,
                             side=sl,
@@ -1434,10 +1511,6 @@ class TradingEngine:
             if pair.event_ticker in executed_this_cycle:
                 continue
 
-            # Exit-only events have their own cancellation flow
-            if self.is_exit_only(pair.event_ticker):
-                continue
-
             try:
                 ledger = self._adjuster.get_ledger(pair.event_ticker)
             except KeyError:
@@ -1547,6 +1620,14 @@ class TradingEngine:
         After placement, optimistically updates the ledger via record_placement()
         (with generation-based stale-sync guard) and appends to _orders_cache.
         """
+        # Block until first refresh_account has synced ledger data from Kalshi.
+        # Without this, the ledger may be empty after a restart, causing P18
+        # to trivially pass because it sees no position on the other side.
+        if not self._initial_sync_done:
+            self._notify("Bid BLOCKED: waiting for initial sync", "warning", toast=True)
+            logger.warning("bid_blocked_no_sync", ticker_a=bid.ticker_a, ticker_b=bid.ticker_b)
+            return
+
         # Block on exit-only events
         evt_for_bid = self._adjuster.resolve_event(bid.ticker_a)
         if evt_for_bid and self.is_exit_only(evt_for_bid):
@@ -1739,8 +1820,10 @@ class TradingEngine:
         """Remove a game from monitoring."""
         try:
             self._exit_only_events.discard(event_ticker)
+            self._stale_candidates.discard(event_ticker)
             if self._game_status_resolver is not None:
                 self._game_status_resolver.remove(event_ticker)
+            self._adjuster.remove_event(event_ticker)
             await self._game_manager.remove_game(event_ticker)
             self._notify(f"Removed {event_ticker}", toast=True)
         except Exception as e:
@@ -1749,12 +1832,16 @@ class TradingEngine:
     async def clear_games(self) -> None:
         """Clear all monitored games."""
         try:
-            count = len(self._game_manager.active_games)
-            if self._game_status_resolver is not None:
-                for pair in self._game_manager.active_games:
+            pairs = list(self._game_manager.active_games)
+            for pair in pairs:
+                self._exit_only_events.discard(pair.event_ticker)
+                self._stale_candidates.discard(pair.event_ticker)
+                self._game_started_events.discard(pair.event_ticker)
+                if self._game_status_resolver is not None:
                     self._game_status_resolver.remove(pair.event_ticker)
+                self._adjuster.remove_event(pair.event_ticker)
             await self._game_manager.clear_all_games()
-            self._notify(f"Cleared {count} game(s)", toast=True)
+            self._notify(f"Cleared {len(pairs)} game(s)", toast=True)
         except Exception as e:
             self._notify(f"Error: {e}", "error", toast=True)
 
@@ -1913,7 +2000,11 @@ class TradingEngine:
                 Side.A: pos_a.total_traded if pos_a else 0,
                 Side.B: pos_b.total_traded if pos_b else 0,
             }
-            ledger.sync_from_positions(fills, costs)
+            fees = {
+                Side.A: pos_a.fees_paid if pos_a else 0,
+                Side.B: pos_b.fees_paid if pos_b else 0,
+            }
+            ledger.sync_from_positions(fills, costs, fees)
             logger.info(
                 "post_action_verify",
                 event_ticker=event_ticker,

@@ -1,6 +1,7 @@
 """Tests for ProposalPanel widget."""
 
 from datetime import UTC, datetime
+from typing import Literal
 
 import pytest
 from textual.app import App, ComposeResult
@@ -11,7 +12,11 @@ from talos.proposal_queue import ProposalQueue
 from talos.ui.proposal_panel import ProposalPanel
 
 
-def _make_proposal(event_ticker: str = "EVT-1", side: str = "A", new_price: int = 48) -> Proposal:
+def _make_proposal(
+    event_ticker: str = "EVT-1",
+    side: Literal["A", "B"] = "A",
+    new_price: int = 48,
+) -> Proposal:
     adj = ProposedAdjustment(
         event_ticker=event_ticker,
         side=side,

@@ -12,7 +12,6 @@ from pydantic import BaseModel, model_validator
 
 from talos.models._converters import dollars_to_cents as _dollars_to_cents
 from talos.models._converters import fp_to_int as _fp_to_int
-from talos.models._converters import log_unknown_fields
 
 
 class OrderBookSnapshot(BaseModel):
@@ -77,6 +76,9 @@ class TickerMessage(BaseModel):
     """Market ticker update.
 
     Post March 12: _dollars/_fp fields replace integer fields.
+    WS sends yes_bid_dollars/yes_ask_dollars only (no NO-side fields).
+    NO-side prices are derived: no_bid = 100 - yes_ask, no_ask = 100 - yes_bid.
+    Last price arrives as ``price_dollars`` (not ``last_price_dollars``).
     """
 
     market_ticker: str
@@ -98,8 +100,9 @@ class TickerMessage(BaseModel):
         for old, new in [
             ("yes_bid", "yes_bid_dollars"),
             ("yes_ask", "yes_ask_dollars"),
-            ("no_bid", "no_bid_dollars"),
-            ("no_ask", "no_ask_dollars"),
+            # WS uses price_dollars for last traded price
+            ("last_price", "price_dollars"),
+            # REST uses last_price_dollars — accept both
             ("last_price", "last_price_dollars"),
             ("dollar_volume", "dollar_volume_dollars"),
             ("dollar_open_interest", "dollar_open_interest_dollars"),
@@ -112,6 +115,11 @@ class TickerMessage(BaseModel):
         ]:
             if new in data and data[new] is not None:
                 data[old] = _fp_to_int(data[new])
+        # WS only sends YES-side BBA — derive NO-side from binary complement
+        if data.get("yes_ask") is not None and data.get("no_bid") is None:
+            data["no_bid"] = 100 - data["yes_ask"]
+        if data.get("yes_bid") is not None and data.get("no_ask") is None:
+            data["no_ask"] = 100 - data["yes_bid"]
         return data
 
 
@@ -119,6 +127,7 @@ class TradeMessage(BaseModel):
     """Public trade on a market.
 
     Post March 12: _dollars/_fp fields replace integer fields.
+    AsyncAPI spec uses ``taker_side`` instead of ``side``.
     """
 
     market_ticker: str
@@ -140,6 +149,9 @@ class TradeMessage(BaseModel):
                 break
         if "count_fp" in data and data["count_fp"] is not None:
             data["count"] = _fp_to_int(data["count_fp"])
+        # AsyncAPI spec renamed side → taker_side
+        if "taker_side" in data and "side" not in data:
+            data["side"] = data["taker_side"]
         return data
 
 
@@ -197,6 +209,13 @@ class UserOrderMessage(BaseModel, extra="ignore"):
         ]:
             if new in data and data[new] is not None:
                 data[old] = _dollars_to_cents(data[new])
+        # Kalshi WS only sends yes_price_dollars — derive no_price from it
+        if (
+            "yes_price" in data
+            and data.get("no_price") in (None, 0)
+            and data["yes_price"] is not None
+        ):
+            data["no_price"] = 100 - data["yes_price"]
         for old, new in [
             ("fill_count", "fill_count_fp"),
             ("remaining_count", "remaining_count_fp"),
@@ -222,6 +241,7 @@ class FillMessage(BaseModel, extra="ignore"):
     side: str = ""
     action: str = ""
     yes_price: int = 0
+    no_price: int = 0
     count: int = 0
     fee_cost: int = 0
     post_position: int = 0
@@ -236,6 +256,13 @@ class FillMessage(BaseModel, extra="ignore"):
             return data
         if "yes_price_dollars" in data and data["yes_price_dollars"] is not None:
             data["yes_price"] = _dollars_to_cents(data["yes_price_dollars"])
+        # Derive no_price from yes_price (WS only sends YES side)
+        if (
+            "yes_price" in data
+            and data.get("no_price") in (None, 0)
+            and data["yes_price"] is not None
+        ):
+            data["no_price"] = 100 - data["yes_price"]
         if "fee_cost" in data and isinstance(data["fee_cost"], str):
             data["fee_cost"] = _dollars_to_cents(data["fee_cost"])
         for old, new in [

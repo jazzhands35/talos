@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import time
 from datetime import UTC
 from unittest.mock import AsyncMock, MagicMock
 
@@ -13,6 +14,7 @@ from talos.bid_adjuster import BidAdjuster
 from talos.engine import TradingEngine
 from talos.game_manager import GameManager
 from talos.market_feed import MarketFeed
+from talos.models.market import OrderBookLevel
 from talos.models.order import Order
 from talos.models.portfolio import Balance, Position, Settlement
 from talos.models.proposal import ProposalKey
@@ -148,6 +150,7 @@ def _engine_with_pair() -> tuple[TradingEngine, AsyncMock]:
         adjuster=adjuster,
         rest_client=rest,
     )
+    engine._initial_sync_done = True  # tests assume synced state
     return engine, rest
 
 
@@ -176,6 +179,7 @@ def _engine_with_pair_and_books(
         adjuster=adjuster,
         rest_client=rest,
     )
+    engine._initial_sync_done = True  # tests assume synced state
     return engine, rest
 
 
@@ -545,23 +549,18 @@ class TestPlaceBidsSafety:
         assert any(o.order_id == "new-b" for o in engine.orders)
 
 
-class FakeBookManager:
+class FakeBookManager(OrderBookManager):
     """Minimal fake for OrderBookManager.best_ask()."""
 
     def __init__(self, prices: dict[str, int]):
+        super().__init__()
         self._prices = prices
 
-    def best_ask(self, ticker: str):
+    def best_ask(self, ticker: str) -> OrderBookLevel | None:
         price = self._prices.get(ticker)
         if price is None:
             return None
-
-        class Level:
-            pass
-
-        level = Level()
-        level.price = price
-        return level
+        return OrderBookLevel(price=price, quantity=100)
 
 
 def _engine_with_jump_setup() -> TradingEngine:
@@ -811,16 +810,29 @@ class TestCheckImbalances:
         ledger.record_resting(Side.B, "ord-b", 10, 47)
 
         engine.scanner._all_snapshots["EVT-1"] = Opportunity(
-            event_ticker="EVT-1", ticker_a="TK-A", ticker_b="TK-B",
-            no_a=45, no_b=47, qty_a=100, qty_b=100,
-            raw_edge=8, fee_edge=0.0, tradeable_qty=100,
+            event_ticker="EVT-1",
+            ticker_a="TK-A",
+            ticker_b="TK-B",
+            no_a=45,
+            no_b=47,
+            qty_a=100,
+            qty_b=100,
+            raw_edge=8,
+            fee_edge=0.0,
+            tradeable_qty=100,
             timestamp="2026-03-16T00:00:00Z",
         )
 
-        rest.get_all_orders = AsyncMock(return_value=[
-            _make_order("TK-A", order_id="ord-a", fill_count=50, remaining_count=60, no_price=45),
-            _make_order("TK-B", order_id="ord-b", fill_count=50, remaining_count=10, no_price=47),
-        ])
+        rest.get_all_orders = AsyncMock(
+            return_value=[
+                _make_order(
+                    "TK-A", order_id="ord-a", fill_count=50, remaining_count=60, no_price=45
+                ),
+                _make_order(
+                    "TK-B", order_id="ord-b", fill_count=50, remaining_count=10, no_price=47
+                ),
+            ]
+        )
         rest.cancel_order = AsyncMock()
         rest.create_order = AsyncMock(return_value=_make_order("TK-B", order_id="new-b"))
         rest.create_order_group = AsyncMock(return_value="grp-test")
@@ -1119,7 +1131,7 @@ class TestStaleBookRecovery:
     async def test_stale_book_triggers_resubscribe(self):
         engine, _, books = _engine_with_real_feed()
         # Mark TK-A as stale
-        books.get_book("TK-A").stale = True
+        books.get_book("TK-A").last_update = time.time() - 121.0
 
         await engine._recover_stale_books()
 
@@ -1129,8 +1141,8 @@ class TestStaleBookRecovery:
     @pytest.mark.asyncio
     async def test_multiple_stale_books_all_recovered(self):
         engine, _, books = _engine_with_real_feed()
-        books.get_book("TK-A").stale = True
-        books.get_book("TK-B").stale = True
+        books.get_book("TK-A").last_update = time.time() - 121.0
+        books.get_book("TK-B").last_update = time.time() - 121.0
 
         await engine._recover_stale_books()
 
@@ -1145,7 +1157,7 @@ class TestStaleBookRecovery:
             "TK-ORPHAN",
             OrderBookSnapshot(market_ticker="TK-ORPHAN", market_id="m3", yes=[], no=[[50, 10]]),
         )
-        books.get_book("TK-ORPHAN").stale = True
+        books.get_book("TK-ORPHAN").last_update = time.time() - 121.0
 
         await engine._recover_stale_books()
 
@@ -1155,7 +1167,7 @@ class TestStaleBookRecovery:
     @pytest.mark.asyncio
     async def test_resubscribe_failure_does_not_crash(self):
         engine, _, books = _engine_with_real_feed()
-        books.get_book("TK-A").stale = True
+        books.get_book("TK-A").last_update = time.time() - 121.0
         engine._feed.unsubscribe.side_effect = RuntimeError("WS disconnected")
 
         # Should not raise
@@ -1165,7 +1177,7 @@ class TestStaleBookRecovery:
     async def test_refresh_account_calls_recovery(self):
         """refresh_account triggers stale book recovery before main logic."""
         engine, rest, books = _engine_with_real_feed()
-        books.get_book("TK-A").stale = True
+        books.get_book("TK-A").last_update = time.time() - 121.0
 
         rest.get_balance.return_value = Balance(balance=1000, portfolio_value=1000)
         rest.get_all_orders.return_value = []
@@ -1325,7 +1337,9 @@ class TestLifecycleFiltering:
         engine, rest = _engine_with_pair()
         rest.get_settlements = AsyncMock(return_value=[])
         notifications: list[str] = []
-        engine.on_notification = lambda msg, sev="information", toast=False: notifications.append(msg)
+        engine.on_notification = lambda msg, sev="information", toast=False: notifications.append(
+            msg
+        )
 
         # Our market → should notify
         engine._on_market_settled("TK-A")
@@ -1341,7 +1355,9 @@ class TestLifecycleFiltering:
     def test_determined_notification_only_for_our_markets(self):
         engine, _ = _engine_with_pair()
         notifications: list[str] = []
-        engine.on_notification = lambda msg, sev="information", toast=False: notifications.append(msg)
+        engine.on_notification = lambda msg, sev="information", toast=False: notifications.append(
+            msg
+        )
 
         engine._on_market_determined("TK-B", "yes", 100)
         assert any("TK-B" in n for n in notifications)
@@ -1353,7 +1369,9 @@ class TestLifecycleFiltering:
     def test_paused_notification_only_for_our_markets(self):
         engine, _ = _engine_with_pair()
         notifications: list[str] = []
-        engine.on_notification = lambda msg, sev="information", toast=False: notifications.append(msg)
+        engine.on_notification = lambda msg, sev="information", toast=False: notifications.append(
+            msg
+        )
 
         engine._on_market_paused("TK-A", True)
         assert any("TK-A" in n for n in notifications)
@@ -1381,7 +1399,9 @@ class TestLifecycleFiltering:
         )
         rest.get_settlements = AsyncMock(return_value=[settlement])
         notifications: list[str] = []
-        engine.on_notification = lambda msg, sev="information", toast=False: notifications.append(msg)
+        engine.on_notification = lambda msg, sev="information", toast=False: notifications.append(
+            msg
+        )
 
         engine._on_market_settled("TK-A")
         # Let the fire-and-forget task run
@@ -1407,7 +1427,9 @@ class TestReconcileWithKalshi:
 
     def _notify_collector(self, engine: TradingEngine) -> list[tuple[str, str]]:
         notifications: list[tuple[str, str]] = []
-        engine.on_notification = lambda msg, sev="info", toast=False: notifications.append((msg, sev))
+        engine.on_notification = lambda msg, sev="info", toast=False: notifications.append(
+            (msg, sev)
+        )
         return notifications
 
     def test_clean_state_no_alerts(self, capsys: pytest.CaptureFixture[str]) -> None:
@@ -1467,7 +1489,9 @@ class TestReconcileWithKalshi:
         notes = self._notify_collector(engine)
 
         orders = [
-            _make_order("TK-A", order_id="ord-1", fill_count=10, remaining_count=0, status="executed"),
+            _make_order(
+                "TK-A", order_id="ord-1", fill_count=10, remaining_count=0, status="executed"
+            ),
             _make_order("TK-A", order_id="ord-2", fill_count=0, remaining_count=10),
         ]
         engine._reconcile_with_kalshi(orders, {})
@@ -1483,7 +1507,9 @@ class TestReconcileWithKalshi:
 
         # Kalshi orders say 10, but positions API says 15
         orders = [
-            _make_order("TK-A", order_id="ord-a", fill_count=10, remaining_count=0, status="executed"),
+            _make_order(
+                "TK-A", order_id="ord-a", fill_count=10, remaining_count=0, status="executed"
+            ),
         ]
         pos_map = {"TK-A": Position(ticker="TK-A", position=-15, total_traded=675)}
         engine._reconcile_with_kalshi(orders, pos_map)
@@ -1547,17 +1573,26 @@ class TestAutoRebalance:
 
         # Scanner snapshot needed for price
         engine.scanner._all_snapshots["EVT-1"] = Opportunity(
-            event_ticker="EVT-1", ticker_a="TK-A", ticker_b="TK-B",
-            no_a=45, no_b=48, qty_a=100, qty_b=100,
-            raw_edge=7, fee_edge=0.0, tradeable_qty=100,
+            event_ticker="EVT-1",
+            ticker_a="TK-A",
+            ticker_b="TK-B",
+            no_a=45,
+            no_b=48,
+            qty_a=100,
+            qty_b=100,
+            raw_edge=7,
+            fee_edge=0.0,
+            tradeable_qty=100,
             timestamp="2026-03-16T00:00:00Z",
         )
 
         # Mock for fresh sync in execute_rebalance
-        rest.get_all_orders = AsyncMock(return_value=[
-            _make_order("TK-A", order_id="oa", fill_count=40, no_price=45, status="canceled"),
-            _make_order("TK-B", order_id="ob", fill_count=15, no_price=48, status="canceled"),
-        ])
+        rest.get_all_orders = AsyncMock(
+            return_value=[
+                _make_order("TK-A", order_id="oa", fill_count=40, no_price=45, status="canceled"),
+                _make_order("TK-B", order_id="ob", fill_count=15, no_price=48, status="canceled"),
+            ]
+        )
         rest.create_order = AsyncMock(return_value=_make_order("TK-B", order_id="new-b"))
         rest.create_order_group = AsyncMock(return_value="grp-test")
 
@@ -1573,8 +1608,8 @@ class TestAutoRebalance:
         assert len(engine.proposal_queue.pending()) == 0
 
     @pytest.mark.asyncio
-    async def test_check_imbalances_skips_exit_only(self):
-        """Events in exit-only mode are skipped by check_imbalances."""
+    async def test_check_imbalances_catches_up_in_exit_only(self):
+        """Exit-only events still get catch-up (risk-reducing, not new pairs)."""
         engine, rest = _engine_with_pair()
         ledger = engine.adjuster.get_ledger("EVT-1")
         ledger.record_fill(Side.A, 40, 45)
@@ -1582,11 +1617,35 @@ class TestAutoRebalance:
 
         engine._exit_only_events.add("EVT-1")
 
-        rest.create_order = AsyncMock()
+        engine.scanner._all_snapshots["EVT-1"] = Opportunity(
+            event_ticker="EVT-1",
+            ticker_a="TK-A",
+            ticker_b="TK-B",
+            no_a=45,
+            no_b=48,
+            qty_a=100,
+            qty_b=100,
+            raw_edge=7,
+            fee_edge=0.0,
+            tradeable_qty=100,
+            timestamp="2026-03-16T00:00:00Z",
+        )
+
+        rest.get_all_orders = AsyncMock(
+            return_value=[
+                _make_order("TK-A", order_id="oa", fill_count=40, no_price=45, status="canceled"),
+                _make_order("TK-B", order_id="ob", fill_count=15, no_price=48, status="canceled"),
+            ]
+        )
+        rest.create_order = AsyncMock(return_value=_make_order("TK-B", order_id="new-b"))
+        rest.create_order_group = AsyncMock(return_value="grp-test")
 
         await engine.check_imbalances()
 
-        rest.create_order.assert_not_called()
+        # Catch-up placed on behind side even in exit-only
+        rest.create_order.assert_called_once()
+        assert rest.create_order.call_args.kwargs["ticker"] == "TK-B"
+        assert rest.create_order.call_args.kwargs["count"] == 25
 
     @pytest.mark.asyncio
     async def test_check_imbalances_double_fire_guard(self):
@@ -1597,16 +1656,25 @@ class TestAutoRebalance:
         ledger.record_fill(Side.B, 15, 48)
 
         engine.scanner._all_snapshots["EVT-1"] = Opportunity(
-            event_ticker="EVT-1", ticker_a="TK-A", ticker_b="TK-B",
-            no_a=45, no_b=48, qty_a=100, qty_b=100,
-            raw_edge=7, fee_edge=0.0, tradeable_qty=100,
+            event_ticker="EVT-1",
+            ticker_a="TK-A",
+            ticker_b="TK-B",
+            no_a=45,
+            no_b=48,
+            qty_a=100,
+            qty_b=100,
+            raw_edge=7,
+            fee_edge=0.0,
+            tradeable_qty=100,
             timestamp="2026-03-16T00:00:00Z",
         )
 
-        rest.get_all_orders = AsyncMock(return_value=[
-            _make_order("TK-A", order_id="oa", fill_count=40, no_price=45, status="canceled"),
-            _make_order("TK-B", order_id="ob", fill_count=15, no_price=48, status="canceled"),
-        ])
+        rest.get_all_orders = AsyncMock(
+            return_value=[
+                _make_order("TK-A", order_id="oa", fill_count=40, no_price=45, status="canceled"),
+                _make_order("TK-B", order_id="ob", fill_count=15, no_price=48, status="canceled"),
+            ]
+        )
         rest.create_order = AsyncMock(return_value=_make_order("TK-B", order_id="new-b"))
         rest.create_order_group = AsyncMock(return_value="grp-test")
 
@@ -1623,9 +1691,16 @@ class TestAutoRebalance:
         ledger.record_fill(Side.B, 15, 48)
 
         engine.scanner._all_snapshots["EVT-1"] = Opportunity(
-            event_ticker="EVT-1", ticker_a="TK-A", ticker_b="TK-B",
-            no_a=45, no_b=48, qty_a=100, qty_b=100,
-            raw_edge=7, fee_edge=0.0, tradeable_qty=100,
+            event_ticker="EVT-1",
+            ticker_a="TK-A",
+            ticker_b="TK-B",
+            no_a=45,
+            no_b=48,
+            qty_a=100,
+            qty_b=100,
+            raw_edge=7,
+            fee_edge=0.0,
+            tradeable_qty=100,
             timestamp="2026-03-16T00:00:00Z",
         )
 
@@ -1635,3 +1710,94 @@ class TestAutoRebalance:
         await engine.check_imbalances()
 
         assert rest.create_order.call_count == 2
+
+
+class TestStalePositionCleanup:
+    """Two-strike reconciliation: pairs with zero Kalshi positions but
+    non-zero ledger fills are auto-removed after 2 consecutive detections."""
+
+    def _setup(self):
+        """Build engine with one pair that has fills in the ledger."""
+        engine, rest = _engine_with_pair()
+        ledger = engine.adjuster.get_ledger("EVT-1")
+        ledger.record_fill(Side.A, 10, 45)
+        ledger.record_fill(Side.B, 10, 43)
+
+        # Minimal mocks for refresh_account
+        rest.get_balance.return_value = Balance(balance=5000, portfolio_value=5000)
+        rest.get_all_orders.return_value = []
+        rest.get_queue_positions.return_value = {}
+        return engine, rest
+
+    @pytest.mark.asyncio
+    async def test_first_detection_flags_but_does_not_remove(self):
+        engine, rest = self._setup()
+        # Positions API returns nothing for our tickers → settled
+        rest.get_positions.return_value = []
+
+        await engine.refresh_account()
+
+        # Pair should still be in the scanner after first detection
+        assert any(p.event_ticker == "EVT-1" for p in engine.scanner.pairs)
+        assert "EVT-1" in engine._stale_candidates
+
+    @pytest.mark.asyncio
+    async def test_second_consecutive_detection_removes_game(self):
+        engine, rest = self._setup()
+        rest.get_positions.return_value = []
+        gm = engine._game_manager
+        gm.remove_game = AsyncMock()
+
+        # Strike 1
+        await engine.refresh_account()
+        assert "EVT-1" in engine._stale_candidates
+
+        # Strike 2 — should trigger removal
+        await engine.refresh_account()
+        # remove_game is scheduled via asyncio.create_task; yield to let it run
+        await asyncio.sleep(0)
+
+        gm.remove_game.assert_called_once_with("EVT-1")
+
+    @pytest.mark.asyncio
+    async def test_position_reappears_clears_candidate(self):
+        engine, rest = self._setup()
+
+        # Strike 1: no positions
+        rest.get_positions.return_value = []
+        await engine.refresh_account()
+        assert "EVT-1" in engine._stale_candidates
+
+        # Next cycle: position reappears (transient gap resolved)
+        rest.get_positions.return_value = [
+            Position(ticker="TK-A", position=-10, total_traded=450),
+        ]
+        await engine.refresh_account()
+
+        # Candidate should be cleared, pair should still exist
+        assert "EVT-1" not in engine._stale_candidates
+        assert any(p.event_ticker == "EVT-1" for p in engine.scanner.pairs)
+
+    @pytest.mark.asyncio
+    async def test_no_fills_in_ledger_not_flagged(self):
+        """Pairs with zero fills (just resting orders) should not be flagged."""
+        engine, rest = _engine_with_pair()  # No fills recorded
+        rest.get_balance.return_value = Balance(balance=5000, portfolio_value=5000)
+        rest.get_all_orders.return_value = []
+        rest.get_queue_positions.return_value = {}
+        rest.get_positions.return_value = []
+
+        await engine.refresh_account()
+
+        assert "EVT-1" not in engine._stale_candidates
+
+    @pytest.mark.asyncio
+    async def test_positions_api_failure_does_not_false_positive(self):
+        """If get_positions raises, stale_candidates should not change."""
+        engine, rest = self._setup()
+        rest.get_positions.side_effect = RuntimeError("rate limited")
+
+        await engine.refresh_account()
+
+        # No candidates should be added on API failure
+        assert len(engine._stale_candidates) == 0

@@ -5,28 +5,25 @@ from unittest.mock import AsyncMock
 import pytest
 
 from talos.bid_adjuster import BidAdjuster
+from talos.models.market import OrderBookLevel
 from talos.models.order import Order
 from talos.models.strategy import ArbPair
+from talos.orderbook import OrderBookManager
 from talos.position_ledger import Side
 
 
-class FakeBookManager:
+class FakeBookManager(OrderBookManager):
     """Minimal fake for OrderBookManager.best_ask()."""
 
     def __init__(self, prices: dict[str, int]):
+        super().__init__()
         self._prices = prices
 
-    def best_ask(self, ticker: str):
+    def best_ask(self, ticker: str) -> OrderBookLevel | None:
         price = self._prices.get(ticker)
         if price is None:
             return None
-
-        class Level:
-            pass
-
-        level = Level()
-        level.price = price
-        return level
+        return OrderBookLevel(price=price, quantity=100)
 
 
 class TestDecisionLogic:
@@ -69,7 +66,8 @@ class TestDecisionLogic:
         ledger = self.adjuster.get_ledger("EVT-1")
         ledger.record_resting(Side.A, order_id="ord-a", count=10, price=48)
         ledger.record_resting(Side.B, order_id="ord-b", count=10, price=47)
-        # Top of market moved to 53 — unprofitable: fee_adjusted_cost(53) + fee_adjusted_cost(50) >= 100
+        # Top of market moved to 53 — unprofitable:
+        # fee_adjusted_cost(53) + fee_adjusted_cost(50) >= 100
         self.books._prices["TK-B"] = 53
         proposal = self.adjuster.evaluate_jump("TK-B", at_top=False)
         assert proposal is not None
@@ -271,7 +269,9 @@ class TestAsyncExecution:
         proposal = adjuster.evaluate_jump("TK-B", at_top=False)
         assert proposal is not None
         rest_client = AsyncMock()
-        rest_client.get_order.return_value = _make_order("ord-b", price=47, fill_count=0, remaining_count=10)
+        rest_client.get_order.return_value = _make_order(
+            "ord-b", price=47, fill_count=0, remaining_count=10
+        )
         rest_client.amend_order.side_effect = Exception("API error")
 
         with pytest.raises(Exception, match="API error"):

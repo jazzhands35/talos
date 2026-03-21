@@ -104,9 +104,7 @@ class TestComputeRebalanceProposal:
         ledger.record_resting(Side.A, "ord-a", 10, 45)
         ledger.record_resting(Side.B, "ord-b", 10, 47)
 
-        result = compute_rebalance_proposal(
-            "EVT-1", ledger, pair, None, "Test", OrderBookManager()
-        )
+        result = compute_rebalance_proposal("EVT-1", ledger, pair, None, "Test", OrderBookManager())
         assert result is None
 
     def test_imbalance_within_unit_no_proposal(self):
@@ -117,9 +115,7 @@ class TestComputeRebalanceProposal:
         ledger.record_fill(Side.B, 10, 47)
 
         # delta=0 → no proposal (perfectly balanced)
-        result = compute_rebalance_proposal(
-            "EVT-1", ledger, pair, None, "Test", OrderBookManager()
-        )
+        result = compute_rebalance_proposal("EVT-1", ledger, pair, None, "Test", OrderBookManager())
         assert result is None
 
     def test_any_committed_delta_proposes(self):
@@ -131,9 +127,7 @@ class TestComputeRebalanceProposal:
         ledger.record_fill(Side.B, 10, 47)
 
         # delta=1 → proposal (even 1 unhedged contract matters)
-        result = compute_rebalance_proposal(
-            "EVT-1", ledger, pair, None, "Test", OrderBookManager()
-        )
+        result = compute_rebalance_proposal("EVT-1", ledger, pair, None, "Test", OrderBookManager())
         assert result is not None
         assert result.kind == "rebalance"
 
@@ -145,9 +139,7 @@ class TestComputeRebalanceProposal:
         ledger.record_resting(Side.A, "ord-a", 10, 45)
         ledger.record_fill(Side.B, 10, 47)
 
-        result = compute_rebalance_proposal(
-            "EVT-1", ledger, pair, None, "Test", OrderBookManager()
-        )
+        result = compute_rebalance_proposal("EVT-1", ledger, pair, None, "Test", OrderBookManager())
         assert result is not None
         assert result.kind == "rebalance"
 
@@ -160,9 +152,7 @@ class TestComputeRebalanceProposal:
         ledger.record_fill(Side.B, 50, 47)
         ledger.record_resting(Side.B, "ord-b", 10, 47)
 
-        result = compute_rebalance_proposal(
-            "EVT-1", ledger, pair, None, "Test", OrderBookManager()
-        )
+        result = compute_rebalance_proposal("EVT-1", ledger, pair, None, "Test", OrderBookManager())
         assert result is not None
         assert result.kind == "rebalance"
         assert result.key.side == "A"  # over-extended side
@@ -177,9 +167,7 @@ class TestComputeRebalanceProposal:
         ledger.record_fill(Side.A, 30, 45)
         ledger.record_fill(Side.B, 10, 47)
 
-        result = compute_rebalance_proposal(
-            "EVT-1", ledger, pair, None, "Test", _books_with_data()
-        )
+        result = compute_rebalance_proposal("EVT-1", ledger, pair, None, "Test", _books_with_data())
         assert result is not None
         assert result.kind == "rebalance"
         assert result.key.side == "A"
@@ -257,9 +245,7 @@ class TestComputeRebalanceProposal:
         ledger.record_resting(Side.A, "ord-a", 20, 45)
         ledger.record_fill(Side.B, 40, 48)
 
-        result = compute_rebalance_proposal(
-            "EVT-1", ledger, pair, None, "Test", _books_with_data()
-        )
+        result = compute_rebalance_proposal("EVT-1", ledger, pair, None, "Test", _books_with_data())
         assert result is not None
         assert result.rebalance is not None
         assert result.rebalance.target_resting == 0
@@ -366,9 +352,7 @@ class TestComputeRebalanceProposal:
         pair = _make_pair()
         ledger = PositionLedger(event_ticker="EVT-1", unit_size=10)
 
-        result = compute_rebalance_proposal(
-            "EVT-1", ledger, pair, None, "Test", OrderBookManager()
-        )
+        result = compute_rebalance_proposal("EVT-1", ledger, pair, None, "Test", OrderBookManager())
         assert result is None
 
     def test_settled_balanced_no_proposal(self):
@@ -378,9 +362,7 @@ class TestComputeRebalanceProposal:
         ledger.record_fill(Side.A, 20, 45)
         ledger.record_fill(Side.B, 20, 48)
 
-        result = compute_rebalance_proposal(
-            "EVT-1", ledger, pair, None, "Test", OrderBookManager()
-        )
+        result = compute_rebalance_proposal("EVT-1", ledger, pair, None, "Test", OrderBookManager())
         assert result is None
 
     def test_settled_imbalanced_no_books_no_proposal(self):
@@ -392,9 +374,7 @@ class TestComputeRebalanceProposal:
         ledger.record_fill(Side.B, 10, 48)
 
         # No books registered -> best_ask returns None -> treated as settled
-        result = compute_rebalance_proposal(
-            "EVT-1", ledger, pair, None, "Test", books
-        )
+        result = compute_rebalance_proposal("EVT-1", ledger, pair, None, "Test", books)
         assert result is None
 
 
@@ -411,35 +391,47 @@ class TestExecuteRebalance:
         ledger.record_fill(Side.B, 20, 48)
 
         rest.cancel_order = AsyncMock()
-        rest.create_order = AsyncMock(
-            return_value=_make_order("TK-B", order_id="new-b")
-        )
+        rest.create_order = AsyncMock(return_value=_make_order("TK-B", order_id="new-b"))
         # Fresh sync maintains the imbalance
         rest.get_all_orders = AsyncMock(
             return_value=[
-                _make_order("TK-A", order_id="ord-a-done", fill_count=30,
-                            no_price=45, status="canceled"),
-                _make_order("TK-B", order_id="ord-b-done", fill_count=20,
-                            no_price=48, status="canceled"),
+                _make_order(
+                    "TK-A", order_id="ord-a-done", fill_count=30, no_price=45, status="canceled"
+                ),
+                _make_order(
+                    "TK-B", order_id="ord-b-done", fill_count=20, no_price=48, status="canceled"
+                ),
             ]
         )
 
         rebalance = ProposedRebalance(
-            event_ticker="EVT-1", side="A",
-            order_id="ord-a", ticker="TK-A",
-            current_resting=10, target_resting=0,
-            catchup_ticker="TK-B", catchup_price=48, catchup_qty=10,
+            event_ticker="EVT-1",
+            side="A",
+            order_id="ord-a",
+            ticker="TK-A",
+            current_resting=10,
+            target_resting=0,
+            catchup_ticker="TK-B",
+            catchup_price=48,
+            catchup_qty=10,
         )
         notifications: list[tuple[str, str]] = []
         await execute_rebalance(
-            rebalance, rest_client=rest, adjuster=adjuster, scanner=scanner,
+            rebalance,
+            rest_client=rest,
+            adjuster=adjuster,
+            scanner=scanner,
             notify=lambda msg, sev: notifications.append((msg, sev)),
         )
 
         rest.cancel_order.assert_called_once_with("ord-a")
         rest.create_order.assert_called_once_with(
-            ticker="TK-B", action="buy", side="no",
-            no_price=48, count=10, order_group_id="grp-test",
+            ticker="TK-B",
+            action="buy",
+            side="no",
+            no_price=48,
+            count=10,
+            order_group_id="grp-test",
         )
 
     @pytest.mark.asyncio
@@ -448,20 +440,27 @@ class TestExecuteRebalance:
         scanner, adjuster, rest = _make_exec_context()
 
         rest.get_order = AsyncMock(
-            return_value=_make_order("TK-A", order_id="ord-a",
-                                     fill_count=30, remaining_count=20, no_price=45)
+            return_value=_make_order(
+                "TK-A", order_id="ord-a", fill_count=30, remaining_count=20, no_price=45
+            )
         )
         rest.decrease_order = AsyncMock(
             return_value=_make_order("TK-A", order_id="ord-a", remaining_count=10)
         )
 
         rebalance = ProposedRebalance(
-            event_ticker="EVT-1", side="A",
-            order_id="ord-a", ticker="TK-A",
-            current_resting=20, target_resting=10,
+            event_ticker="EVT-1",
+            side="A",
+            order_id="ord-a",
+            ticker="TK-A",
+            current_resting=20,
+            target_resting=10,
         )
         await execute_rebalance(
-            rebalance, rest_client=rest, adjuster=adjuster, scanner=scanner,
+            rebalance,
+            rest_client=rest,
+            adjuster=adjuster,
+            scanner=scanner,
             notify=lambda msg, sev: None,
         )
 
@@ -474,19 +473,26 @@ class TestExecuteRebalance:
         scanner, adjuster, rest = _make_exec_context()
 
         rest.get_order = AsyncMock(
-            return_value=_make_order("TK-A", order_id="ord-a",
-                                     fill_count=25, remaining_count=5, no_price=45)
+            return_value=_make_order(
+                "TK-A", order_id="ord-a", fill_count=25, remaining_count=5, no_price=45
+            )
         )
         rest.decrease_order = AsyncMock()
 
         rebalance = ProposedRebalance(
-            event_ticker="EVT-1", side="A",
-            order_id="ord-a", ticker="TK-A",
-            current_resting=30, target_resting=5,
+            event_ticker="EVT-1",
+            side="A",
+            order_id="ord-a",
+            ticker="TK-A",
+            current_resting=30,
+            target_resting=5,
         )
         notifications: list[tuple[str, str]] = []
         await execute_rebalance(
-            rebalance, rest_client=rest, adjuster=adjuster, scanner=scanner,
+            rebalance,
+            rest_client=rest,
+            adjuster=adjuster,
+            scanner=scanner,
             notify=lambda msg, sev: notifications.append((msg, sev)),
         )
 
@@ -499,20 +505,27 @@ class TestExecuteRebalance:
         scanner, adjuster, rest = _make_exec_context()
 
         rest.get_order = AsyncMock(
-            return_value=_make_order("TK-A", order_id="ord-a-new",
-                                     fill_count=0, remaining_count=20, no_price=45)
+            return_value=_make_order(
+                "TK-A", order_id="ord-a-new", fill_count=0, remaining_count=20, no_price=45
+            )
         )
         rest.decrease_order = AsyncMock(
             return_value=_make_order("TK-A", order_id="ord-a-new", remaining_count=10)
         )
 
         rebalance = ProposedRebalance(
-            event_ticker="EVT-1", side="A",
-            order_id="ord-a-new", ticker="TK-A",
-            current_resting=20, target_resting=10,
+            event_ticker="EVT-1",
+            side="A",
+            order_id="ord-a-new",
+            ticker="TK-A",
+            current_resting=20,
+            target_resting=10,
         )
         await execute_rebalance(
-            rebalance, rest_client=rest, adjuster=adjuster, scanner=scanner,
+            rebalance,
+            rest_client=rest,
+            adjuster=adjuster,
+            scanner=scanner,
             notify=lambda msg, sev: None,
         )
 
@@ -524,19 +537,26 @@ class TestExecuteRebalance:
         scanner, adjuster, rest = _make_exec_context()
 
         rest.get_order = AsyncMock(
-            return_value=_make_order("TK-A", order_id="ord-a",
-                                     fill_count=45, remaining_count=5, no_price=45)
+            return_value=_make_order(
+                "TK-A", order_id="ord-a", fill_count=45, remaining_count=5, no_price=45
+            )
         )
         rest.amend_order = AsyncMock()
 
         rebalance = ProposedRebalance(
-            event_ticker="EVT-1", side="A",
-            order_id="ord-a", ticker="TK-A",
-            current_resting=20, target_resting=10,
+            event_ticker="EVT-1",
+            side="A",
+            order_id="ord-a",
+            ticker="TK-A",
+            current_resting=20,
+            target_resting=10,
         )
         notifications: list[tuple[str, str]] = []
         await execute_rebalance(
-            rebalance, rest_client=rest, adjuster=adjuster, scanner=scanner,
+            rebalance,
+            rest_client=rest,
+            adjuster=adjuster,
+            scanner=scanner,
             notify=lambda msg, sev: notifications.append((msg, sev)),
         )
 
@@ -556,23 +576,32 @@ class TestExecuteRebalance:
         # catchup=True bypasses P16; P18: 45+48=93 < 100 → passes → order placed
         rest.get_all_orders = AsyncMock(
             return_value=[
-                _make_order("TK-A", order_id="ord-a-done", fill_count=40,
-                            no_price=45, status="canceled"),
-                _make_order("TK-B", order_id="ord-b-done", fill_count=20,
-                            no_price=48, status="canceled"),
-                _make_order("TK-B", order_id="ord-b-late", remaining_count=5,
-                            no_price=48, status="resting"),
+                _make_order(
+                    "TK-A", order_id="ord-a-done", fill_count=40, no_price=45, status="canceled"
+                ),
+                _make_order(
+                    "TK-B", order_id="ord-b-done", fill_count=20, no_price=48, status="canceled"
+                ),
+                _make_order(
+                    "TK-B", order_id="ord-b-late", remaining_count=5, no_price=48, status="resting"
+                ),
             ]
         )
         rest.create_order = AsyncMock(return_value=_make_order("TK-B", order_id="new-b"))
 
         rebalance = ProposedRebalance(
-            event_ticker="EVT-1", side="A",
-            catchup_ticker="TK-B", catchup_price=48, catchup_qty=10,
+            event_ticker="EVT-1",
+            side="A",
+            catchup_ticker="TK-B",
+            catchup_price=48,
+            catchup_qty=10,
         )
         notifications: list[tuple[str, str]] = []
         await execute_rebalance(
-            rebalance, rest_client=rest, adjuster=adjuster, scanner=scanner,
+            rebalance,
+            rest_client=rest,
+            adjuster=adjuster,
+            scanner=scanner,
             notify=lambda msg, sev: notifications.append((msg, sev)),
         )
 
@@ -597,11 +626,17 @@ class TestExecuteRebalance:
         rest.create_order = AsyncMock(return_value=_make_order("TK-B", order_id="new-b"))
 
         rebalance = ProposedRebalance(
-            event_ticker="EVT-1", side="A",
-            catchup_ticker="TK-B", catchup_price=48, catchup_qty=10,
+            event_ticker="EVT-1",
+            side="A",
+            catchup_ticker="TK-B",
+            catchup_price=48,
+            catchup_qty=10,
         )
         await execute_rebalance(
-            rebalance, rest_client=rest, adjuster=adjuster, scanner=scanner,
+            rebalance,
+            rest_client=rest,
+            adjuster=adjuster,
+            scanner=scanner,
             notify=lambda msg, sev: None,
         )
 
@@ -623,11 +658,17 @@ class TestExecuteRebalance:
         rest.create_order = AsyncMock(return_value=_make_order("TK-B", order_id="new-b"))
 
         rebalance = ProposedRebalance(
-            event_ticker="EVT-1", side="A",
-            catchup_ticker="TK-B", catchup_price=48, catchup_qty=25,  # stale
+            event_ticker="EVT-1",
+            side="A",
+            catchup_ticker="TK-B",
+            catchup_price=48,
+            catchup_qty=25,  # stale
         )
         await execute_rebalance(
-            rebalance, rest_client=rest, adjuster=adjuster, scanner=scanner,
+            rebalance,
+            rest_client=rest,
+            adjuster=adjuster,
+            scanner=scanner,
             notify=lambda msg, sev: None,
         )
 
@@ -649,19 +690,24 @@ class TestExecuteRebalance:
         rest.create_order = AsyncMock()
 
         rebalance = ProposedRebalance(
-            event_ticker="EVT-1", side="A",
-            catchup_ticker="TK-B", catchup_price=48, catchup_qty=10,
+            event_ticker="EVT-1",
+            side="A",
+            catchup_ticker="TK-B",
+            catchup_price=48,
+            catchup_qty=10,
         )
         notifications: list[tuple[str, str]] = []
         await execute_rebalance(
-            rebalance, rest_client=rest, adjuster=adjuster, scanner=scanner,
+            rebalance,
+            rest_client=rest,
+            adjuster=adjuster,
+            scanner=scanner,
             notify=lambda msg, sev: notifications.append((msg, sev)),
         )
 
         rest.create_order.assert_not_called()
         assert any(
-            "skipped" in msg.lower() or "balanced" in msg.lower()
-            for msg, _ in notifications
+            "skipped" in msg.lower() or "balanced" in msg.lower() for msg, _ in notifications
         )
 
 
@@ -678,23 +724,33 @@ class TestFreshSyncBeforeCatchup:
         # fresh_over_filled=30, fresh_under_committed=30 → fresh_catchup_qty=0 → skip
         rest.get_all_orders = AsyncMock(
             return_value=[
-                _make_order("TK-A", order_id="oa", fill_count=30,
-                            no_price=45, status="canceled"),
-                _make_order("TK-B", order_id="ob", fill_count=25,
-                            no_price=48, status="canceled"),
-                _make_order("TK-B", order_id="ob-r", fill_count=0,
-                            remaining_count=5, no_price=48, status="resting"),
+                _make_order("TK-A", order_id="oa", fill_count=30, no_price=45, status="canceled"),
+                _make_order("TK-B", order_id="ob", fill_count=25, no_price=48, status="canceled"),
+                _make_order(
+                    "TK-B",
+                    order_id="ob-r",
+                    fill_count=0,
+                    remaining_count=5,
+                    no_price=48,
+                    status="resting",
+                ),
             ]
         )
         rest.create_order = AsyncMock()
 
         rebalance = ProposedRebalance(
-            event_ticker="EVT-1", side="A",
-            catchup_ticker="TK-B", catchup_price=48, catchup_qty=10,
+            event_ticker="EVT-1",
+            side="A",
+            catchup_ticker="TK-B",
+            catchup_price=48,
+            catchup_qty=10,
         )
         notifications: list[tuple[str, str]] = []
         await execute_rebalance(
-            rebalance, rest_client=rest, adjuster=adjuster, scanner=scanner,
+            rebalance,
+            rest_client=rest,
+            adjuster=adjuster,
+            scanner=scanner,
             notify=lambda msg, sev: notifications.append((msg, sev)),
         )
 
@@ -710,12 +766,18 @@ class TestFreshSyncBeforeCatchup:
         rest.create_order = AsyncMock()
 
         rebalance = ProposedRebalance(
-            event_ticker="EVT-1", side="A",
-            catchup_ticker="TK-B", catchup_price=48, catchup_qty=10,
+            event_ticker="EVT-1",
+            side="A",
+            catchup_ticker="TK-B",
+            catchup_price=48,
+            catchup_qty=10,
         )
         notifications: list[tuple[str, str]] = []
         await execute_rebalance(
-            rebalance, rest_client=rest, adjuster=adjuster, scanner=scanner,
+            rebalance,
+            rest_client=rest,
+            adjuster=adjuster,
+            scanner=scanner,
             notify=lambda msg, sev: notifications.append((msg, sev)),
         )
 
@@ -733,12 +795,18 @@ class TestFreshSyncBeforeCatchup:
         rest.create_order = AsyncMock()
 
         rebalance = ProposedRebalance(
-            event_ticker="EVT-1", side="A",
-            catchup_ticker="TK-B", catchup_price=48, catchup_qty=10,
+            event_ticker="EVT-1",
+            side="A",
+            catchup_ticker="TK-B",
+            catchup_price=48,
+            catchup_qty=10,
         )
         notifications: list[tuple[str, str]] = []
         await execute_rebalance(
-            rebalance, rest_client=rest, adjuster=adjuster, scanner=scanner,
+            rebalance,
+            rest_client=rest,
+            adjuster=adjuster,
+            scanner=scanner,
             notify=lambda msg, sev: notifications.append((msg, sev)),
         )
 
@@ -753,28 +821,34 @@ class TestFreshSyncBeforeCatchup:
         # Fresh sync confirms same state
         rest.get_all_orders = AsyncMock(
             return_value=[
-                _make_order("TK-A", order_id="oa", fill_count=30,
-                            no_price=45, status="canceled"),
-                _make_order("TK-B", order_id="ob", fill_count=20,
-                            no_price=48, status="canceled"),
+                _make_order("TK-A", order_id="oa", fill_count=30, no_price=45, status="canceled"),
+                _make_order("TK-B", order_id="ob", fill_count=20, no_price=48, status="canceled"),
             ]
         )
-        rest.create_order = AsyncMock(
-            return_value=_make_order("TK-B", order_id="new-b")
-        )
+        rest.create_order = AsyncMock(return_value=_make_order("TK-B", order_id="new-b"))
 
         rebalance = ProposedRebalance(
-            event_ticker="EVT-1", side="A",
-            catchup_ticker="TK-B", catchup_price=48, catchup_qty=10,
+            event_ticker="EVT-1",
+            side="A",
+            catchup_ticker="TK-B",
+            catchup_price=48,
+            catchup_qty=10,
         )
         await execute_rebalance(
-            rebalance, rest_client=rest, adjuster=adjuster, scanner=scanner,
+            rebalance,
+            rest_client=rest,
+            adjuster=adjuster,
+            scanner=scanner,
             notify=lambda msg, sev: None,
         )
 
         rest.create_order.assert_called_once_with(
-            ticker="TK-B", action="buy", side="no",
-            no_price=48, count=10, order_group_id="grp-test",
+            ticker="TK-B",
+            action="buy",
+            side="no",
+            no_price=48,
+            count=10,
+            order_group_id="grp-test",
         )
 
 

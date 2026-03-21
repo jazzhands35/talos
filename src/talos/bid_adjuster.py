@@ -410,6 +410,27 @@ class BidAdjuster:
             self.clear_proposal(proposal.event_ticker, side)
             return
 
+        # Re-check P18 profitability with current ledger state.
+        # Between proposal and execution, the other side may have filled
+        # at a different price than expected at proposal time.
+        pair_lookup = self._ticker_map.get(ticker)
+        if pair_lookup is not None:
+            pair, _ = pair_lookup
+            ok, reason = ledger.is_placement_safe(
+                side, fresh_order.remaining_count, proposal.new_price,
+                rate=pair.fee_rate, catchup=True,
+            )
+            if not ok:
+                logger.warning(
+                    "adjustment_blocked_p18_recheck",
+                    event_ticker=proposal.event_ticker,
+                    side=side.value,
+                    new_price=proposal.new_price,
+                    reason=reason,
+                )
+                self.clear_proposal(proposal.event_ticker, side)
+                return
+
         logger.info(
             "adjustment_amend",
             event_ticker=proposal.event_ticker,
@@ -435,7 +456,14 @@ class BidAdjuster:
         # Update fills from amend response (handles fills that arrived during approval)
         fill_delta = old_order.fill_count - ledger.filled_count(side)
         if fill_delta > 0:
-            ledger.record_fill(side, count=fill_delta, price=old_order.no_price)
+            # Prorate maker fees for the new fills
+            fee_delta = old_order.maker_fees - ledger.filled_fees(side)
+            ledger.record_fill(
+                side,
+                count=fill_delta,
+                price=old_order.no_price,
+                fees=max(0, fee_delta),
+            )
 
         # Update ledger from amend response
         ledger.record_resting(

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
 from unittest.mock import AsyncMock
+from zoneinfo import ZoneInfo
 
 import pytest
 
@@ -18,6 +19,7 @@ from talos.game_status import (
     _extract_date_from_ticker,
     estimate_start_time,
 )
+from talos.ui.widgets import _fmt_game_date, _fmt_game_status
 
 # ── GameStatus Model ───────────────────────────────────────────────
 
@@ -120,7 +122,7 @@ class TestEspnProvider:
                                         "abbreviation": "BOS",
                                     },
                                 },
-                            ]
+                            ],
                         }
                     ],
                 }
@@ -163,7 +165,7 @@ class TestEspnProvider:
                                         "abbreviation": "BOS",
                                     },
                                 },
-                            ]
+                            ],
                         }
                     ],
                 }
@@ -202,7 +204,7 @@ class TestEspnProvider:
                                         "abbreviation": "BOS",
                                     },
                                 },
-                            ]
+                            ],
                         }
                     ],
                 }
@@ -603,11 +605,6 @@ class TestResolverIntegration:
 
 # ── UI Formatter Tests ───────────────────────────────────────────
 
-
-from zoneinfo import ZoneInfo
-
-from talos.ui.widgets import _fmt_game_date, _fmt_game_status
-
 PT = ZoneInfo("America/Los_Angeles")
 
 
@@ -747,10 +744,13 @@ class TestResolverExpirationFallback:
         mock_provider = AsyncMock()
         mock_provider.fetch_games.return_value = [
             ExternalGame(
-                home_team="Rangers", away_team="Bruins",
-                home_abbr="NYR", away_abbr="BOS",
+                home_team="Rangers",
+                away_team="Bruins",
+                home_abbr="NYR",
+                away_abbr="BOS",
                 scheduled_start=datetime(2026, 3, 14, 19, 0, tzinfo=UTC),
-                state="live", detail="P2 5:00",
+                state="live",
+                detail="P2 5:00",
             )
         ]
         resolver = GameStatusResolver()

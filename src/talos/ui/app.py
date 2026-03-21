@@ -26,8 +26,12 @@ from talos.models.strategy import BidConfirmation
 from talos.scanner import ArbitrageScanner
 from talos.ui.proposal_panel import ProposalPanel
 from talos.ui.screens import (
-    AddGamesScreen, AutoAcceptScreen, BidScreen, ScanScreen,
-    SettlementHistoryScreen, UnitSizeScreen,
+    AddGamesScreen,
+    AutoAcceptScreen,
+    BidScreen,
+    ScanScreen,
+    SettlementHistoryScreen,
+    UnitSizeScreen,
 )
 from talos.ui.theme import APP_CSS
 from talos.ui.widgets import ActivityLog, OpportunitiesTable, OrderLog, PortfolioPanel
@@ -56,6 +60,7 @@ class TalosApp(App):
         ("f", "toggle_auto_accept", "Auto-Accept"),
         ("p", "show_proposals", "Proposals"),
         ("e", "toggle_exit_only", "Exit-Only"),
+        ("E", "exit_all", "Exit All"),
         ("c", "scan", "Scan"),
         ("o", "open_in_browser", "Open"),
         ("h", "settlement_history", "History"),
@@ -334,7 +339,8 @@ class TalosApp(App):
                         if os.path.getsize(log_path) > self._FREEZE_LOG_MAX_BYTES:
                             with open(log_path, "w") as f:
                                 f.write(
-                                    f"[{time.strftime('%H:%M:%S')}] --- log rotated (exceeded 10 MB) ---\n\n"
+                                    f"[{time.strftime('%H:%M:%S')}]"
+                                    " --- log rotated (exceeded 10 MB) ---\n\n"
                                 )
                     except OSError:
                         pass
@@ -885,6 +891,17 @@ class TalosApp(App):
             is_on = self._engine.toggle_exit_only(event_ticker)
             if is_on:
                 await self._engine._enforce_exit_only(event_ticker)
+
+    def action_exit_all(self) -> None:
+        """Put ALL monitored games into exit-only mode."""
+        if self._engine is None:
+            return
+        self._exit_all_games()
+
+    @work(thread=False)
+    async def _exit_all_games(self) -> None:
+        if self._engine is not None:
+            await self._engine.exit_all()
 
     def action_clear_games(self) -> None:
         if self._engine is not None:

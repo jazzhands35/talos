@@ -38,8 +38,8 @@ class TestPortfolioPanelRendering:
         async with app.run_test(size=(160, 40)) as pilot:
             panel = app.query_one(PortfolioPanel)
             await pilot.pause()
-            assert panel.content_size.width > 0, f"Content width 0"
-            assert panel.content_size.height > 0, f"Content height 0"
+            assert panel.content_size.width > 0, "Content width 0"
+            assert panel.content_size.height > 0, "Content height 0"
 
     async def test_update_balance_reflects_in_render(self) -> None:
         """After update_balance, render() should show new values."""
@@ -66,10 +66,14 @@ class TestPortfolioPanelRendering:
         app = TalosApp()
         async with app.run_test(size=(160, 40)) as pilot:
             await pilot.pause()
-            for WidgetClass in [PortfolioPanel, ActivityLog, OrderLog]:
-                w = app.query_one(WidgetClass)
-                assert w.region.width > 0, f"{WidgetClass.__name__} region width 0"
-                assert w.region.height > 0, f"{WidgetClass.__name__} region height 0"
+            for widget_class in [
+                PortfolioPanel,
+                ActivityLog,
+                OrderLog,
+            ]:
+                w = app.query_one(widget_class)
+                assert w.region.width > 0, f"{widget_class.__name__} region width 0"
+                assert w.region.height > 0, f"{widget_class.__name__} region height 0"
 
     async def test_render_lines_contain_text(self) -> None:
         """The actual rendered strips (what the terminal sees) must contain panel text."""
@@ -80,16 +84,12 @@ class TestPortfolioPanelRendering:
             await pilot.pause()
             from textual.geometry import Region
 
-            lines = panel.render_lines(
-                Region(0, 0, panel.size.width, panel.size.height)
-            )
+            lines = panel.render_lines(Region(0, 0, panel.size.width, panel.size.height))
             all_text = ""
             for strip in lines:
                 for seg in strip._segments:
                     all_text += seg.text
-            assert "$5,000.00" in all_text, (
-                f"$5,000.00 not in rendered strips: {all_text[:500]}"
-            )
+            assert "$5,000.00" in all_text, f"$5,000.00 not in rendered strips: {all_text[:500]}"
 
     async def test_panel_visible_at_small_terminal(self) -> None:
         """Panel should still be visible at 80x24 terminal size."""

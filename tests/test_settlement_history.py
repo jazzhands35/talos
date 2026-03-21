@@ -48,10 +48,23 @@ class TestSettlementGrouping:
     def test_groups_by_event_ticker(self) -> None:
         """Two settlements with same event_ticker should form one event pair."""
         settlements = [
-            _make_settlement("MKT-A", "EVT-1", 1000, 380, settled_time=_today_str()),
-            _make_settlement("MKT-B", "EVT-1", 0, 550, market_result="yes", settled_time=_today_str()),
+            _make_settlement(
+                "MKT-A",
+                "EVT-1",
+                1000,
+                380,
+                settled_time=_today_str(),
+            ),
+            _make_settlement(
+                "MKT-B",
+                "EVT-1",
+                0,
+                550,
+                market_result="yes",
+                settled_time=_today_str(),
+            ),
         ]
-        screen = SettlementHistoryScreen(settlements)
+        SettlementHistoryScreen(settlements)  # verify construction doesn't crash
         # Verify grouping happened correctly
         events: dict[str, list[Settlement]] = {}
         for s in settlements:
@@ -62,12 +75,38 @@ class TestSettlementGrouping:
     def test_groups_by_day(self) -> None:
         """Settlements from different days appear under different day headers."""
         settlements = [
-            _make_settlement("MKT-A", "EVT-1", 1000, 380, settled_time=_today_str()),
-            _make_settlement("MKT-B", "EVT-1", 0, 550, market_result="yes", settled_time=_today_str()),
-            _make_settlement("MKT-C", "EVT-2", 1000, 420, settled_time=_yesterday_str()),
-            _make_settlement("MKT-D", "EVT-2", 0, 520, market_result="yes", settled_time=_yesterday_str()),
+            _make_settlement(
+                "MKT-A",
+                "EVT-1",
+                1000,
+                380,
+                settled_time=_today_str(),
+            ),
+            _make_settlement(
+                "MKT-B",
+                "EVT-1",
+                0,
+                550,
+                market_result="yes",
+                settled_time=_today_str(),
+            ),
+            _make_settlement(
+                "MKT-C",
+                "EVT-2",
+                1000,
+                420,
+                settled_time=_yesterday_str(),
+            ),
+            _make_settlement(
+                "MKT-D",
+                "EVT-2",
+                0,
+                520,
+                market_result="yes",
+                settled_time=_yesterday_str(),
+            ),
         ]
-        screen = SettlementHistoryScreen(settlements)
+        SettlementHistoryScreen(settlements)  # verify construction doesn't crash
         # Two events, two days
         events: dict[str, list[Settlement]] = {}
         for s in settlements:
@@ -84,17 +123,25 @@ class TestSettlementPnL:
         s_a = _make_settlement("MKT-A", "EVT-1", 1000, 380)
         s_b = _make_settlement("MKT-B", "EVT-1", 0, 550, market_result="yes")
         total_revenue = s_a.revenue + s_b.revenue
-        total_cost = (s_a.no_total_cost + s_a.yes_total_cost) + (s_b.no_total_cost + s_b.yes_total_cost)
+        total_cost = (s_a.no_total_cost + s_a.yes_total_cost) + (
+            s_b.no_total_cost + s_b.yes_total_cost
+        )
         assert total_revenue - total_cost == 70
 
     def test_result_column_win_loss(self) -> None:
         """market_result='no' → W (we buy NO), 'yes' → L."""
-        assert SettlementHistoryScreen._fmt_result(
-            _make_settlement("T", "E", 0, 0, market_result="no")
-        ).plain == "W"
-        assert SettlementHistoryScreen._fmt_result(
-            _make_settlement("T", "E", 0, 0, market_result="yes")
-        ).plain == "L"
+        assert (
+            SettlementHistoryScreen._fmt_result(
+                _make_settlement("T", "E", 0, 0, market_result="no")
+            ).plain
+            == "W"
+        )
+        assert (
+            SettlementHistoryScreen._fmt_result(
+                _make_settlement("T", "E", 0, 0, market_result="yes")
+            ).plain
+            == "L"
+        )
 
 
 class TestSettlementScreenRender:
@@ -104,8 +151,21 @@ class TestSettlementScreenRender:
         from textual.widgets import DataTable
 
         settlements = [
-            _make_settlement("MKT-A", "EVT-TEST", 1000, 380, settled_time=_today_str()),
-            _make_settlement("MKT-B", "EVT-TEST", 0, 550, market_result="yes", settled_time=_today_str()),
+            _make_settlement(
+                "MKT-A",
+                "EVT-TEST",
+                1000,
+                380,
+                settled_time=_today_str(),
+            ),
+            _make_settlement(
+                "MKT-B",
+                "EVT-TEST",
+                0,
+                550,
+                market_result="yes",
+                settled_time=_today_str(),
+            ),
         ]
 
         class TestApp(App):
@@ -127,10 +187,36 @@ class TestSettlementScreenRender:
         from textual.widgets import DataTable
 
         settlements = [
-            _make_settlement("A1", "EVT-1", 1000, 380, settled_time=_today_str()),
-            _make_settlement("B1", "EVT-1", 0, 550, market_result="yes", settled_time=_today_str()),
-            _make_settlement("A2", "EVT-2", 1000, 420, settled_time=_yesterday_str()),
-            _make_settlement("B2", "EVT-2", 0, 520, market_result="yes", settled_time=_yesterday_str()),
+            _make_settlement(
+                "A1",
+                "EVT-1",
+                1000,
+                380,
+                settled_time=_today_str(),
+            ),
+            _make_settlement(
+                "B1",
+                "EVT-1",
+                0,
+                550,
+                market_result="yes",
+                settled_time=_today_str(),
+            ),
+            _make_settlement(
+                "A2",
+                "EVT-2",
+                1000,
+                420,
+                settled_time=_yesterday_str(),
+            ),
+            _make_settlement(
+                "B2",
+                "EVT-2",
+                0,
+                520,
+                market_result="yes",
+                settled_time=_yesterday_str(),
+            ),
         ]
 
         class TestApp(App):
@@ -152,8 +238,15 @@ class TestSettlementScreenRender:
         from textual.widgets import DataTable
 
         settlements = [
-            _make_settlement("MKT-A", "EVT-TEST", 1000, 380, settled_time=_today_str()),
-            _make_settlement("MKT-B", "EVT-TEST", 0, 550, market_result="yes", settled_time=_today_str()),
+            _make_settlement(
+                "MKT-A", "EVT-TEST", 1000, 380,
+                settled_time=_today_str(),
+            ),
+            _make_settlement(
+                "MKT-B", "EVT-TEST", 0, 550,
+                market_result="yes",
+                settled_time=_today_str(),
+            ),
         ]
         positions = [
             EventPositionSummary(

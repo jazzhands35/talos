@@ -10,6 +10,7 @@ A freeze means some synchronous operation blocks the event loop.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import time
 from unittest.mock import AsyncMock, MagicMock
 
@@ -22,7 +23,6 @@ from talos.orderbook import OrderBookManager
 from talos.scanner import ArbitrageScanner
 from talos.top_of_market import TopOfMarketTracker
 from talos.ui.app import TalosApp
-
 
 # ── Helpers ──────────────────────────────────────────────────
 
@@ -74,9 +74,11 @@ def _make_engine(*, n_pairs: int = 0, with_data_collector: bool = False) -> Trad
         adjuster.add_event(pair)
 
     if with_data_collector:
-        from talos.data_collector import DataCollector
-        from pathlib import Path
         import tempfile
+        from pathlib import Path
+
+        from talos.data_collector import DataCollector
+
         db_path = Path(tempfile.mktemp(suffix=".db"))
         engine._data_collector = DataCollector(db_path)
 
@@ -251,6 +253,7 @@ class TestLevel5DataCollector:
         """50 snapshot inserts with batched commit — should be fast."""
         import tempfile
         from pathlib import Path
+
         from talos.data_collector import DataCollector
 
         db_path = Path(tempfile.mktemp(suffix=".db"))
@@ -289,6 +292,7 @@ class TestLevel5DataCollector:
         """Full app with DataCollector — snapshot write shouldn't freeze UI."""
         import tempfile
         from pathlib import Path
+
         from talos.data_collector import DataCollector
 
         engine = _make_engine(n_pairs=20)
@@ -505,10 +509,8 @@ class TestLevel7SlowREST:
         elapsed = time.monotonic() - t0
 
         task.cancel()
-        try:
+        with contextlib.suppress(asyncio.CancelledError):
             await task
-        except asyncio.CancelledError:
-            pass
 
         # Should have reconnected at least twice (12s / 5s = 2.4)
         assert connect_count >= 2, f"Only {connect_count} reconnects in {elapsed:.1f}s"

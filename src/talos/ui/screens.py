@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import datetime
 from zoneinfo import ZoneInfo
 
 from rich.text import Text as RichText
@@ -9,8 +10,6 @@ from textual.app import ComposeResult
 from textual.containers import Vertical
 from textual.screen import ModalScreen
 from textual.widgets import Button, DataTable, Input, Label, TextArea
-
-from datetime import datetime
 
 from talos.game_manager import extract_leg_labels
 from talos.game_status import GameStatus, _extract_date_from_ticker
@@ -500,12 +499,12 @@ class SettlementHistoryScreen(ModalScreen[None]):
             # Sort events within day by settled time descending
             day_events.sort(key=lambda e: e[2], reverse=True)
 
-            # Compute day total P&L
+            # Compute day total P&L (revenue - cost - fees)
             day_pnl = 0
             for _, legs, _ in day_events:
                 for s in legs:
                     cost = s.no_total_cost + s.yes_total_cost
-                    day_pnl += s.revenue - cost
+                    day_pnl += s.revenue - cost - s.fee_cost
 
             # Day separator row
             day_label = day_events[0][2].strftime("%b %d")
@@ -548,10 +547,11 @@ class SettlementHistoryScreen(ModalScreen[None]):
         leg_a = legs[0] if len(legs) > 0 else None
         leg_b = legs[1] if len(legs) > 1 else None
 
-        # Event-level actual P&L (sum both legs)
+        # Event-level actual P&L (sum both legs: revenue - cost - fees)
         total_revenue = sum(s.revenue for s in legs)
         total_cost = sum(s.no_total_cost + s.yes_total_cost for s in legs)
-        actual_pnl = total_revenue - total_cost
+        total_fees = sum(s.fee_cost for s in legs)
+        actual_pnl = total_revenue - total_cost - total_fees
 
         # Event-level estimated P&L: prefer live position, fall back to cache
         pos = self._positions.get(evt_ticker)

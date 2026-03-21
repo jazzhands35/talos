@@ -544,6 +544,24 @@ _EXPIRATION_OFFSETS: dict[str, timedelta] = {
 }
 _DEFAULT_OFFSET = timedelta(hours=3)
 
+# Listed start times from external providers are earlier than actual tip-off/puck-drop.
+_START_DELAYS: dict[str, timedelta] = {
+    "KXNBAGAME": timedelta(minutes=10),
+    "KXNHLGAME": timedelta(minutes=7),
+}
+
+
+def _apply_start_delay(
+    scheduled_start: datetime | None, series_prefix: str
+) -> datetime | None:
+    """Shift a listed start time by a league-specific delay to get actual start."""
+    if scheduled_start is None:
+        return None
+    delay = _START_DELAYS.get(series_prefix)
+    if delay is None:
+        return scheduled_start
+    return scheduled_start + delay
+
 
 def estimate_start_time(
     expected_expiration: str | None, series_prefix: str
@@ -660,9 +678,10 @@ class GameStatusResolver:
             if games and team_codes else None
         )
         if matched is not None:
+            prefix = event_ticker.split("-")[0]
             return GameStatus(
                 state=matched.state,
-                scheduled_start=matched.scheduled_start,
+                scheduled_start=_apply_start_delay(matched.scheduled_start, prefix),
                 detail=matched.detail,
             )
         return self._expiration_fallback(event_ticker)
@@ -823,7 +842,9 @@ class GameStatusResolver:
                 if matched is not None:
                     new_status = GameStatus(
                         state=matched.state,
-                        scheduled_start=matched.scheduled_start,
+                        scheduled_start=_apply_start_delay(
+                            matched.scheduled_start, prefix
+                        ),
                         detail=matched.detail,
                     )
                     self._cache[event_ticker] = (new_status, team_codes, prefix)

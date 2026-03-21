@@ -123,7 +123,7 @@ class SettlementCache:
             "SELECT * FROM settlement_cache ORDER BY settled_time DESC"
         )
         cols = [desc[0] for desc in cur.description]
-        return [dict(zip(cols, row)) for row in cur.fetchall()]
+        return [dict(zip(cols, row, strict=True)) for row in cur.fetchall()]
 
     def settlements_as_models(self) -> list[tuple[Settlement, int | None, str]]:
         """Return cached data as (Settlement, est_pnl_cents, sub_title) tuples."""
@@ -182,7 +182,8 @@ def aggregate_settlements(
 
         revenue = s.get("revenue", 0)
         cost = s.get("no_total_cost", 0) + s.get("yes_total_cost", 0)
-        profit = revenue - cost
+        fees = s.get("fee_cost", 0)
+        profit = revenue - cost - fees
 
         if settled_dt >= today_start:
             buckets["today_pnl"] += profit

@@ -119,6 +119,17 @@ class OrderBook(BaseModel):
                 inner = data["orderbook_fp"]
                 if isinstance(inner, dict):
                     data.update(inner)
+            # REST returns yes_dollars/no_dollars; WS returns yes_dollars_fp/no_dollars_fp.
+            # Normalize to yes/no before parsing levels.
+            for side, rest_key, ws_key in [
+                ("yes", "yes_dollars", "yes_dollars_fp"),
+                ("no", "no_dollars", "no_dollars_fp"),
+            ]:
+                if side not in data or not data[side]:
+                    for alt in (rest_key, ws_key):
+                        if alt in data and data[alt]:
+                            data[side] = data[alt]
+                            break
             for side in ("yes", "no"):
                 levels = data.get(side)
                 if levels and isinstance(levels, list) and levels and isinstance(levels[0], list):

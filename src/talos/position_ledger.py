@@ -13,7 +13,12 @@ from typing import TYPE_CHECKING
 
 import structlog
 
-from talos.fees import MAKER_FEE_RATE, fee_adjusted_cost, fee_adjusted_profit_matched
+from talos.fees import (
+    MAKER_FEE_RATE,
+    fee_adjusted_cost,
+    fee_adjusted_profit_matched,
+    quadratic_fee,
+)
 from talos.models.position import EventPositionSummary, LegSummary
 
 if TYPE_CHECKING:
@@ -39,6 +44,7 @@ class _SideState:
         "filled_count",
         "filled_total_cost",
         "filled_fees",
+        "_fees_from_api",
         "resting_order_id",
         "resting_count",
         "resting_price",
@@ -49,6 +55,7 @@ class _SideState:
         self.filled_count: int = 0
         self.filled_total_cost: int = 0
         self.filled_fees: int = 0
+        self._fees_from_api: bool = False
         self.resting_order_id: str | None = None
         self.resting_count: int = 0
         self.resting_price: int = 0
@@ -58,6 +65,7 @@ class _SideState:
         self.filled_count = 0
         self.filled_total_cost = 0
         self.filled_fees = 0
+        self._fees_from_api = False
         self.resting_order_id = None
         self.resting_count = 0
         self.resting_price = 0
@@ -73,6 +81,8 @@ class PositionLedger:
     """
 
     def __init__(self, event_ticker: str, unit_size: int = 10) -> None:
+        if unit_size <= 0:
+            raise ValueError(f"unit_size must be positive, got {unit_size}")
         self.event_ticker = event_ticker
         self.unit_size = unit_size
         self._sync_gen: int = 0
@@ -210,11 +220,15 @@ class PositionLedger:
 
     # ── State mutations ─────────────────────────────────────────────
 
-    def record_fill(self, side: Side, count: int, price: int) -> None:
+    def record_fill(
+        self, side: Side, count: int, price: int, *, fees: int = 0
+    ) -> None:
         """Record a fill. Called when polling detects new fills."""
         s = self._sides[side]
         s.filled_count += count
         s.filled_total_cost += price * count
+        if fees > 0:
+            s.filled_fees += fees
         # If resting order filled partially/fully, reduce resting count
         if s.resting_count > 0:
             filled_from_resting = min(count, s.resting_count)
@@ -336,6 +350,7 @@ class PositionLedger:
                 s.filled_count = kalshi_filled[side]
                 s.filled_total_cost = kalshi_fill_cost[side]
                 s.filled_fees = kalshi_fees[side]
+                s._fees_from_api = True
 
             # Resting: trust orders API. Sum across multiple orders.
             resting_list = kalshi_resting[side]
@@ -400,9 +415,12 @@ class PositionLedger:
         if self._recently_cancelled:
             still_stale = set()
             for order in orders:
-                if order.order_id in self._recently_cancelled:
-                    if order.remaining_count > 0 and order.status in ("resting", "executed"):
-                        still_stale.add(order.order_id)
+                if (
+                    order.order_id in self._recently_cancelled
+                    and order.remaining_count > 0
+                    and order.status in ("resting", "executed")
+                ):
+                    still_stale.add(order.order_id)
             # IDs not in still_stale are confirmed gone — remove them
             self._recently_cancelled = still_stale
 
@@ -412,8 +430,9 @@ class PositionLedger:
         self,
         position_fills: dict[Side, int],
         position_costs: dict[Side, int],
+        position_fees: dict[Side, int] | None = None,
     ) -> None:
-        """Augment ledger with authoritative fill counts from positions API.
+        """Augment ledger with authoritative data from positions API.
 
         GET /portfolio/positions always reflects the true state — it never
         archives, unlike GET /portfolio/orders. When orders-based fill counts
@@ -422,6 +441,9 @@ class PositionLedger:
 
         Called AFTER sync_from_orders so it can detect and fix shortfalls.
         """
+        if position_fees is None:
+            position_fees = {Side.A: 0, Side.B: 0}
+
         for side in (Side.A, Side.B):
             s = self._sides[side]
             auth_fills = position_fills[side]
@@ -436,9 +458,26 @@ class PositionLedger:
                 )
                 s.filled_count = auth_fills
 
-            # Use positions-reported cost if orders didn't provide any
-            if s.filled_total_cost == 0 and position_costs[side] > 0:
-                s.filled_total_cost = position_costs[side]
+            # Positions API cost is authoritative when fills were augmented
+            # (orders API archived the filled orders). Also use it when
+            # orders-based cost is zero or when positions reports higher
+            # cost (more complete data from un-archived source).
+            pos_cost = position_costs[side]
+            if pos_cost > 0 and pos_cost > s.filled_total_cost:
+                logger.info(
+                    "cost_augmented_from_positions_api",
+                    event_ticker=self.event_ticker,
+                    side=side.value,
+                    ledger_cost=s.filled_total_cost,
+                    positions_cost=pos_cost,
+                )
+                s.filled_total_cost = pos_cost
+
+            # Fees from positions API — authoritative when orders are archived
+            pos_fees = position_fees[side]
+            if pos_fees > 0 and pos_fees > s.filled_fees:
+                s.filled_fees = pos_fees
+                s._fees_from_api = True
 
     def format_position(self, side: Side) -> str:
         """Human-readable position string for proposals."""
@@ -490,6 +529,20 @@ def compute_display_positions(
         cost_b = ledger.filled_total_cost(Side.B)
         fees_a = ledger.filled_fees(Side.A)
         fees_b = ledger.filled_fees(Side.B)
+
+        # When orders were archived across restart, fees are lost (zero)
+        # but cost/count are restored from positions API. Estimate fees
+        # from the quadratic formula to avoid showing gross-only profit.
+        # Only estimate when the API has been consulted (_fees_from_api)
+        # but returned zero — not when record_fill() was used without sync.
+        side_a = ledger._sides[Side.A]
+        side_b = ledger._sides[Side.B]
+        if fees_a == 0 and filled_a > 0 and cost_a > 0 and side_a._fees_from_api:
+            avg_a = cost_a // filled_a
+            fees_a = round(quadratic_fee(avg_a, rate=pair.fee_rate) * filled_a)
+        if fees_b == 0 and filled_b > 0 and cost_b > 0 and side_b._fees_from_api:
+            avg_b = cost_b // filled_b
+            fees_b = round(quadratic_fee(avg_b, rate=pair.fee_rate) * filled_b)
 
         if matched > 0:
             cost_a_matched = _prorate(cost_a, matched, filled_a)

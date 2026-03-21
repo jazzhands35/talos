@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import time
+
 import pytest
 
 from talos.models.ws import OrderBookSnapshot
@@ -173,7 +175,8 @@ class TestScanEdgeCases:
         _setup_books(manager, no_a=38, qty_a=100, no_b=55, qty_b=200)
         book = manager.get_book("GAME-STAN")
         assert book is not None
-        book.stale = True
+        # Make book stale by setting last_update to >120s ago
+        book.last_update = time.time() - 121.0
         scanner.scan("GAME-STAN")
         assert len(scanner.opportunities) == 0
 

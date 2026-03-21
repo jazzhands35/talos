@@ -20,30 +20,42 @@ class TestArbPair:
 
     def test_custom_fee_rate(self):
         pair = ArbPair(
-            event_ticker="EVT-1", ticker_a="TK-A", ticker_b="TK-B",
-            fee_type="flat", fee_rate=0.02,
+            event_ticker="EVT-1",
+            ticker_a="TK-A",
+            ticker_b="TK-B",
+            fee_type="flat",
+            fee_rate=0.02,
         )
         assert pair.fee_type == "flat"
         assert pair.fee_rate == 0.02
 
     def test_with_close_time(self):
         pair = ArbPair(
-            event_ticker="EVT-1", ticker_a="TK-A", ticker_b="TK-B",
+            event_ticker="EVT-1",
+            ticker_a="TK-A",
+            ticker_b="TK-B",
             close_time="2026-03-15T22:00:00Z",
         )
         assert pair.close_time == "2026-03-15T22:00:00Z"
 
 
 class TestOpportunity:
-    def _make(self, **overrides) -> Opportunity:
-        defaults = dict(
-            event_ticker="EVT-1", ticker_a="TK-A", ticker_b="TK-B",
-            no_a=45, no_b=48, qty_a=100, qty_b=50,
-            raw_edge=7, fee_edge=5.5, tradeable_qty=50,
+    def _make(self, **overrides: object) -> Opportunity:
+        defaults: dict[str, object] = dict(
+            event_ticker="EVT-1",
+            ticker_a="TK-A",
+            ticker_b="TK-B",
+            no_a=45,
+            no_b=48,
+            qty_a=100,
+            qty_b=50,
+            raw_edge=7,
+            fee_edge=5.5,
+            tradeable_qty=50,
             timestamp="2026-03-13T12:00:00Z",
         )
         defaults.update(overrides)
-        return Opportunity(**defaults)
+        return Opportunity(**defaults)  # type: ignore[arg-type]
 
     def test_construction(self):
         opp = self._make()
@@ -77,8 +89,11 @@ class TestOpportunity:
 class TestBidConfirmation:
     def test_construction(self):
         bid = BidConfirmation(
-            ticker_a="TK-A", ticker_b="TK-B",
-            no_a=45, no_b=48, qty=10,
+            ticker_a="TK-A",
+            ticker_b="TK-B",
+            no_a=45,
+            no_b=48,
+            qty=10,
         )
         assert bid.ticker_a == "TK-A"
         assert bid.no_a == 45

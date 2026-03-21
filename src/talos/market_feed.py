@@ -45,8 +45,8 @@ class MarketFeed:
         """Route a WS message to the book manager."""
         ticker = msg.market_ticker
 
-        # Learn sid mapping from first message for this ticker
-        if sid and ticker not in self._ticker_to_sid:
+        # Always update sid mapping — a resubscribe may assign a new sid
+        if sid:
             self._ticker_to_sid[ticker] = sid
 
         if isinstance(msg, OrderBookSnapshot):
@@ -61,24 +61,42 @@ class MarketFeed:
     async def _on_seq_gap(self, sid: int, channel: str) -> None:
         """Recover from a sequence gap by resubscribing.
 
-        Unsubscribes the stale sid and re-subscribes to the same channel+ticker.
+        Unsubscribes the stale sid and re-subscribes to ALL tickers that shared it.
+        Bulk subscriptions share a single sid across many tickers, so we must
+        collect every ticker mapped to the failed sid before resubscribing.
         Kalshi sends a fresh snapshot on subscribe, resetting state cleanly.
         """
-        # Find the ticker for this sid
-        ticker = None
-        for t, s in self._ticker_to_sid.items():
-            if s == sid:
-                ticker = t
-                break
-        if ticker is None:
+        # Collect ALL tickers sharing this sid — include tickers that were
+        # subscribed but haven't sent data yet (not in _ticker_to_sid).
+        learned = [t for t, s in self._ticker_to_sid.items() if s == sid]
+        # Also include subscribed tickers with no sid mapping (never sent data)
+        unmapped = [
+            t for t in self._subscribed_tickers
+            if t not in self._ticker_to_sid
+        ]
+        affected_tickers = list(set(learned + unmapped))
+        if not affected_tickers:
             logger.warning("ws_seq_gap_unknown_sid", sid=sid, channel=channel)
             return
 
-        logger.info("ws_seq_gap_recovery", ticker=ticker, sid=sid, channel=channel)
-        # Remove stale mapping and resubscribe — fresh snapshot will arrive
-        self._ticker_to_sid.pop(ticker, None)
+        logger.info(
+            "ws_seq_gap_recovery",
+            sid=sid,
+            channel=channel,
+            ticker_count=len(affected_tickers),
+            learned=len(learned),
+            unmapped=len(unmapped),
+        )
+        # Unsubscribe stale sid BEFORE clearing mappings
         await self._ws.unsubscribe([sid])
-        await self._ws.subscribe(channel, ticker)
+        # Remove stale mappings for all affected tickers
+        for ticker in affected_tickers:
+            self._ticker_to_sid.pop(ticker, None)
+        # Resubscribe all affected tickers — use bulk when multiple
+        if len(affected_tickers) == 1:
+            await self._ws.subscribe(channel, affected_tickers[0])
+        else:
+            await self._ws.subscribe(channel, market_tickers=affected_tickers)
 
     async def connect(self) -> None:
         """Connect the underlying WebSocket."""
@@ -111,10 +129,21 @@ class MarketFeed:
         logger.info("market_feed_subscribe_bulk", count=len(new_tickers))
 
     async def unsubscribe(self, ticker: str) -> None:
-        """Unsubscribe and remove from book manager."""
+        """Unsubscribe and remove from book manager.
+
+        Bulk-safe: if other tickers share the same subscription (sid),
+        removes only this ticker via update_subscription instead of
+        killing the entire sid.
+        """
         sid = self._ticker_to_sid.pop(ticker, None)
         if sid is not None:
-            await self._ws.unsubscribe([sid])
+            siblings = [t for t, s in self._ticker_to_sid.items() if s == sid]
+            if siblings:
+                # Other tickers share this sid — remove just this one
+                await self._ws.update_subscription(sid, [ticker], action="delete_markets")
+            else:
+                # Last ticker on this sid — kill the subscription
+                await self._ws.unsubscribe([sid])
         self._subscribed_tickers.discard(ticker)
         self._books.remove(ticker)
         logger.info("market_feed_unsubscribe", ticker=ticker)

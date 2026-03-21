@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import sqlite3
 from pathlib import Path
 
 from talos.data_collector import DataCollector
@@ -15,13 +14,17 @@ def _make_collector(tmp_path: Path) -> DataCollector:
 class TestSchema:
     def test_creates_all_tables(self, tmp_path: Path) -> None:
         dc = _make_collector(tmp_path)
-        cur = dc._db.execute(
-            "SELECT name FROM sqlite_master WHERE type='table' ORDER BY name"
-        )
+        cur = dc._db.execute("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name")
         tables = {row[0] for row in cur.fetchall()}
         expected = {
-            "scan_results", "scan_events", "game_adds", "orders",
-            "fills", "market_snapshots", "settlements", "event_outcomes",
+            "scan_results",
+            "scan_events",
+            "game_adds",
+            "orders",
+            "fills",
+            "market_snapshots",
+            "settlements",
+            "event_outcomes",
         }
         assert expected.issubset(tables)
         dc.close()
@@ -130,9 +133,7 @@ class TestLogOrder:
             remaining_count=20,
             source="auto_accept",
         )
-        row = dc._db.execute(
-            "SELECT order_id, price, source FROM orders"
-        ).fetchone()
+        row = dc._db.execute("SELECT order_id, price, source FROM orders").fetchone()
         assert row == ("ORD-1", 45, "auto_accept")
         dc.close()
 
@@ -164,44 +165,46 @@ class TestLogFill:
 class TestLogMarketSnapshots:
     def test_bulk_insert(self, tmp_path: Path) -> None:
         dc = _make_collector(tmp_path)
-        dc.log_market_snapshots([
-            {
-                "event_ticker": "EVT-1",
-                "ticker_a": "TK-A",
-                "ticker_b": "TK-B",
-                "no_a": 40,
-                "no_b": 55,
-                "edge": 3.2,
-                "volume_a": 1000,
-                "volume_b": 500,
-                "open_interest_a": 200,
-                "open_interest_b": 150,
-                "game_state": "pre",
-                "status": "Bidding",
-                "filled_a": 0,
-                "filled_b": 0,
-                "resting_a": 20,
-                "resting_b": 20,
-            },
-            {
-                "event_ticker": "EVT-2",
-                "ticker_a": "TK-C",
-                "ticker_b": "TK-D",
-                "no_a": 30,
-                "no_b": 65,
-                "edge": 1.5,
-                "volume_a": 2000,
-                "volume_b": 1000,
-                "open_interest_a": 300,
-                "open_interest_b": 250,
-                "game_state": "live",
-                "status": "Settled",
-                "filled_a": 20,
-                "filled_b": 20,
-                "resting_a": 0,
-                "resting_b": 0,
-            },
-        ])
+        dc.log_market_snapshots(
+            [
+                {
+                    "event_ticker": "EVT-1",
+                    "ticker_a": "TK-A",
+                    "ticker_b": "TK-B",
+                    "no_a": 40,
+                    "no_b": 55,
+                    "edge": 3.2,
+                    "volume_a": 1000,
+                    "volume_b": 500,
+                    "open_interest_a": 200,
+                    "open_interest_b": 150,
+                    "game_state": "pre",
+                    "status": "Bidding",
+                    "filled_a": 0,
+                    "filled_b": 0,
+                    "resting_a": 20,
+                    "resting_b": 20,
+                },
+                {
+                    "event_ticker": "EVT-2",
+                    "ticker_a": "TK-C",
+                    "ticker_b": "TK-D",
+                    "no_a": 30,
+                    "no_b": 65,
+                    "edge": 1.5,
+                    "volume_a": 2000,
+                    "volume_b": 1000,
+                    "open_interest_a": 300,
+                    "open_interest_b": 250,
+                    "game_state": "live",
+                    "status": "Settled",
+                    "filled_a": 20,
+                    "filled_b": 20,
+                    "resting_a": 0,
+                    "resting_b": 0,
+                },
+            ]
+        )
         count = dc._db.execute("SELECT COUNT(*) FROM market_snapshots").fetchone()[0]
         assert count == 2
         dc.close()
@@ -218,9 +221,7 @@ class TestLogSettlement:
             settlement_value=100,
             total_pnl=500,
         )
-        row = dc._db.execute(
-            "SELECT event_type, result, total_pnl FROM settlements"
-        ).fetchone()
+        row = dc._db.execute("SELECT event_type, result, total_pnl FROM settlements").fetchone()
         assert row == ("determined", "no", 500)
         dc.close()
 
@@ -234,9 +235,7 @@ class TestLogEventOutcome:
             filled_b=20,
             total_pnl=500,
         )
-        row = dc._db.execute(
-            "SELECT trapped, trap_side, trap_delta FROM event_outcomes"
-        ).fetchone()
+        row = dc._db.execute("SELECT trapped, trap_side, trap_delta FROM event_outcomes").fetchone()
         assert row == (0, None, 0)
         dc.close()
 
@@ -248,9 +247,7 @@ class TestLogEventOutcome:
             filled_b=5,
             total_pnl=-300,
         )
-        row = dc._db.execute(
-            "SELECT trapped, trap_side, trap_delta FROM event_outcomes"
-        ).fetchone()
+        row = dc._db.execute("SELECT trapped, trap_side, trap_delta FROM event_outcomes").fetchone()
         assert row == (1, "A", 15)
         dc.close()
 
@@ -262,9 +259,7 @@ class TestLogEventOutcome:
             filled_b=20,
             total_pnl=-300,
         )
-        row = dc._db.execute(
-            "SELECT trapped, trap_side, trap_delta FROM event_outcomes"
-        ).fetchone()
+        row = dc._db.execute("SELECT trapped, trap_side, trap_delta FROM event_outcomes").fetchone()
         assert row == (1, "B", 15)
         dc.close()
 
@@ -275,9 +270,7 @@ class TestLogEventOutcome:
             filled_a=0,
             filled_b=0,
         )
-        row = dc._db.execute(
-            "SELECT trapped, trap_delta FROM event_outcomes"
-        ).fetchone()
+        row = dc._db.execute("SELECT trapped, trap_delta FROM event_outcomes").fetchone()
         assert row == (0, 0)
         dc.close()
 

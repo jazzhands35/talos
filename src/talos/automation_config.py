@@ -11,6 +11,7 @@ class AutomationConfig:
     stability_seconds: float = 5.0
     staleness_grace_seconds: float = 5.0
     rejection_cooldown_seconds: float = 30.0
+    placement_failure_cooldown_seconds: float = 120.0
     unit_size: int = 10
     enabled: bool = True
     exit_only_minutes: float = 30.0

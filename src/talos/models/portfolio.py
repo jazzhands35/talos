@@ -12,7 +12,7 @@ from talos.models._converters import log_unknown_fields
 
 _POSITION_FP_FIELDS = frozenset({
     "position_fp", "total_traded_dollars", "market_exposure_dollars",
-    "resting_orders_count_fp",
+    "resting_orders_count_fp", "realized_pnl_dollars", "fees_paid_dollars",
 })
 
 _EVENT_POSITION_FP_FIELDS = frozenset({
@@ -63,6 +63,8 @@ class Position(BaseModel, extra="ignore"):
     total_traded: int = 0
     market_exposure: int = 0
     resting_orders_count: int = 0
+    realized_pnl: int = 0
+    fees_paid: int = 0
 
     @model_validator(mode="before")
     @classmethod
@@ -75,6 +77,8 @@ class Position(BaseModel, extra="ignore"):
         for old, new in [
             ("total_traded", "total_traded_dollars"),
             ("market_exposure", "market_exposure_dollars"),
+            ("realized_pnl", "realized_pnl_dollars"),
+            ("fees_paid", "fees_paid_dollars"),
         ]:
             if new in data and data[new] is not None:
                 data[old] = _dollars_to_cents(data[new])
@@ -102,7 +106,9 @@ class EventPosition(BaseModel, extra="ignore"):
     def _migrate_fp(cls, data: Any) -> Any:
         if not isinstance(data, dict):
             return data
-        log_unknown_fields("EventPosition", data, cls.model_fields.keys() | _EVENT_POSITION_FP_FIELDS)
+        log_unknown_fields(
+            "EventPosition", data, cls.model_fields.keys() | _EVENT_POSITION_FP_FIELDS
+        )
         for old, new in [
             ("total_cost", "total_cost_dollars"),
             ("event_exposure", "event_exposure_dollars"),
@@ -145,8 +151,11 @@ class Settlement(BaseModel, extra="ignore"):
             return data
         log_unknown_fields("Settlement", data, cls.model_fields.keys() | _SETTLEMENT_FP_FIELDS)
         # revenue is already cents integer — leave it
-        # fee_cost is a dollars string — convert to cents
-        if "fee_cost" in data and isinstance(data["fee_cost"], str):
+        # fee_cost arrives as a dollars string from the API — convert to cents.
+        # Also handle fee_cost_dollars (FP variant) if present.
+        if "fee_cost_dollars" in data and data["fee_cost_dollars"] is not None:
+            data["fee_cost"] = _dollars_to_cents(data["fee_cost_dollars"])
+        elif "fee_cost" in data and isinstance(data["fee_cost"], str):
             data["fee_cost"] = _dollars_to_cents(data["fee_cost"])
         for old, new in [
             ("yes_total_cost", "yes_total_cost_dollars"),
