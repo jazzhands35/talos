@@ -141,8 +141,30 @@ Applied in: `PositionLedger._placed_at_gen`, `PositionLedger.bump_sync_gen()`, `
 **Design properties:**
 - Guard expires after exactly one generation (~10s poll cycle)
 - Fresh syncs that include the order in `resting_list` clear the guard immediately
-- Explicit cancels (`record_cancel`) clear the guard
+- Explicit cancels (`record_cancel`) set the guard to `sync_gen + 1` (see below)
 - `reset_pair()` clears the guard
+
+**Post-sync mutations need gen+1:** Mutations that happen AFTER `bump_sync_gen` in the same cycle (e.g., `record_cancel` in `check_imbalances`, which runs after `sync_from_orders`) must use `sync_gen + 1` to protect the NEXT cycle's sync. Using bare `sync_gen` only protects the current cycle's sync (which already ran).
+
+**Order ID race during await:** `await cancel_order()` yields to the event loop. A WS fill handler can update the ledger's `resting_order_id` during the await, causing `record_cancel` to fail (order_id mismatch). Use `mark_side_pending()` as a fallback — it sets the gen guard without requiring an order_id match.
+
+## Kalshi eventual consistency and recently-cancelled filter
+
+Kalshi docs: "There is typically a short delay before exchange events are reflected in the API endpoints." The DELETE cancel response is synchronous (returns the zeroed order), but GET /portfolio/orders may still return the order as "resting" for 1-2 cycles.
+
+**Pattern:** Track cancelled order IDs in `_recently_cancelled: set[str]` on the ledger. `sync_from_orders` filters these out of `kalshi_resting` before processing. IDs are pruned from the set when the GET confirms they're gone (no longer returned as resting).
+
+Applied in: `PositionLedger._recently_cancelled`, populated by `record_cancel()` and `mark_order_cancelled()`. The rebalance sweep (`_cancel_all_resting`) registers all cancelled IDs. See also `has_pending_change()` which blocks new bid proposals while unconfirmed state exists.
+
+**Why not just extend the gen guard duration:** The gen guard is time-based (expires after N generations). Kalshi's propagation delay is variable. The `_recently_cancelled` filter is data-driven — it persists until the GET confirms the order is gone, regardless of how many cycles that takes.
+
+## Orphaned order sweep on cancel
+
+When cancelling resting orders, cancel ALL orders on the target side — not just the one tracked in the ledger. The ledger tracks ONE resting order per side, but Kalshi may have multiple from previous sessions, race conditions, or the ledger overwriting old order IDs with new ones (`record_placement` replaces).
+
+**Pattern:** `_cancel_all_resting()` in `rebalance.py`: (1) cancel the primary order from the proposal, (2) fetch all resting for the event, (3) cancel any remaining NO-buys on the same ticker. Returns `(count, list_of_cancelled_ids)` so the caller can register them with `mark_order_cancelled()`.
+
+Applied in: `execute_rebalance` step 1 (target_resting=0 path). The sweep adds one extra API call (`get_all_orders(event_ticker=, status="resting")`) but eliminates the infinite cancel loop from orphaned orders.
 
 ## Monotonic state updates across data sources
 
@@ -159,6 +181,65 @@ After any action that changes Kalshi state (place, amend, cancel), immediately r
 Applied in: `_verify_after_action()` in `engine.py` — runs the full two-source sync (orders + positions) after every rebalance, adjustment, and bid placement. Wrapped in try/except so a failed verification never blocks the action itself. See [[principles#7. Kalshi Is the Source of Truth — Always]] and [[principles#15. Position Accuracy Is Non-Negotiable]].
 
 **Why not rely on the next poll:** The polling cycle runs `check_imbalances` which skips events where `delta < unit_size`. If the action succeeded and resolved the imbalance, the next poll correctly sees "balanced" and does nothing — but the system never confirmed the action's outcome. If the action failed silently, the system assumes everything is fine for 10s. Immediate verification catches both cases.
+
+## API call scope must match call frequency
+
+When calling REST APIs, the **scope** of data fetched must be proportional to the **frequency** of the call. Per-action calls (firing ~1/sec during auto-accept) must filter to a single event; per-cycle calls (every 30s) can fetch globally.
+
+**The rule:** If a code path fires per-event or per-action, pass `event_ticker=` (or `ticker=`) to REST methods. If a code path is the global safety-net poll, fetching everything is correct.
+
+| Call pattern | Frequency | Correct scope |
+|-------------|-----------|---------------|
+| `_verify_after_action` | Per action (~1/sec) | `event_ticker=event_ticker` |
+| `execute_rebalance` catch-up | Per imbalance (~3+/cycle) | `event_ticker=rebalance.event_ticker` |
+| `refresh_account` polling | Every 30s | Unfiltered (intentionally global) |
+
+**Why this matters:** Unfiltered per-action calls cause rate-limit cascades. Three catch-ups in 3 seconds, each paginating through ALL orders across 50+ events, hit Kalshi's rate limit and every subsequent call fails. Filtering to single-event returns 2-4 records in a single page — no pagination, no rate limit.
+
+**Corollary:** `get_all_orders()`, `get_positions()`, and similar methods accept filter parameters (`event_ticker=`, `ticker=`, `status=`). Always check whether the caller has a more specific context to pass through.
+
+Applied in: `rebalance.py` (catch-up fresh sync), `engine.py` (`_verify_after_action`). Contrast with `refresh_account` which intentionally fetches globally — see [[decisions#2026-03-12 — Leaner polling reverted (event_ticker filter removed)]].
+
+## Surface exception types in user notifications
+
+When a try/except produces a user-visible notification, always include `type(e).__name__` in the message. Bare "failed" messages are undiagnosable — especially when structlog output is invisible (stderr captured by Textual).
+
+```python
+# Bad — user sees "Verify FAILED" with no clue why
+except Exception:
+    notify("Verify FAILED — position data may be stale", "warning")
+
+# Good — user sees "Verify FAILED (KalshiRateLimitError)"
+except Exception as e:
+    notify(f"Verify FAILED ({type(e).__name__}) — position data may be stale", "warning")
+```
+
+**Why this matters:** structlog goes to stderr, which Textual hides. The notification is the ONLY user-visible feedback channel for errors. Without the exception type, diagnosing requires reproducing the issue with a debugger attached.
+
+Applied in: `rebalance.py` (fresh sync failed), `engine.py` (_verify_after_action). Should be applied to all user-facing error notifications.
+
+## Rate limit errors propagate to the scheduler
+
+Rate-limit errors (`KalshiRateLimitError`) are categorically different from action failures. An action failure means "this broke" — log it, notify the operator, move on. A rate limit means "slow down" — the scheduler must back off, not the individual action handler.
+
+**The rule:** Never swallow `KalshiRateLimitError` inside action try/except blocks. Re-raise it so the scheduling layer (auto-accept tick, polling loop) can set a cooldown timer using the `retry_after` header.
+
+```python
+# In engine action handlers:
+except KalshiRateLimitError:
+    raise  # Let auto-accept back off
+except Exception as e:
+    self._notify(f"Action FAILED: {type(e).__name__}: {e}", "error")
+
+# In auto-accept tick:
+except KalshiRateLimitError as e:
+    backoff = max(e.retry_after or 2.0, 2.0)
+    self._rate_limit_until = datetime.now(UTC) + timedelta(seconds=backoff)
+```
+
+**Exception:** Non-critical paths (like `_verify_after_action`) can catch `KalshiRateLimitError` silently — the action already succeeded and the 30s poll will sync. But the verify must catch it *specifically* (not via bare `except Exception`), and log at debug level.
+
+Applied in: `engine.py` — adjustment and bid handlers re-raise; `_verify_after_action` catches silently. `app.py` — `_auto_accept_tick` catches and sets `_rate_limit_until` cooldown. See [[decisions#2026-03-18 — Scope per-action API calls to single event]].
 
 ## Multi-step execution with fail-safe ordering
 
@@ -223,3 +304,57 @@ Applied in: `OpportunitiesTable.refresh_from_scanner()`. Clear + re-add all rows
 - **`update_cell` doesn't reorder rows** — it changes cell values in place. To re-sort, clear all rows and re-add in the desired order within `batch_update()`.
 - **Widgets don't receive their own messages** — `DataTable.HeaderSelected` must be handled on the parent app, not on the `DataTable` subclass. Forward to the widget via a method call.
 - **Don't use `**kwargs: object` in widget `__init__`** — causes Pyright errors. Use explicit named params: `name`, `id` (with `# noqa: A002`), `classes`.
+- **Static with `height: 1fr`:** `self.update()` may not render. Override `render() -> str` + `self.refresh()` instead.
+- **CSS height circular dependency:** `height: auto` parent + `height: 1fr` children = zero. Give parent fixed `height: N`.
+- **`_row_locations` is a `TwoWayDict`:** Not subscriptable, `.get()` has no default arg. Use `.get(key)` + `is None` check.
+- **Pair striping:** Override `_get_row_style(row_index, base_style)` with `row_index // 2 % 2` for event-pair-level zebra.
+- **Overline separators:** `RichStyle(overline=True)` on segments in `_render_line_in_row` draws horizontal dividers without extra vertical space.
+
+## New model fields require persistence updates
+
+When adding a field to a Pydantic model that's part of a cached/persisted object, you must also:
+1. Add the field to the persistence save function (e.g., `save_games_full` in `__main__.py`)
+2. Add a backfill path for existing cached data missing the field
+3. Verify the restore path handles the field being absent from old cache data
+
+Without all three, the field works for newly added items but is silently `None` for everything restored from cache.
+
+## Fallback chains must cover all failure paths
+
+When adding a fallback data source (e.g., expiration-based start time), apply it everywhere the primary returns "unknown" — not just for items that lack a primary source. Mapped items whose provider fails to match still need the fallback. Check every code path that produces the "no data" state.
+
+Applied in: `GameStatusResolver._expiration_fallback()` — used in `_prepare_entry` (unmapped leagues), `resolve_batch` provider-miss path, and provider-error path.
+
+## Self-healing orderbook (resubscribe on proof of staleness)
+
+When a post-only order is rejected with "post only cross", the exchange is telling us our bid price would immediately match — proof that our local orderbook is wrong. Use this signal to trigger an automatic resubscribe on the affected tickers, forcing a fresh snapshot from Kalshi.
+
+Applied in: `engine.py` `place_bids()` — catches `KalshiAPIError` with "post only cross", unsubscribes and resubscribes both market tickers via `MarketFeed`. Combined with a proposer failure cooldown (`placement_failure_cooldown_seconds = 120`) to prevent re-proposing the same stale opportunity before the fresh snapshot corrects the book.
+
+**Why resubscribe instead of REST fetch:** The WS subscription model sends a full snapshot on subscribe. Resubscribing is idempotent, resets the seq counter, and guarantees all future deltas are based on fresh state. A one-off REST fetch would give us a snapshot but wouldn't fix the WS delta stream.
+
+**Root causes of orderbook drift (fixed 2026-03-19):**
+- Bulk subscribe gap recovery only resubscribed one ticker per sid, orphaning the rest (`market_feed.py`)
+- Gap-triggering deltas were dispatched before the fresh snapshot arrived (`ws_client.py`)
+- Deltas arriving before their ticker's snapshot were silently dropped (`orderbook.py` — now buffered and replayed)
+- Per-book seq tracking produced false stale flags for bulk subs (seq is per-SID, not per-ticker) — replaced with time-based staleness (120s threshold)
+- `unsubscribe(ticker)` killed all sibling tickers on the same bulk subscription sid — now uses `update_subscription(delete_markets)` when siblings exist
+- Time-based staleness catches ALL silent failure modes (orphaned subs, network issues, server bugs) — recovery resubscribes in the next 30s cycle
+
+## REST vs WS field naming divergence
+
+Kalshi uses DIFFERENT field names for the same data in REST vs WS responses. This is NOT a bug — it's by design. Always check BOTH OpenAPI and AsyncAPI specs.
+
+| Data | REST Field | WS Field |
+|------|-----------|----------|
+| Orderbook levels (yes) | `yes_dollars` | `yes_dollars_fp` |
+| Orderbook levels (no) | `no_dollars` | `no_dollars_fp` |
+| Last traded price | `last_price_dollars` | `price_dollars` |
+| NO-side BBA | `no_bid_dollars`, `no_ask_dollars` | *(not sent — derive from YES side)* |
+| Trade side | `side` | `taker_side` (legacy `side` still sent) |
+
+Applied in: `models/market.py` `OrderBook._coerce_levels` handles both REST and WS key names. `models/ws.py` `TickerMessage._migrate_fp` maps `price_dollars` and derives NO-side from YES-side. `TradeMessage._migrate_fp` falls back from `taker_side` to `side`.
+
+## Kalshi `x-omitempty` fields
+
+Some Kalshi Market fields have `x-omitempty: true` in the OpenAPI spec, meaning the key is **omitted entirely** when null (not sent as `null`). Pydantic handles this correctly with `field: str | None = None` — the field defaults to `None` when absent. But be aware when checking raw API responses: the key literally won't exist, not just be null.
