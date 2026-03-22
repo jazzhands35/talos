@@ -340,6 +340,9 @@ class PositionLedger:
             # Side-aware filtering
             if self._is_same_ticker:
                 assert side_map is not None  # for type checker
+                # Must match the pair's ticker AND be a buy on an expected side
+                if order.ticker != ticker_a:
+                    continue
                 if order.action != "buy" or order.side not in side_map:
                     continue
                 side = side_map[order.side]
