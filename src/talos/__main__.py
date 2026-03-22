@@ -41,6 +41,7 @@ def main() -> None:
         sys.exit(1)
 
     from talos.auth import KalshiAuth
+    from talos.automation_config import AutomationConfig
     from talos.bid_adjuster import BidAdjuster
     from talos.data_collector import DataCollector
     from talos.engine import TradingEngine
@@ -82,7 +83,8 @@ def main() -> None:
     ticker_feed = TickerFeed(ws_client=ws)
     lifecycle_feed = LifecycleFeed(ws_client=ws)
     position_feed = PositionFeed(ws_client=ws)
-    game_mgr = GameManager(rest, feed, scanner)
+    auto_config = AutomationConfig()
+    game_mgr = GameManager(rest, feed, scanner, sports_enabled=auto_config.sports_enabled)
     game_status_resolver = GameStatusResolver()
     db_dir = Path(__file__).resolve().parents[2]
     data_collector = DataCollector(db_dir / "talos_data.db")
@@ -121,6 +123,9 @@ def main() -> None:
                 "expected_expiration_time": p.expected_expiration_time,
                 "label": game_mgr.labels.get(p.event_ticker, ""),
                 "sub_title": game_mgr.subtitles.get(p.event_ticker, ""),
+                "side_a": p.side_a,
+                "side_b": p.side_b,
+                "kalshi_event_ticker": p.kalshi_event_ticker,
             }
             for p in game_mgr.active_games
         ])
@@ -136,6 +141,7 @@ def main() -> None:
         adjuster=adjuster,
         initial_games=saved_games,
         initial_games_full=saved_games_full,
+        automation_config=auto_config,
         portfolio_feed=portfolio_feed,
         ticker_feed=ticker_feed,
         lifecycle_feed=lifecycle_feed,

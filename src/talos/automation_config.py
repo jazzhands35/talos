@@ -15,3 +15,4 @@ class AutomationConfig:
     unit_size: int = 10
     enabled: bool = True
     exit_only_minutes: float = 30.0
+    sports_enabled: bool = False  # Temporarily block all sports markets
