@@ -135,6 +135,9 @@ class TradingEngine:
         self._last_jump_eval: dict[str, tuple[int, int]] = {}  # ticker -> (book_top, resting)
         self._stale_candidates: set[str] = set()  # two-strike stale position cleanup
         self._initial_sync_done: bool = False  # gate bids until first refresh_account
+        self._pair_index: dict[str, ArbPair] = {}  # rebuilt in _recompute_positions
+        self._ticker_to_event: dict[str, str] = {}  # rebuilt in _recompute_positions
+        self._pending_kinds_cache: dict[str, set[str]] = {}  # rebuilt in _recompute_positions
 
         # Wire portfolio feed callbacks
         if self._portfolio_feed is not None:
@@ -2135,11 +2138,8 @@ class TradingEngine:
                         sides += "B"
                     return f"Jumped {sides}"
 
-        # Check if pending proposal exists
-        pending_kinds = set()
-        for p in self._proposal_queue.pending():
-            if p.key.event_ticker == event_ticker:
-                pending_kinds.add(p.kind)
+        # Check if pending proposal exists — O(1) via pre-built cache
+        pending_kinds = getattr(self, "_pending_kinds_cache", {}).get(event_ticker, set())
 
         if "rebalance" in pending_kinds:
             return "Imbalanced"
@@ -2177,21 +2177,26 @@ class TradingEngine:
         return ""
 
     def _find_pair(self, event_ticker: str) -> ArbPair | None:
-        """Look up scanner pair by event ticker."""
-        for pair in self._scanner.pairs:
-            if pair.event_ticker == event_ticker:
-                return pair
-        return None
+        """Look up scanner pair by event ticker — O(1) via index."""
+        result = self._pair_index.get(event_ticker)
+        if result is None and self._scanner.pairs:
+            # Lazy rebuild if index is stale (e.g., pairs added since last recompute)
+            self._pair_index = {p.event_ticker: p for p in self._scanner.pairs}
+            result = self._pair_index.get(event_ticker)
+        return result
 
     def _find_ledger_for_bid(self, bid: BidConfirmation) -> PositionLedger | None:
-        """Look up the position ledger for a bid's event."""
-        for pair in self._scanner.pairs:
-            if pair.ticker_a == bid.ticker_a:
-                try:
-                    return self._adjuster.get_ledger(pair.event_ticker)
-                except KeyError:
-                    return None
-        return None
+        """Look up the position ledger for a bid's event — O(1) via ticker index."""
+        # Build ticker→event_ticker index lazily (keyed by ticker_a)
+        if not hasattr(self, "_ticker_to_event") or not self._ticker_to_event:
+            self._ticker_to_event = {p.ticker_a: p.event_ticker for p in self._scanner.pairs}
+        event_ticker = self._ticker_to_event.get(bid.ticker_a)
+        if event_ticker is None:
+            return None
+        try:
+            return self._adjuster.get_ledger(event_ticker)
+        except KeyError:
+            return None
 
     def _compute_proposer_status(self, event_ticker: str) -> str:
         """Diagnose why the proposer isn't suggesting for this event."""
@@ -2223,26 +2228,34 @@ class TradingEngine:
 
     def _recompute_positions(self) -> None:
         """Recompute position summaries from ledger state and enrich with status."""
+        # Rebuild lookup indices — O(N) once, enables O(1) lookups throughout
+        self._pair_index = {p.event_ticker: p for p in self._scanner.pairs}
+        self._ticker_to_event = {p.ticker_a: p.event_ticker for p in self._scanner.pairs}
+
         self._position_summaries = compute_display_positions(
             self._adjuster.ledgers,
             self._scanner.pairs,
             self._queue_cache,
             self._cpm,
         )
+
+        # Pre-build pending proposal kinds by event — O(P) once vs O(P×E) per event
+        pending_by_event: dict[str, set[str]] = {}
+        for p in self._proposal_queue.pending():
+            pending_by_event.setdefault(p.key.event_ticker, set()).add(p.kind)
+        self._pending_kinds_cache = pending_by_event
+
         for summary in self._position_summaries:
             summary.status = self._compute_event_status(summary.event_ticker)
             ep = self._event_positions.get(summary.event_ticker)
             if ep is not None:
                 summary.kalshi_pnl = ep.realized_pnl
 
-        # Compute status for ALL pairs (including those without positions)
+        # Compute status for ALL pairs — use dict instead of O(N²) scan
+        summary_index = {s.event_ticker: s for s in self._position_summaries}
         self._event_statuses: dict[str, str] = {}
         for pair in self._scanner.pairs:
-            # Events with position summaries already have status set above
-            existing = next(
-                (s for s in self._position_summaries if s.event_ticker == pair.event_ticker),
-                None,
-            )
+            existing = summary_index.get(pair.event_ticker)
             if existing is not None:
                 self._event_statuses[pair.event_ticker] = existing.status
             else:
