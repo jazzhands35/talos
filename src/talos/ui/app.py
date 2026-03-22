@@ -693,8 +693,20 @@ class TalosApp(App):
         event_ticker = _event_ticker_from_row_key(str(cell_key.row_key.value))
         if not event_ticker:
             return
-        series = event_ticker.split("-")[0].lower()
-        url = f"https://kalshi.com/markets/{series}/{event_ticker.lower()}"
+        # For YES/NO pairs, use the real Kalshi event ticker for the URL
+        url_ticker = event_ticker
+        if self._engine:
+            pair = self._engine.scanner._find_pair(event_ticker) if hasattr(self._engine.scanner, '_find_pair') else None
+            if pair is None:
+                # Try scanner pairs directly
+                for p in self._engine.scanner.pairs:
+                    if p.event_ticker == event_ticker:
+                        pair = p
+                        break
+            if pair and pair.api_event_ticker != event_ticker:
+                url_ticker = pair.api_event_ticker
+        series = url_ticker.split("-")[0].lower()
+        url = f"https://kalshi.com/markets/{series}/{url_ticker.lower()}"
         webbrowser.open(url)
 
     def action_settlement_history(self) -> None:
