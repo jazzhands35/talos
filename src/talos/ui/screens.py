@@ -652,6 +652,17 @@ class SettlementHistoryScreen(ModalScreen[None]):
         self.dismiss(None)
 
 
+class _PickerTable(DataTable):
+    """DataTable subclass that forwards Space/Enter to the parent screen."""
+
+    def _on_key(self, event: Key) -> None:
+        if event.key in ("space", "shift+space", "enter"):
+            # Let the parent MarketPickerScreen handle these
+            event.prevent_default()
+            return
+        super()._on_key(event)
+
+
 class MarketPickerScreen(ModalScreen[list[Market]]):
     """Select markets from a non-sports event for YES/NO arb monitoring."""
 
@@ -731,6 +742,9 @@ class MarketPickerScreen(ModalScreen[list[Market]]):
 
     def on_key(self, event: Key) -> None:
         """Handle Space, Enter, Shift+Space before DataTable consumes them."""
+        from pathlib import Path
+        with open(Path(__file__).resolve().parents[3] / "talos_debug.log", "a") as f:
+            f.write(f"on_key: key={event.key!r} character={event.character!r}\n")
         if event.key == "space":
             event.prevent_default()
             event.stop()
@@ -813,14 +827,22 @@ class MarketPickerScreen(ModalScreen[list[Market]]):
                 table.update_cell(ticker, check_col, "✓")
 
     def _confirm(self) -> None:
-        """Add selected markets and dismiss."""
-        if self._selected:
-            selected = [
-                m for t in self._row_tickers
-                if t in self._selected
-                for m in self._markets
-                if m.ticker == t
-            ]
-            self.dismiss(selected)
-        else:
-            self.dismiss([])
+        """Add selected markets and dismiss.
+
+        If nothing was space-toggled, add the market under the cursor.
+        """
+        if not self._selected:
+            # Nothing toggled — add the cursor row
+            table = self.query_one("#picker-table", DataTable)
+            if table.cursor_row is not None and table.row_count > 0:
+                row_idx = table.cursor_row
+                if 0 <= row_idx < len(self._row_tickers):
+                    self._selected.add(self._row_tickers[row_idx])
+
+        selected = [
+            m for t in self._row_tickers
+            if t in self._selected
+            for m in self._markets
+            if m.ticker == t
+        ]
+        self.dismiss(selected)
