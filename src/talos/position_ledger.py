@@ -80,11 +80,21 @@ class PositionLedger:
     for both UI display and bid adjustment safety.
     """
 
-    def __init__(self, event_ticker: str, unit_size: int = 10) -> None:
+    def __init__(
+        self,
+        event_ticker: str,
+        unit_size: int = 10,
+        side_a_str: str = "no",
+        side_b_str: str = "no",
+        is_same_ticker: bool = False,
+    ) -> None:
         if unit_size <= 0:
             raise ValueError(f"unit_size must be positive, got {unit_size}")
         self.event_ticker = event_ticker
         self.unit_size = unit_size
+        self._side_a_str = side_a_str
+        self._side_b_str = side_b_str
+        self._is_same_ticker = is_same_ticker
         self._sync_gen: int = 0
         self._sides: dict[Side, _SideState] = {
             Side.A: _SideState(),
@@ -311,7 +321,13 @@ class PositionLedger:
         Called every polling cycle. See also sync_from_positions() which
         patches fill gaps from the positions API.
         """
+        # Build mapping: same-ticker pairs use order.side, cross-ticker uses ticker
+        if self._is_same_ticker:
+            side_map: dict[str, Side] | None = {self._side_a_str: Side.A, self._side_b_str: Side.B}
+        else:
+            side_map = None
         ticker_to_side = {ticker_a: Side.A, ticker_b: Side.B}
+
         kalshi_filled: dict[Side, int] = {Side.A: 0, Side.B: 0}
         kalshi_fill_cost: dict[Side, int] = {Side.A: 0, Side.B: 0}
         kalshi_fees: dict[Side, int] = {Side.A: 0, Side.B: 0}
@@ -321,11 +337,19 @@ class PositionLedger:
         }
 
         for order in orders:
-            if order.side != "no" or order.action != "buy":
-                continue
-            side = ticker_to_side.get(order.ticker)
-            if side is None:
-                continue
+            # Side-aware filtering
+            if self._is_same_ticker:
+                assert side_map is not None  # for type checker
+                if order.action != "buy" or order.side not in side_map:
+                    continue
+                side = side_map[order.side]
+            else:
+                if order.side != "no" or order.action != "buy":
+                    continue
+                side = ticker_to_side.get(order.ticker)
+                if side is None:
+                    continue
+
             # Count fills from ALL orders including cancelled — fills are real
             # regardless of whether the order was later cancelled or amended
             if order.fill_count > 0:
@@ -337,7 +361,9 @@ class PositionLedger:
             if order.remaining_count > 0 and order.status in ("resting", "executed"):
                 if order.order_id in self._recently_cancelled:
                     continue
-                kalshi_resting[side].append((order.order_id, order.remaining_count, order.no_price))
+                # Use correct price field based on order side
+                resting_price = order.no_price if order.side == "no" else order.yes_price
+                kalshi_resting[side].append((order.order_id, order.remaining_count, resting_price))
 
         for side in (Side.A, Side.B):
             s = self._sides[side]
@@ -441,6 +467,8 @@ class PositionLedger:
 
         Called AFTER sync_from_orders so it can detect and fix shortfalls.
         """
+        if self._is_same_ticker:
+            return  # Positions API reports net, useless for YES/NO pairs
         if position_fees is None:
             position_fees = {Side.A: 0, Side.B: 0}
 

@@ -682,3 +682,147 @@ class TestPlacementSafetyCatchup:
         ok, reason = ledger.is_placement_safe(Side.B, 25, 48)
         assert not ok
         assert "exceed unit" in reason
+
+
+class TestSameTickerSync:
+    """Tests for YES/NO pairs where ticker_a == ticker_b."""
+
+    def test_sync_from_orders_same_ticker(self):
+        """Orders are mapped by order.side, not ticker, when same-ticker."""
+        ledger = PositionLedger(
+            event_ticker="MKT-1",
+            unit_size=10,
+            side_a_str="yes",
+            side_b_str="no",
+            is_same_ticker=True,
+        )
+        orders = [
+            Order(
+                order_id="yes-ord",
+                ticker="MKT-1",
+                action="buy",
+                side="yes",
+                no_price=0,
+                yes_price=48,
+                initial_count=10,
+                remaining_count=0,
+                fill_count=10,
+                status="executed",
+            ),
+            Order(
+                order_id="no-ord",
+                ticker="MKT-1",
+                action="buy",
+                side="no",
+                no_price=45,
+                yes_price=0,
+                initial_count=10,
+                remaining_count=5,
+                fill_count=5,
+                status="resting",
+            ),
+        ]
+        ledger.sync_from_orders(orders, "MKT-1", "MKT-1")
+        assert ledger.filled_count(Side.A) == 10  # YES orders -> Side.A
+        assert ledger.filled_count(Side.B) == 5  # NO orders -> Side.B
+        assert ledger.resting_count(Side.B) == 5  # NO order is resting
+
+    def test_sync_from_orders_same_ticker_ignores_sell(self):
+        """Sell orders are filtered out even for same-ticker pairs."""
+        ledger = PositionLedger(
+            event_ticker="MKT-1",
+            unit_size=10,
+            side_a_str="yes",
+            side_b_str="no",
+            is_same_ticker=True,
+        )
+        orders = [
+            Order(
+                order_id="sell-ord",
+                ticker="MKT-1",
+                action="sell",
+                side="yes",
+                no_price=0,
+                yes_price=52,
+                initial_count=10,
+                remaining_count=10,
+                fill_count=0,
+                status="resting",
+            ),
+        ]
+        ledger.sync_from_orders(orders, "MKT-1", "MKT-1")
+        assert ledger.filled_count(Side.A) == 0
+        assert ledger.resting_count(Side.A) == 0
+
+    def test_sync_from_positions_skipped_for_same_ticker(self):
+        """sync_from_positions is a no-op when is_same_ticker=True."""
+        ledger = PositionLedger(
+            event_ticker="MKT-1",
+            unit_size=10,
+            side_a_str="yes",
+            side_b_str="no",
+            is_same_ticker=True,
+        )
+        ledger.record_fill(Side.A, count=5, price=48)
+        ledger.sync_from_positions(
+            position_fills={Side.A: 0, Side.B: 0},
+            position_costs={Side.A: 0, Side.B: 0},
+        )
+        assert ledger.filled_count(Side.A) == 5  # NOT decreased
+
+    def test_cross_no_sync_unchanged(self):
+        """Cross-NO (different tickers) sync still works as before."""
+        ledger = PositionLedger(event_ticker="EVT-1", unit_size=10)
+        orders = [
+            Order(
+                order_id="ord-a",
+                ticker="TK-A",
+                action="buy",
+                side="no",
+                no_price=45,
+                initial_count=10,
+                remaining_count=0,
+                fill_count=10,
+                status="executed",
+            ),
+            Order(
+                order_id="ord-b",
+                ticker="TK-B",
+                action="buy",
+                side="no",
+                no_price=48,
+                initial_count=10,
+                remaining_count=5,
+                fill_count=5,
+                status="resting",
+            ),
+        ]
+        ledger.sync_from_orders(orders, "TK-A", "TK-B")
+        assert ledger.filled_count(Side.A) == 10
+        assert ledger.filled_count(Side.B) == 5
+
+    def test_same_ticker_resting_uses_yes_price(self):
+        """YES-side resting orders use yes_price, not no_price."""
+        ledger = PositionLedger(
+            event_ticker="MKT-1",
+            unit_size=10,
+            side_a_str="yes",
+            side_b_str="no",
+            is_same_ticker=True,
+        )
+        orders = [
+            Order(
+                order_id="yes-rest",
+                ticker="MKT-1",
+                action="buy",
+                side="yes",
+                no_price=0,
+                yes_price=42,
+                initial_count=10,
+                remaining_count=10,
+                fill_count=0,
+                status="resting",
+            ),
+        ]
+        ledger.sync_from_orders(orders, "MKT-1", "MKT-1")
+        assert ledger.resting_price(Side.A) == 42  # yes_price, not no_price
