@@ -598,10 +598,19 @@ class TalosApp(App):
         )
         if selected:
             pairs = await self._engine.add_market_pairs(e.event, selected)
-            if pairs and self._scanner:
-                table = self.query_one(OpportunitiesTable)
-                tracker = self._engine.tracker if self._engine else None
-                table.refresh_from_scanner(self._scanner, tracker)
+            if not pairs:
+                self.notify(
+                    f"Failed to add markets (0/{len(selected)} succeeded)",
+                    severity="error",
+                )
+                return
+            # Push fresh labels + refresh table so new rows appear immediately
+            table = self.query_one(OpportunitiesTable)
+            gm = self._engine.game_manager
+            table.update_labels(gm.labels)
+            table.update_leg_labels(gm.leg_labels)
+            tracker = self._engine.tracker if self._engine else None
+            table.refresh_from_scanner(self._scanner, tracker)
 
     def action_scan(self) -> None:
         if self._engine is not None:

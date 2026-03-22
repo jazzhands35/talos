@@ -1902,10 +1902,18 @@ class TradingEngine:
         from talos.models.market import Market as MarketModel
 
         if not isinstance(event, EventModel):
+            logger.warning(
+                "add_market_pairs_bad_event_type",
+                event_type=type(event).__name__,
+            )
             return []
         pairs: list[ArbPair] = []
         for market in markets:
             if not isinstance(market, MarketModel):
+                logger.warning(
+                    "add_market_pairs_bad_market_type",
+                    market_type=type(market).__name__,
+                )
                 continue
             try:
                 pair = await self._game_manager.add_market_as_pair(event, market)
