@@ -693,8 +693,8 @@ class TradingEngine:
             # handles proposals silently later in this cycle.
             saved_cb = self._tracker.on_change
             self._tracker.on_change = None
-            for ticker in self._tracker.resting_tickers:
-                self._tracker.check(ticker)
+            for ticker, side in self._tracker.resting_keys:
+                self._tracker.check(ticker, side=side)
             self._tracker.on_change = saved_cb
 
             # Fetch queue positions and merge into cache
@@ -922,13 +922,14 @@ class TradingEngine:
                         if msg.ticker in (pair.ticker_a, pair.ticker_b):
                             event_ticker = pair.event_ticker
                             break
+                    ws_price = msg.no_price if msg.side == "no" else msg.yes_price
                     self._data_collector.log_order(
                         event_ticker=event_ticker,
                         order_id=msg.order_id,
                         ticker=msg.ticker,
                         side=msg.side,
                         status=msg.status,
-                        price=msg.no_price,
+                        price=ws_price,
                         initial_count=msg.fill_count + msg.remaining_count,
                         fill_count=msg.fill_count,
                         remaining_count=msg.remaining_count,
@@ -939,7 +940,11 @@ class TradingEngine:
                 return
 
         # Order not in cache — add it so WS is self-sufficient
-        if msg.side == "no" and msg.status in ("resting", "executed"):
+        # Check if this order's side matches one of our pair's expected sides
+        evt = self._ticker_to_event.get(msg.ticker)
+        ws_pair = self._find_pair(evt) if evt else None
+        expected = ws_pair is not None and msg.side in {ws_pair.side_a, ws_pair.side_b}
+        if expected and msg.status in ("resting", "executed"):
             new_order = Order(
                 order_id=msg.order_id,
                 ticker=msg.ticker,
@@ -1152,11 +1157,13 @@ class TradingEngine:
         total_fees_a = ledger.filled_fees(Side.A)
         total_fees_b = ledger.filled_fees(Side.B)
 
-        # Compute revenue: NO side wins → payout = count * 100 cents
+        # Compute revenue: our side wins → payout = count * 100 cents
+        side_a = pair.side_a if pair else "no"
+        side_b = pair.side_b if pair else "no"
         revenue = 0
-        if result_a == "no":
+        if result_a == side_a:
             revenue += filled_a * 100
-        if result_b == "no":
+        if result_b == side_b:
             revenue += filled_b * 100
 
         total_pnl = revenue - total_cost_a - total_cost_b - total_fees_a - total_fees_b
@@ -1280,17 +1287,32 @@ class TradingEngine:
             ticker_to_side = {pair.ticker_a: Side.A, pair.ticker_b: Side.B}
             name = self._display_name(pair.event_ticker)
 
+            # For same-ticker pairs, disambiguate by order side (yes/no)
+            if pair.is_same_ticker:
+                order_side_map = {pair.side_a: Side.A, pair.side_b: Side.B}
+            else:
+                order_side_map = None
+
             # ── Compute ground truth from Kalshi orders ──
             kalshi_fills: dict[Side, int] = {Side.A: 0, Side.B: 0}
             kalshi_resting: dict[Side, int] = {Side.A: 0, Side.B: 0}
             kalshi_resting_order_count: dict[Side, int] = {Side.A: 0, Side.B: 0}
 
             for order in orders:
-                if order.side != "no" or order.action != "buy":
+                if order.action != "buy":
                     continue
-                side = ticker_to_side.get(order.ticker)
-                if side is None:
-                    continue
+                if pair.is_same_ticker:
+                    if order.ticker != pair.ticker_a:
+                        continue
+                    if order_side_map is None or order.side not in order_side_map:
+                        continue
+                    side = order_side_map[order.side]
+                else:
+                    if order.side not in {pair.side_a, pair.side_b}:
+                        continue
+                    side = ticker_to_side.get(order.ticker)
+                    if side is None:
+                        continue
                 if order.fill_count > 0:
                     kalshi_fills[side] += order.fill_count
                 if order.remaining_count > 0 and order.status in ("resting", "executed"):
@@ -1379,7 +1401,7 @@ class TradingEngine:
 
     # ── Event handlers ───────────────────────────────────────────
 
-    def on_top_of_market_change(self, ticker: str, at_top: bool) -> None:
+    def on_top_of_market_change(self, ticker: str, side: str, at_top: bool) -> None:
         """Handle top-of-market state transition — evaluate adjustment.
 
         Logs to structlog only (no toast) to prevent toast accumulation
@@ -1389,24 +1411,27 @@ class TradingEngine:
         # Invalidate jump-eval cache — real WS transition, force re-evaluation
         self._last_jump_eval.pop(ticker, None)
 
-        resting = self._tracker.resting_price(ticker)
+        resting = self._tracker.resting_price(ticker, side=side)
         evt = self._adjuster.resolve_event(ticker)
         label = self._display_name(evt) if evt else ticker
         if at_top:
-            logger.info("back_at_top", ticker=ticker, label=label, resting=resting)
+            logger.info("back_at_top", ticker=ticker, side=side, label=label, resting=resting)
         else:
-            top_price = self._tracker.book_top_price(ticker) or 0
+            top_price = self._tracker.book_top_price(ticker, side=side) or 0
             logger.info(
                 "jumped",
                 ticker=ticker,
+                side=side,
                 label=label,
                 resting=resting,
                 top_price=top_price,
             )
 
-        self._generate_jump_proposal(ticker, at_top=at_top)
+        self._generate_jump_proposal(ticker, side=side, at_top=at_top)
 
-    def _generate_jump_proposal(self, ticker: str, *, at_top: bool = False) -> None:
+    def _generate_jump_proposal(
+        self, ticker: str, *, side: str = "no", at_top: bool = False
+    ) -> None:
         """Evaluate a jump and enqueue a proposal if appropriate.
 
         Shared by on_top_of_market_change (with toast) and reevaluate_jumps
@@ -1414,7 +1439,7 @@ class TradingEngine:
         """
         evt_ticker = self._adjuster.resolve_event(ticker)
         exit_only = self.is_exit_only(evt_ticker) if evt_ticker else False
-        proposal = self._adjuster.evaluate_jump(ticker, at_top, exit_only=exit_only)
+        proposal = self._adjuster.evaluate_jump(ticker, at_top, exit_only=exit_only, side=side)
         if proposal is not None:
             evt = proposal.event_ticker
             name = self._display_name(evt)
@@ -1480,11 +1505,11 @@ class TradingEngine:
             )
             if has_withdraw:
                 continue
-            for ticker, side_label in [
-                (pair.ticker_a, "A"),
-                (pair.ticker_b, "B"),
+            for ticker, side_label, pair_side in [
+                (pair.ticker_a, "A", pair.side_a),
+                (pair.ticker_b, "B", pair.side_b),
             ]:
-                at_top = self._tracker.is_at_top(ticker)
+                at_top = self._tracker.is_at_top(ticker, side=pair_side)
                 if at_top is not None and not at_top:
                     # Jumped — check if there's already a proposal for this side
                     has_proposal = any(
@@ -1496,13 +1521,13 @@ class TradingEngine:
                     if not has_proposal:
                         # Skip if book top and resting price haven't changed
                         # since the last evaluation — same HOLD would result.
-                        book_top = self._tracker.book_top_price(ticker) or 0
-                        resting = self._tracker.resting_price(ticker) or 0
+                        book_top = self._tracker.book_top_price(ticker, side=pair_side) or 0
+                        resting = self._tracker.resting_price(ticker, side=pair_side) or 0
                         eval_key = (book_top, resting)
                         if eval_key == self._last_jump_eval.get(ticker):
                             continue
                         self._last_jump_eval[ticker] = eval_key
-                        self._generate_jump_proposal(ticker)
+                        self._generate_jump_proposal(ticker, side=pair_side)
 
     async def check_imbalances(self) -> None:
         """Detect and auto-execute rebalance catch-ups (P16).
@@ -1570,12 +1595,14 @@ class TradingEngine:
                         group = await _create_order_group(
                             self._rest, pair.event_ticker, side.value, qty
                         )
+                        pair_side = pair.side_a if side == Side.A else pair.side_b
                         try:
                             await self._rest.create_order(
                                 ticker=ticker,
                                 action="buy",
-                                side="no",
-                                no_price=price,
+                                side=pair_side,
+                                yes_price=price if pair_side == "yes" else None,
+                                no_price=price if pair_side == "no" else None,
                                 count=qty,
                                 order_group_id=group,
                             )
@@ -1643,7 +1670,7 @@ class TradingEngine:
     # ── Action methods ──────────────────────────────────────────────
 
     async def place_bids(self, bid: BidConfirmation) -> None:
-        """Place NO orders on both legs.
+        """Place orders on both legs (side-aware: YES or NO per pair config).
 
         Safety: checks is_placement_safe() on both sides before sending orders.
         After placement, optimistically updates the ledger via record_placement()
@@ -1700,20 +1727,33 @@ class TradingEngine:
                     )
                     return
 
+        # Resolve pair for side-aware order placement
+        event_ticker = self._adjuster.resolve_event(bid.ticker_a)
+        pair = self._find_pair(event_ticker) if event_ticker else None
+        if pair is None:
+            logger.error("place_bids_no_pair", ticker_a=bid.ticker_a)
+            self._notify(f"BLOCKED: no pair found for {bid.ticker_a}", "error")
+            return
+
+        side_a = pair.side_a
+        side_b = pair.side_b
+
         try:
             order_a = await self._rest.create_order(
                 ticker=bid.ticker_a,
                 action="buy",
-                side="no",
-                no_price=bid.no_a,
+                side=side_a,
+                yes_price=bid.no_a if side_a == "yes" else None,
+                no_price=bid.no_a if side_a == "no" else None,
                 count=bid.qty,
             )
             logger.info("order_placed", ticker=bid.ticker_a, order_id=order_a.order_id)
             order_b = await self._rest.create_order(
                 ticker=bid.ticker_b,
                 action="buy",
-                side="no",
-                no_price=bid.no_b,
+                side=side_b,
+                yes_price=bid.no_b if side_b == "yes" else None,
+                no_price=bid.no_b if side_b == "no" else None,
                 count=bid.qty,
             )
             logger.info("order_placed", ticker=bid.ticker_b, order_id=order_b.order_id)
@@ -1749,13 +1789,14 @@ class TradingEngine:
             # Log to data collector
             if self._data_collector is not None:
                 for order in (order_a, order_b):
+                    price = order.no_price if order.side == "no" else order.yes_price
                     self._data_collector.log_order(
-                        event_ticker=bid.ticker_a.rsplit("-", 1)[0] if "-" in bid.ticker_a else "",
+                        event_ticker=pair.api_event_ticker,
                         order_id=order.order_id,
                         ticker=order.ticker,
                         side=order.side,
                         status=order.status,
-                        price=order.no_price,
+                        price=price,
                         initial_count=order.initial_count,
                         fill_count=order.fill_count,
                         remaining_count=order.remaining_count,
@@ -2011,29 +2052,33 @@ class TradingEngine:
         if pair is None:
             return
         try:
-            orders = await self._rest.get_all_orders(event_ticker=event_ticker)
+            api_evt = pair.api_event_ticker
+            orders = await self._rest.get_all_orders(event_ticker=api_evt)
             ledger = self._adjuster.get_ledger(event_ticker)
             ledger.sync_from_orders(orders, ticker_a=pair.ticker_a, ticker_b=pair.ticker_b)
-            positions = await self._rest.get_positions(
-                event_ticker=event_ticker,
-                limit=200,
-            )
-            pos_map = {p.ticker: p for p in positions}
-            pos_a = pos_map.get(pair.ticker_a)
-            pos_b = pos_map.get(pair.ticker_b)
-            fills = {
-                Side.A: abs(pos_a.position) if pos_a else 0,
-                Side.B: abs(pos_b.position) if pos_b else 0,
-            }
-            costs = {
-                Side.A: pos_a.total_traded if pos_a else 0,
-                Side.B: pos_b.total_traded if pos_b else 0,
-            }
-            fees = {
-                Side.A: pos_a.fees_paid if pos_a else 0,
-                Side.B: pos_b.fees_paid if pos_b else 0,
-            }
-            ledger.sync_from_positions(fills, costs, fees)
+            # For same-ticker pairs, Kalshi reports net position = 0 (YES+NO
+            # cancel). Position-based verification is meaningless — skip it.
+            if not pair.is_same_ticker:
+                positions = await self._rest.get_positions(
+                    event_ticker=api_evt,
+                    limit=200,
+                )
+                pos_map = {p.ticker: p for p in positions}
+                pos_a = pos_map.get(pair.ticker_a)
+                pos_b = pos_map.get(pair.ticker_b)
+                fills = {
+                    Side.A: abs(pos_a.position) if pos_a else 0,
+                    Side.B: abs(pos_b.position) if pos_b else 0,
+                }
+                costs = {
+                    Side.A: pos_a.total_traded if pos_a else 0,
+                    Side.B: pos_b.total_traded if pos_b else 0,
+                }
+                fees = {
+                    Side.A: pos_a.fees_paid if pos_a else 0,
+                    Side.B: pos_b.fees_paid if pos_b else 0,
+                }
+                ledger.sync_from_positions(fills, costs, fees)
             logger.info(
                 "post_action_verify",
                 event_ticker=event_ticker,
@@ -2123,15 +2168,23 @@ class TradingEngine:
             pair = self._find_pair(event_ticker)
             if pair is not None:
                 books = self._feed.book_manager
-                if not books.best_ask(pair.ticker_a) and not books.best_ask(pair.ticker_b):
+                no_ask_a = not books.best_ask(pair.ticker_a, side=pair.side_a)
+                no_ask_b = not books.best_ask(pair.ticker_b, side=pair.side_b)
+                if no_ask_a and no_ask_b:
                     return "Settled"
 
         # Jumped — resting orders not at top of market
         if resting_a > 0 or resting_b > 0:
             pair = self._find_pair(event_ticker)
             if pair is not None:
-                jumped_a = resting_a > 0 and self._tracker.is_at_top(pair.ticker_a) is False
-                jumped_b = resting_b > 0 and self._tracker.is_at_top(pair.ticker_b) is False
+                jumped_a = (
+                    resting_a > 0
+                    and self._tracker.is_at_top(pair.ticker_a, side=pair.side_a) is False
+                )
+                jumped_b = (
+                    resting_b > 0
+                    and self._tracker.is_at_top(pair.ticker_b, side=pair.side_b) is False
+                )
                 if jumped_a or jumped_b:
                     sides = ""
                     if jumped_a:

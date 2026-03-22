@@ -589,7 +589,7 @@ def _engine_with_jump_setup() -> TradingEngine:
 class TestProposalQueue:
     def test_jump_adds_proposal_to_queue(self):
         engine = _engine_with_jump_setup()
-        engine.on_top_of_market_change("TK-B", at_top=False)
+        engine.on_top_of_market_change("TK-B", side="no", at_top=False)
         assert len(engine.proposal_queue) == 1
         p = engine.proposal_queue.pending()[0]
         assert p.kind == "adjustment"
@@ -598,13 +598,13 @@ class TestProposalQueue:
 
     def test_back_at_top_no_proposal(self):
         engine = _engine_with_jump_setup()
-        engine.on_top_of_market_change("TK-B", at_top=True)
+        engine.on_top_of_market_change("TK-B", side="no", at_top=True)
         assert len(engine.proposal_queue) == 0
 
     @pytest.mark.asyncio
     async def test_approve_proposal_executes_adjustment(self):
         engine = _engine_with_jump_setup()
-        engine.on_top_of_market_change("TK-B", at_top=False)
+        engine.on_top_of_market_change("TK-B", side="no", at_top=False)
         key = engine.proposal_queue.pending()[0].key
         # Mock the amend call
         old_order = _make_order(
@@ -629,7 +629,7 @@ class TestProposalQueue:
 
     def test_reject_proposal_removes_from_queue(self):
         engine = _engine_with_jump_setup()
-        engine.on_top_of_market_change("TK-B", at_top=False)
+        engine.on_top_of_market_change("TK-B", side="no", at_top=False)
         key = engine.proposal_queue.pending()[0].key
         engine.reject_proposal(key)
         assert len(engine.proposal_queue) == 0
@@ -656,7 +656,7 @@ class TestProposalQueue:
         ledger.record_resting(Side.A, order_id="ord-a", count=10, price=48)
         ledger.record_resting(Side.B, order_id="ord-b", count=10, price=47)
 
-        engine.on_top_of_market_change("TK-B", at_top=False)
+        engine.on_top_of_market_change("TK-B", side="no", at_top=False)
         assert len(engine.proposal_queue) == 1
         p = engine.proposal_queue.pending()[0]
         assert p.kind == "withdraw"
@@ -686,7 +686,7 @@ class TestProposalQueue:
         ledger.record_resting(Side.A, order_id="ord-a", count=10, price=48)
         ledger.record_resting(Side.B, order_id="ord-b", count=10, price=47)
 
-        engine.on_top_of_market_change("TK-B", at_top=False)
+        engine.on_top_of_market_change("TK-B", side="no", at_top=False)
         key = engine.proposal_queue.pending()[0].key
         await engine.approve_proposal(key)
 

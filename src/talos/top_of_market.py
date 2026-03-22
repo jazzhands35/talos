@@ -107,7 +107,12 @@ class TopOfMarketTracker:
     @property
     def resting_tickers(self) -> list[str]:
         """Return tickers with resting bids."""
-        return list({t for t, _ in self._resting.keys()})
+        return list({t for t, _ in self._resting})
+
+    @property
+    def resting_keys(self) -> list[tuple[str, str]]:
+        """Return (ticker, side) keys with resting bids."""
+        return list(self._resting.keys())
 
     def resting_price(self, ticker: str, side: str = "no") -> int | None:
         """Query the highest resting price for a (ticker, side)."""

@@ -93,7 +93,10 @@ def main() -> None:
 
     def on_book_update(ticker: str) -> None:
         scanner.scan(ticker)
-        tracker.check(ticker)
+        # Check both sides for each pair using this ticker
+        for pair in scanner._pairs_by_ticker.get(ticker, []):
+            for side_str in {pair.side_a, pair.side_b}:
+                tracker.check(ticker, side=side_str)
         # Mark affected events dirty for table refresh
         if _app_ref:
             for pair in scanner._pairs_by_ticker.get(ticker, []):
