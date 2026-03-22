@@ -221,6 +221,7 @@ class KalshiRESTClient:
         side: str = "no",
         action: str = "buy",
         no_price: int | None = None,
+        yes_price: int | None = None,
         count: int | None = None,
     ) -> tuple[Order, Order]:
         """Amend an existing order's price and/or quantity.
@@ -238,6 +239,8 @@ class KalshiRESTClient:
         }
         if no_price is not None:
             body["no_price_dollars"] = f"{no_price / 100:.2f}"
+        if yes_price is not None:
+            body["yes_price_dollars"] = f"{yes_price / 100:.2f}"
         if count is not None:
             body["count_fp"] = str(count)
         data = await self._request("POST", f"/portfolio/orders/{order_id}/amend", json=body)

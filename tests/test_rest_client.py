@@ -436,6 +436,51 @@ class TestOrderEndpoints:
         assert body["no_price_dollars"] == "0.65"
         assert "count_fp" not in body
 
+    async def test_amend_order_yes_price(self, client: KalshiRESTClient) -> None:
+        """amend_order with yes_price sends yes_price_dollars and omits no_price_dollars."""
+        mock_data = {
+            "old_order": {
+                "order_id": "ord-123",
+                "ticker": "KXBTC-26MAR-T50000",
+                "action": "buy",
+                "side": "yes",
+                "type": "limit",
+                "yes_price": 50,
+                "no_price": 50,
+                "initial_count": 10,
+                "remaining_count": 10,
+                "fill_count": 0,
+                "status": "resting",
+                "created_time": "2026-03-03T12:00:00Z",
+            },
+            "order": {
+                "order_id": "ord-123",
+                "ticker": "KXBTC-26MAR-T50000",
+                "action": "buy",
+                "side": "yes",
+                "type": "limit",
+                "yes_price": 55,
+                "no_price": 45,
+                "initial_count": 10,
+                "remaining_count": 10,
+                "fill_count": 0,
+                "status": "resting",
+                "created_time": "2026-03-03T12:00:00Z",
+            },
+        }
+        client._http = AsyncMock(spec=httpx.AsyncClient)
+        client._http.request = AsyncMock(return_value=_mock_response(200, mock_data))
+
+        old_order, amended_order = await client.amend_order(
+            "ord-123", ticker="KXBTC-26MAR-T50000", side="yes", yes_price=55
+        )
+        assert old_order.yes_price == 50
+        assert amended_order.yes_price == 55
+        call_kwargs = client._http.request.call_args
+        body = call_kwargs.kwargs["json"]
+        assert body["yes_price_dollars"] == "0.55"
+        assert "no_price_dollars" not in body
+
     async def test_get_order(self, client: KalshiRESTClient) -> None:
         mock_data = {
             "order": {
