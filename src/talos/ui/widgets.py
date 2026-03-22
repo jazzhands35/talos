@@ -306,7 +306,7 @@ class OpportunitiesTable(DataTable):
         self.add_column("Lg", width=5)  # 3: League / submarket
         self.add_column(RichText("Game", justify=r), width=9)  # 4: Game status
         self.add_column(RichText("Price", justify=r), width=5)  # 5: Leg price
-        self.add_column(RichText("Vol", justify=r), width=6)  # 6: Volume
+        self.add_column(RichText("24h Vol", justify=r), width=7)  # 6: 24h Volume
         self.add_column(RichText("Pos", justify=r), width=14)  # 7: Position
         self.add_column(RichText("Queue", justify=r), width=6)  # 8: Queue position
         self.add_column(RichText("CPM", justify=r), width=8)  # 9: Contracts/min

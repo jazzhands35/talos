@@ -332,8 +332,8 @@ class ScanScreen(ModalScreen[list[str] | None]):
         table.add_column(RichText("Date", justify=r), width=6)
         table.add_column(RichText("Time", justify=r), width=8)
         table.add_column("Event")
-        table.add_column(RichText("V-A", justify=r), width=7)
-        table.add_column(RichText("V-B", justify=r), width=7)
+        table.add_column(RichText("24h A", justify=r), width=7)
+        table.add_column(RichText("24h B", justify=r), width=7)
 
         # Build sortable row data
         rows: list[tuple[float, str, tuple[str, ...]]] = []
@@ -719,7 +719,7 @@ class MarketPickerScreen(ModalScreen[list[Market]]):
         table.add_column("✓", width=2)
         table.add_column("Market")
         table.add_column("Ticker", width=30)
-        table.add_column(RichText("Volume", justify=r), width=10)
+        table.add_column(RichText("24h Vol", justify=r), width=10)
 
         # Sort by 24h volume descending (most liquid first)
         sorted_markets = sorted(
