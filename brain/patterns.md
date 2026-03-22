@@ -14,6 +14,8 @@ Pydantic v2 BaseModel. Money in cents (`int`), timestamps as `str`. Use `model_v
 
 One file per module (`tests/test_{module}.py`). Mock HTTP via `AsyncMock(spec=httpx.AsyncClient)`. Assert on model fields. Exemplar: `tests/test_rest_client.py`.
 
+**Fake classes should inherit production types.** `FakeBookManager(OrderBookManager)` instead of standalone duck-typed class — eliminates pyright `reportArgumentType` errors everywhere the fake is passed. Call `super().__init__()` and override only the methods needed. Return real model instances (e.g., `OrderBookLevel(price=p, quantity=100)`) instead of ad-hoc inner classes.
+
 ## Pure state + async orchestrator split
 
 Separate I/O orchestration from state management. See [[principles#13. Test Purity Drives Architecture]] and [[decisions]].
@@ -64,6 +66,14 @@ See [[decisions#2026-03-09 — Quadratic fee model and fill-time charging]] and 
 - Format dollar amounts with `:.2f` for cent-accurate display, not `:.0f`
 
 Applied in: `scenario_pnl()` takes `total_cost_a`/`total_cost_b`, `LegSummary.total_fill_cost` carries exact costs, `_fmt_net_odds()` passes totals to P&L functions.
+
+## Sentinel flags for "missing data" vs "data is zero"
+
+When a field like `filled_fees` can legitimately be zero AND can also be zero because data was lost (e.g., orders archived across restart), checking `== 0` alone can't distinguish the two. Use an explicit boolean flag (`_fees_from_api`) to track whether an authoritative source has been consulted.
+
+Applied in: `PositionLedger._SideState._fees_from_api` — set `True` by `sync_from_orders()` (which reads Kalshi's actual fee data). The fee estimation fallback in `compute_display_positions()` only fires when `_fees_from_api is True` AND `filled_fees == 0` (lost due to archival). Without the flag, the fallback fired whenever `record_fill()` was used (which never has fee data), causing incorrect fee deductions in tests and during the amend window.
+
+**General principle:** `value == default` is not a reliable proxy for "data is missing." Prefer explicit `_has_X` or `_X_from_source` flags when the distinction matters for downstream behavior.
 
 ## Enrichment caching with split polling cadence
 
@@ -333,13 +343,16 @@ Applied in: `engine.py` `place_bids()` — catches `KalshiAPIError` with "post o
 
 **Why resubscribe instead of REST fetch:** The WS subscription model sends a full snapshot on subscribe. Resubscribing is idempotent, resets the seq counter, and guarantees all future deltas are based on fresh state. A one-off REST fetch would give us a snapshot but wouldn't fix the WS delta stream.
 
-**Root causes of orderbook drift (fixed 2026-03-19):**
+**Root causes of orderbook drift (fixed 2026-03-19, extended 2026-03-21):**
 - Bulk subscribe gap recovery only resubscribed one ticker per sid, orphaning the rest (`market_feed.py`)
 - Gap-triggering deltas were dispatched before the fresh snapshot arrived (`ws_client.py`)
 - Deltas arriving before their ticker's snapshot were silently dropped (`orderbook.py` — now buffered and replayed)
 - Per-book seq tracking produced false stale flags for bulk subs (seq is per-SID, not per-ticker) — replaced with time-based staleness (120s threshold)
 - `unsubscribe(ticker)` killed all sibling tickers on the same bulk subscription sid — now uses `update_subscription(delete_markets)` when siblings exist
 - Time-based staleness catches ALL silent failure modes (orphaned subs, network issues, server bugs) — recovery resubscribes in the next 30s cycle
+- (2026-03-21) Gap recovery used `_ticker_to_sid` (learned from first message) instead of `_subscribed_tickers` (authoritative set) — tickers in a bulk sub that never sent data were permanently orphaned after recovery. Fixed to include unmapped tickers from `_subscribed_tickers`
+- (2026-03-21) `_ticker_to_sid` only learned from first message (`not in` guard) — if a subscription died and was re-assigned a new sid, the mapping pointed to the dead sid forever. Fixed to always update
+- (2026-03-21) WS client didn't clear `_sid_to_channel` / `_sid_to_seq` on connection death or reconnect — stale sids persisted across reconnections. Fixed in both `connect()` and listen loop `finally`
 
 ## REST vs WS field naming divergence
 
@@ -358,3 +371,69 @@ Applied in: `models/market.py` `OrderBook._coerce_levels` handles both REST and 
 ## Kalshi `x-omitempty` fields
 
 Some Kalshi Market fields have `x-omitempty: true` in the OpenAPI spec, meaning the key is **omitted entirely** when null (not sent as `null`). Pydantic handles this correctly with `field: str | None = None` — the field defaults to `None` when absent. But be aware when checking raw API responses: the key literally won't exist, not just be null.
+
+## Max-profitable-price fallback for catch-up bids
+
+When a catch-up bid is blocked by P18 (unprofitable at the current market ask), compute `max_profitable_price(other_avg_fill_price, rate)` — the highest integer price P where `fee_adjusted_cost(P) + fee_adjusted_cost(other_avg) < 100`. Place a resting bid at this price instead of skipping the catch-up entirely.
+
+Applied in: `compute_rebalance_proposal()` in `rebalance.py`. When P18 blocks the scanner snapshot price, falls back to `max_profitable_price()` from `fees.py`. The resting bid fills when the market moves to the profitable price. If no profitable price exists (other side filled at extreme prices near 100¢), catch-up is still skipped.
+
+**Why resting is correct:** The catch-up bid at max profitable price guarantees the arb breaks even (or earns a tiny profit) on the hedged contracts. If the market never reaches that price, the position stays imbalanced — but no worse than before. If it does, the position gets hedged.
+
+**Why not skip entirely:** After exit-only cleanup or restart, many positions end up imbalanced with no resting orders. Skipping catch-up leaves them in "Waiting" indefinitely. A resting bid provides eventual resolution without guaranteeing a loss.
+
+**Historical fill prices are sunk costs:** The P18 check for catch-ups should not treat the other side's historical fill price as the only option. The question is not "is the current ask profitable?" but "at what price CAN I profitably hedge?" See [[decisions#2026-03-21 — Overcommit reduction and catch-up price fallback]].
+
+## Independent resolution paths for orthogonal invariants
+
+When a system has two independent safety concerns, each needs its own resolution path. Funneling both through a single gate creates blind spots.
+
+Applied in: `rebalance.py` — the rebalance system had two concerns: (1) cross-side balance (committed delta) and (2) unit capacity (filled_in_unit + resting ≤ unit_size). Both were gated on `delta != 0`, so a unit capacity violation with `delta == 0` (balanced committed counts but skewed fill/resting distribution) was detected but never resolved. Fix: `compute_overcommit_reduction()` provides an independent resolution path for unit capacity violations.
+
+**General principle:** If concern A and concern B can exist independently, `if A: fix_both()` is wrong — it silently ignores B when A is absent. Each concern needs its own `if B: fix_B()` path.
+
+## Pre-built lookup indices with lazy rebuild
+
+When a hot-path method does O(N) linear scans over a list (e.g., finding a pair by event_ticker), replace with a dict index built once per cycle and used O(1) per lookup. Build the index eagerly at the top of the cycle (e.g., `_recompute_positions`), but include a lazy rebuild fallback for call sites that run before the cycle starts.
+
+```python
+# Eager rebuild at cycle start
+self._pair_index = {p.event_ticker: p for p in self._scanner.pairs}
+
+# O(1) lookup with lazy fallback
+def _find_pair(self, event_ticker: str) -> ArbPair | None:
+    result = self._pair_index.get(event_ticker)
+    if result is None and self._scanner.pairs:
+        self._pair_index = {p.event_ticker: p for p in self._scanner.pairs}
+        result = self._pair_index.get(event_ticker)
+    return result
+```
+
+Applied in: `TradingEngine` — `_pair_index` (event_ticker → ArbPair), `_ticker_to_event` (ticker_a → event_ticker), `_pending_kinds_cache` (event_ticker → proposal kinds). Reduced hot-path from O(N²) to O(N) at 500 pairs, measured 73% benchmark improvement.
+
+**Why lazy fallback is needed:** Some call sites (e.g., `_verify_after_action`) run before `_recompute_positions`. Tests caught this — `_find_pair()` returned `None` from an empty index, skipping verification. The fallback ensures correctness while the eager rebuild optimizes the common path.
+
+## Same-ticker pair disambiguation
+
+When two legs of a pair share the same market ticker (YES/NO arb), dict-based `{ticker: side}` mappings silently overwrite one entry. Use list-based maps with disambiguation by `order.side`:
+
+```python
+# Bad — Side.A lost when ticker_a == ticker_b:
+ticker_map = {pair.ticker_a: Side.A, pair.ticker_b: Side.B}
+
+# Good — list preserves both, disambiguate by order.side:
+ticker_map: dict[str, list[tuple[ArbPair, Side]]] = {}
+ticker_map.setdefault(pair.ticker_a, []).append((pair, Side.A))
+ticker_map.setdefault(pair.ticker_b, []).append((pair, Side.B))
+
+def resolve(ticker, order_side=None):
+    entries = ticker_map.get(ticker, [])
+    if len(entries) == 1: return entries[0]
+    for pair, side in entries:
+        if (pair.side_a if side == Side.A else pair.side_b) == order_side:
+            return (pair, side)
+```
+
+Applied in: `BidAdjuster._ticker_map` (was dict-of-tuples, now dict-of-lists with `resolve_pair()`), `PositionLedger.sync_from_orders` (uses `order.side` when `is_same_ticker`), `engine._reconcile_with_kalshi` (same pattern).
+
+**General principle:** Any `{key: value}` lookup where the same key can map to multiple values needs a list + disambiguation strategy. Silent overwrite is a data loss bug.

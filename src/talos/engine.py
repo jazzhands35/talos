@@ -1883,6 +1883,10 @@ class TradingEngine:
                     )
             self._notify(f"Added {len(urls)} game(s)", toast=True)
         except Exception as e:
+            from talos.game_manager import MarketPickerNeeded
+
+            if isinstance(e, MarketPickerNeeded):
+                raise  # Propagate to UI for market picker
             self._notify(f"Error: {e}", "error", toast=True)
             logger.exception("add_games_error")
 

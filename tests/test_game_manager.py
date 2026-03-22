@@ -6,7 +6,13 @@ from unittest.mock import AsyncMock, MagicMock, Mock
 
 import pytest
 
-from talos.game_manager import SCAN_SERIES, SPORTS_SERIES, GameManager, parse_kalshi_url
+from talos.game_manager import (
+    SCAN_SERIES,
+    SPORTS_SERIES,
+    GameManager,
+    MarketPickerNeeded,
+    parse_kalshi_url,
+)
 from talos.market_feed import MarketFeed
 from talos.models.market import Event, Market, Series
 from talos.rest_client import KalshiRESTClient
@@ -483,5 +489,7 @@ class TestSportsBlock:
         )
         rest.get_event.return_value = event
 
-        with pytest.raises(ValueError, match="market picker"):
+        with pytest.raises(MarketPickerNeeded) as exc_info:
             await gm.add_game("NONSPORT-EVT")
+        assert exc_info.value.event is event
+        assert len(exc_info.value.markets) == 3

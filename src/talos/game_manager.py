@@ -17,6 +17,19 @@ from talos.scanner import ArbitrageScanner
 
 logger = structlog.get_logger()
 
+
+class MarketPickerNeeded(Exception):
+    """Raised when a non-sports event has multiple markets needing user selection."""
+
+    def __init__(self, event: Event, markets: list[Market]) -> None:
+        self.event = event
+        self.markets = markets
+        super().__init__(
+            f"Event {event.event_ticker} has {len(markets)} active markets — "
+            f"select via market picker"
+        )
+
+
 SPORTS_SERIES = [
     "KXNHLGAME",
     "KXNBAGAME",
@@ -199,11 +212,8 @@ class GameManager:
                 return await self.add_market_as_pair(
                     event, active_markets[0], subscribe=subscribe,
                 )
-            # Multiple markets — caller needs to show market picker
-            raise ValueError(
-                f"Event {ticker} has {len(active_markets)} active markets — "
-                f"use market picker to select specific markets"
-            )
+            # Multiple markets — caller shows market picker
+            raise MarketPickerNeeded(event, active_markets)
 
         ticker_a = active_markets[0].ticker
         ticker_b = active_markets[1].ticker
@@ -436,6 +446,8 @@ class GameManager:
             async with sem:
                 try:
                     return await self.add_game(url, subscribe=False)
+                except MarketPickerNeeded:
+                    raise  # Propagate to UI for market picker
                 except Exception:
                     logger.warning("add_game_failed", url=url, exc_info=True)
                     return None

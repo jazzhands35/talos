@@ -29,6 +29,7 @@ from talos.ui.screens import (
     AddGamesScreen,
     AutoAcceptScreen,
     BidScreen,
+    MarketPickerScreen,
     ScanScreen,
     SettlementHistoryScreen,
     UnitSizeScreen,
@@ -577,9 +578,33 @@ class TalosApp(App):
 
     @work(thread=False, exclusive=True, group="add_games")
     async def _open_add_games(self) -> None:
+        from talos.game_manager import MarketPickerNeeded
+
         urls = await self.push_screen_wait(AddGamesScreen())
         if urls is not None and self._engine is not None:
-            await self._engine.add_games(urls, source="manual")
+            try:
+                await self._engine.add_games(urls, source="manual")
+            except MarketPickerNeeded as e:
+                await self._show_market_picker(e)
+
+    async def _show_market_picker(self, e: object) -> None:
+        """Show market picker for multi-market non-sports events."""
+        from talos.game_manager import MarketPickerNeeded
+
+        if not isinstance(e, MarketPickerNeeded) or self._engine is None:
+            return
+        selected = await self.push_screen_wait(
+            MarketPickerScreen(e.markets, event_title=e.event.title or e.event.event_ticker)
+        )
+        if selected:
+            gm = self._engine._game_manager
+            for market in selected:
+                try:
+                    pair = await gm.add_market_as_pair(e.event, market)
+                    self._engine._adjuster.add_event(pair)
+                except Exception as ex:
+                    self.notify(f"Failed to add {market.ticker}: {ex}", severity="error")
+            self.notify(f"Added {len(selected)} market(s)")
 
     def action_scan(self) -> None:
         if self._engine is not None:

@@ -8,8 +8,16 @@ Talos is a Kalshi arbitrage trading system designed for progressive automation.
 
 ## Domain Concepts
 
+### Arb Modes
+Two arb modes, mathematically identical (`100 - price_a - price_b`):
+
+- **Cross-NO (sports):** Two markets in one event. Buy NO on both. `side_a="no", side_b="no"`, different tickers. Event ticker = Kalshi event ticker.
+- **YES/NO (non-sports):** One market. Buy YES + NO. `side_a="yes", side_b="no"`, same ticker. Event ticker = market ticker (unique key), `kalshi_event_ticker` = real Kalshi event ticker for API calls. `sync_from_positions` skipped (Kalshi nets YES+NO to zero).
+
+Sports markets can be blocked via `sports_enabled=False` in `AutomationConfig`.
+
 ### Unit
-The atomic bidding quantity. Currently **10 contracts**. Configurable, but always a fixed integer. All order placement, position tracking, and safety checks are denominated in units. A "pair" is one unit on side A and one unit on side B of the same event.
+The atomic bidding quantity. Currently **20 contracts** in production (default 10). Configurable, but always a fixed integer. All order placement, position tracking, and safety checks are denominated in units. A "pair" is one unit on side A and one unit on side B of the same event.
 
 ### Event Lifecycle (per-event, independent)
 Each event maintains an independent position ledger. Events are completely isolated — no cross-event logic.
@@ -60,11 +68,22 @@ Single source of truth for both UI display and bid adjustment safety gates. `com
    Graduation path: manual → assisted → **supervised** (current) → autonomous. See [[principles#2. Human in the Loop]].
 
 7. **Event Scanner** (Layer 7) — **ACTIVE**
-   `GameManager.scan_events()` discovers open arb-eligible events from 20 Kalshi series (`SCAN_SERIES`). Fetches concurrently with semaphore(10). `ScanScreen` modal shows results with Sport/League/Date/Volume columns. Press `c` to scan, Space to toggle, Enter to add selected, `a` to add all. Filters out already-monitored events and non-2-market events.
+   `GameManager.scan_events()` discovers open arb-eligible events from `SPORTS_SERIES` and `NON_SPORTS_SERIES` (toggled by `sports_enabled`). Fetches concurrently with semaphore(10). `ScanScreen` modal shows results with Sport/League/Date/Volume columns. `MarketPickerScreen` for non-sports events with 2+ active markets. Press `c` to scan, Space to toggle, Enter to add selected, `a` to add all.
 8. **Game Status** (Layer 8) — **ACTIVE**
    `GameStatusResolver`: multi-source live game status via ESPN (major leagues), The Odds API (AHL, minor leagues), PandaScore (esports). Maps Kalshi series tickers (e.g., `KXNHLGAME`) to external APIs, matches games by team codes extracted from `Event.sub_title`. Cached per event_ticker, refreshed hourly. Replaces "Closes" column with Date + Game Status columns (Pacific Time). Also provides per-leg 24h volume (`Market.volume_24h`). Tennis coverage incomplete (no free API for individual challenger matches).
+   **Expiration fallback (Plan 05):** Unmapped leagues derive estimated start from `Market.expected_expiration_time` minus sport offset (3h default, 5h UFC/Boxing). Shows `~` prefix on estimated times. Midnight UTC placeholder filtered.
 
 See [[codebase/index]] for the full module map and gotchas.
+
+## Drip — Sibling Program
+
+Standalone Textual TUI at `src/drip/` that manages a single arb event by drip-feeding 1-contract bids with fill-reactive balance control. Prevents imbalance instead of reacting to it (Talos's approach).
+
+- **Pure state machine** (`DripController`) + async orchestrator (`DripApp`) — same pattern as Talos
+- **REST polling v1** — no WS; polls every 10s for fills/orderbook, 30s full reconciliation
+- **Imports from Talos** — `talos.auth`, `talos.rest_client`, `talos.fees`, `talos.config`
+- **Run:** `python -m drip EVENT TICKER_A TICKER_B PRICE_A PRICE_B [--demo]`
+- **Design spec:** `docs/specs/2026-03-19-drip-staggered-arb-design.md`
 
 ## API Reference
 
