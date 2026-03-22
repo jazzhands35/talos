@@ -104,14 +104,14 @@ class TestCallbackTransitions:
         tracker.update_orders([_order("MKT-A", 47)], [PAIR])
         tracker.check("MKT-A")  # initial state: at top
 
-        changes: list[tuple[str, bool]] = []
-        tracker.on_change = lambda t, at: changes.append((t, at))
+        changes: list[tuple[str, str, bool]] = []
+        tracker.on_change = lambda t, s, at: changes.append((t, s, at))
 
         # Someone penny jumps at 48
         books.apply_snapshot("MKT-A", _snapshot(yes=[], no=[[48, 5], [47, 10]]))
         tracker.check("MKT-A")
 
-        assert changes == [("MKT-A", False)]
+        assert changes == [("MKT-A", "no", False)]
 
     def test_callback_fires_on_regain(self) -> None:
         books, tracker = _make_tracker()
@@ -119,14 +119,14 @@ class TestCallbackTransitions:
         tracker.update_orders([_order("MKT-A", 47)], [PAIR])
         tracker.check("MKT-A")  # initial: not at top
 
-        changes: list[tuple[str, bool]] = []
-        tracker.on_change = lambda t, at: changes.append((t, at))
+        changes: list[tuple[str, str, bool]] = []
+        tracker.on_change = lambda t, s, at: changes.append((t, s, at))
 
         # 48 level gets consumed
         books.apply_snapshot("MKT-A", _snapshot(yes=[], no=[[47, 10]]))
         tracker.check("MKT-A")
 
-        assert changes == [("MKT-A", True)]
+        assert changes == [("MKT-A", "no", True)]
 
     def test_no_duplicate_callbacks(self) -> None:
         books, tracker = _make_tracker()
@@ -134,8 +134,8 @@ class TestCallbackTransitions:
         tracker.update_orders([_order("MKT-A", 47)], [PAIR])
         tracker.check("MKT-A")  # initial: at top
 
-        changes: list[tuple[str, bool]] = []
-        tracker.on_change = lambda t, at: changes.append((t, at))
+        changes: list[tuple[str, str, bool]] = []
+        tracker.on_change = lambda t, s, at: changes.append((t, s, at))
 
         # Book updates but top doesn't change
         books.apply_snapshot("MKT-A", _snapshot(yes=[], no=[[47, 15]]))
@@ -150,8 +150,8 @@ class TestCallbackTransitions:
         books.apply_snapshot("MKT-A", _snapshot(yes=[], no=[[47, 10]]))
         tracker.update_orders([_order("MKT-A", 47)], [PAIR])
 
-        changes: list[tuple[str, bool]] = []
-        tracker.on_change = lambda t, at: changes.append((t, at))
+        changes: list[tuple[str, str, bool]] = []
+        tracker.on_change = lambda t, s, at: changes.append((t, s, at))
 
         tracker.check("MKT-A")
 
@@ -164,12 +164,12 @@ class TestCallbackTransitions:
         books.apply_snapshot("MKT-A", _snapshot(yes=[], no=[[48, 5], [47, 10]]))
         tracker.update_orders([_order("MKT-A", 47)], [PAIR])
 
-        changes: list[tuple[str, bool]] = []
-        tracker.on_change = lambda t, at: changes.append((t, at))
+        changes: list[tuple[str, str, bool]] = []
+        tracker.on_change = lambda t, s, at: changes.append((t, s, at))
 
         tracker.check("MKT-A")
 
-        assert changes == [("MKT-A", False)]
+        assert changes == [("MKT-A", "no", False)]
         assert tracker.is_at_top("MKT-A") is False
 
     def test_order_removed_clears_state(self) -> None:
@@ -207,3 +207,113 @@ class TestTableIntegration:
 
         assert tracker.is_at_top("MKT-A") is False
         assert tracker.is_at_top("MKT-B") is True
+
+
+class TestYesNoTracking:
+    """Tests for same-ticker YES/NO pair jump detection."""
+
+    def test_tracks_yes_and_no_orders_separately(self) -> None:
+        books, tracker = _make_tracker()
+        pair = ArbPair(
+            event_ticker="MKT-1",
+            ticker_a="MKT-1",
+            ticker_b="MKT-1",
+            side_a="yes",
+            side_b="no",
+        )
+        yes_order = Order(
+            order_id="yes-1",
+            ticker="MKT-1",
+            action="buy",
+            side="yes",
+            no_price=0,
+            yes_price=48,
+            initial_count=10,
+            remaining_count=10,
+            fill_count=0,
+            status="resting",
+        )
+        no_order = Order(
+            order_id="no-1",
+            ticker="MKT-1",
+            action="buy",
+            side="no",
+            no_price=45,
+            yes_price=0,
+            initial_count=10,
+            remaining_count=10,
+            fill_count=0,
+            status="resting",
+        )
+        tracker.update_orders([yes_order, no_order], [pair])
+        assert tracker.resting_price("MKT-1", "yes") == 48
+        assert tracker.resting_price("MKT-1", "no") == 45
+
+    def test_yes_side_jumped(self) -> None:
+        books, tracker = _make_tracker()
+        pair = ArbPair(
+            event_ticker="MKT-1",
+            ticker_a="MKT-1",
+            ticker_b="MKT-1",
+            side_a="yes",
+            side_b="no",
+        )
+        yes_order = Order(
+            order_id="yes-1",
+            ticker="MKT-1",
+            action="buy",
+            side="yes",
+            no_price=0,
+            yes_price=48,
+            initial_count=10,
+            remaining_count=10,
+            fill_count=0,
+            status="resting",
+        )
+        tracker.update_orders([yes_order], [pair])
+        # Book YES top is 50 (someone bid higher) -> we got jumped
+        books.apply_snapshot("MKT-1", _snapshot(yes=[[50, 5], [48, 10]], no=[[45, 20]]))
+        tracker.check("MKT-1", side="yes")
+        assert tracker.is_at_top("MKT-1", "yes") is False
+
+    def test_no_side_at_top_while_yes_jumped(self) -> None:
+        """NO side can be at top while YES side is jumped on same ticker."""
+        books, tracker = _make_tracker()
+        pair = ArbPair(
+            event_ticker="MKT-1",
+            ticker_a="MKT-1",
+            ticker_b="MKT-1",
+            side_a="yes",
+            side_b="no",
+        )
+        yes_order = Order(
+            order_id="yes-1",
+            ticker="MKT-1",
+            action="buy",
+            side="yes",
+            no_price=0,
+            yes_price=48,
+            initial_count=10,
+            remaining_count=10,
+            fill_count=0,
+            status="resting",
+        )
+        no_order = Order(
+            order_id="no-1",
+            ticker="MKT-1",
+            action="buy",
+            side="no",
+            no_price=45,
+            yes_price=0,
+            initial_count=10,
+            remaining_count=10,
+            fill_count=0,
+            status="resting",
+        )
+        tracker.update_orders([yes_order, no_order], [pair])
+        # YES jumped (50 > 48), NO at top (45 is best)
+        books.apply_snapshot("MKT-1", _snapshot(yes=[[50, 5], [48, 10]], no=[[45, 20]]))
+        tracker.check("MKT-1", side="yes")
+        tracker.check("MKT-1", side="no")
+        assert tracker.is_at_top("MKT-1", "yes") is False
+        assert tracker.is_at_top("MKT-1", "no") is True
