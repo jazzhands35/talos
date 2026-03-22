@@ -426,7 +426,13 @@ class TalosApp(App):
                     subtitles=self._engine.game_manager.subtitles,
                 )
 
-            agg = aggregate_settlements([s.model_dump() for s in settlements])
+            # Aggregate from cache (complete history) — REST limit=200
+            # returns a sliding window that drops older settlements as new
+            # ones arrive, causing yesterday/7d totals to fluctuate.
+            if cache is not None:
+                agg = aggregate_settlements(cache.all_settlements())
+            else:
+                agg = aggregate_settlements([s.model_dump() for s in settlements])
             panel = self.query_one(PortfolioPanel)
             panel.update_pnl(
                 today=agg["today_pnl"],

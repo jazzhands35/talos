@@ -18,6 +18,7 @@ class LegSummary(BaseModel):
     cpm: float | None = None
     cpm_partial: bool = False
     eta_minutes: float | None = None
+    resting_no_price: int | None = None
 
 
 class EventPositionSummary(BaseModel):

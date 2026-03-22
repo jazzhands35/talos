@@ -589,6 +589,7 @@ def compute_display_positions(
                     cpm=cpm_a,
                     cpm_partial=cpm_a_partial,
                     eta_minutes=eta_a,
+                    resting_no_price=ledger.resting_price(Side.A) if resting_a > 0 else None,
                 ),
                 leg_b=LegSummary(
                     ticker=pair.ticker_b,
@@ -601,6 +602,7 @@ def compute_display_positions(
                     cpm=cpm_b,
                     cpm_partial=cpm_b_partial,
                     eta_minutes=eta_b,
+                    resting_no_price=ledger.resting_price(Side.B) if resting_b > 0 else None,
                 ),
                 matched_pairs=matched,
                 locked_profit_cents=locked_profit,

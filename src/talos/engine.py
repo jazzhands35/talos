@@ -37,7 +37,12 @@ from talos.portfolio_feed import PortfolioFeed
 from talos.position_feed import PositionFeed
 from talos.position_ledger import PositionLedger, Side, compute_display_positions
 from talos.proposal_queue import ProposalQueue
-from talos.rebalance import _create_order_group, compute_rebalance_proposal, compute_topup_needs
+from talos.rebalance import (
+    _create_order_group,
+    compute_overcommit_reduction,
+    compute_rebalance_proposal,
+    compute_topup_needs,
+)
 from talos.rebalance import execute_rebalance as _execute_rebalance
 from talos.rest_client import KalshiRESTClient
 from talos.scanner import ArbitrageScanner
@@ -1526,7 +1531,26 @@ class TradingEngine:
                 self._feed.book_manager,
             )
             if proposal is None or proposal.rebalance is None:
-                # No catch-up needed — check for mid-unit top-up
+                # No cross-side imbalance — check for single-side overcommit
+                # (balanced committed counts but unit capacity violated)
+                overcommit = compute_overcommit_reduction(
+                    pair.event_ticker,
+                    ledger,
+                    pair,
+                    self._display_name(pair.event_ticker),
+                )
+                if overcommit is not None:
+                    await _execute_rebalance(
+                        overcommit,
+                        rest_client=self._rest,
+                        adjuster=self._adjuster,
+                        scanner=self._scanner,
+                        notify=self._notify,
+                    )
+                    executed_this_cycle.add(pair.event_ticker)
+                    continue
+
+                # No overcommit — check for mid-unit top-up
                 if not self.is_exit_only(pair.event_ticker):
                     topup_needs = compute_topup_needs(ledger, pair, snapshot)
                     for side, (qty, price) in topup_needs.items():

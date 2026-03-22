@@ -52,14 +52,23 @@ def _fmt_pnl(net_cents: float, kalshi_pnl: int | None = None) -> RichText:
     return RichText(label, style=style, justify="right")
 
 
-def _fmt_pos(filled: int, total: int, avg_no_price: int) -> RichText:
-    """Format position as 'filled/total avg¢' with fee-adjusted cost."""
+def _fmt_pos(
+    filled: int, total: int, avg_no_price: int, resting_no_price: int | None = None
+) -> RichText:
+    """Format position as 'filled/total avg¢' with fee-adjusted cost.
+
+    When a resting order exists, appends '@{price}¢' to show the queued price.
+    """
     if total == 0:
         return DIM_DASH
+    resting_suffix = ""
+    if resting_no_price is not None:
+        resting_fee = fee_adjusted_cost(resting_no_price)
+        resting_suffix = f" @{resting_fee:.0f}¢"
     if filled == 0:
-        return RichText(f"0/{total}", justify="right")
+        return RichText(f"0/{total}{resting_suffix}", justify="right")
     fee_avg = fee_adjusted_cost(avg_no_price)
-    return RichText(f"{filled}/{total} {fee_avg:.1f}¢", justify="right")
+    return RichText(f"{filled}/{total} {fee_avg:.1f}¢{resting_suffix}", justify="right")
 
 
 DIM_DASH = RichText("—", style="dim", justify="right")
@@ -508,8 +517,12 @@ class OpportunitiesTable(DataTable):
         if pos is not None:
             total_a = pos.leg_a.filled_count + pos.leg_a.resting_count
             total_b = pos.leg_b.filled_count + pos.leg_b.resting_count
-            pos_a = _fmt_pos(pos.leg_a.filled_count, total_a, pos.leg_a.no_price)
-            pos_b = _fmt_pos(pos.leg_b.filled_count, total_b, pos.leg_b.no_price)
+            pos_a = _fmt_pos(
+                pos.leg_a.filled_count, total_a, pos.leg_a.no_price, pos.leg_a.resting_no_price
+            )
+            pos_b = _fmt_pos(
+                pos.leg_b.filled_count, total_b, pos.leg_b.no_price, pos.leg_b.resting_no_price
+            )
 
             # Highlight imbalanced legs
             fa, fb = pos.leg_a.filled_count, pos.leg_b.filled_count
