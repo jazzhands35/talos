@@ -1,4 +1,4 @@
-"""Arbitrage opportunity scanner for NO+NO pairs."""
+"""Arbitrage opportunity scanner for arbitrage pairs."""
 
 from __future__ import annotations
 
@@ -14,7 +14,7 @@ logger = structlog.get_logger()
 
 
 class ArbitrageScanner:
-    """Detects NO+NO arbitrage within game events.
+    """Detects arbitrage opportunities within game events.
 
     Pure state machine — no I/O, no async. Reads orderbook state
     from OrderBookManager, evaluates registered pairs, maintains
@@ -39,6 +39,9 @@ class ArbitrageScanner:
         fee_rate: float = 0.0175,
         close_time: str | None = None,
         expected_expiration_time: str | None = None,
+        side_a: str = "no",
+        side_b: str = "no",
+        kalshi_event_ticker: str = "",
     ) -> None:
         """Register a pair of markets to monitor."""
         if any(p.event_ticker == event_ticker for p in self._pairs):
@@ -47,6 +50,9 @@ class ArbitrageScanner:
             event_ticker=event_ticker,
             ticker_a=ticker_a,
             ticker_b=ticker_b,
+            side_a=side_a,
+            side_b=side_b,
+            kalshi_event_ticker=kalshi_event_ticker,
             fee_type=fee_type,
             fee_rate=fee_rate,
             close_time=close_time,
@@ -101,8 +107,8 @@ class ArbitrageScanner:
     def _evaluate_pair(self, pair: ArbPair) -> None:
         """Check one pair for arbitrage opportunity."""
         self._sorted_cache = None
-        no_a = self._books.best_ask(pair.ticker_a)
-        no_b = self._books.best_ask(pair.ticker_b)
+        no_a = self._books.best_ask(pair.ticker_a, side=pair.side_a)
+        no_b = self._books.best_ask(pair.ticker_b, side=pair.side_b)
 
         if not no_a or not no_b:
             self._opportunities.pop(pair.event_ticker, None)

@@ -302,6 +302,88 @@ class TestAllSnapshots:
         assert snaps["EVT-1"].no_b == 0
 
 
+class TestYesNoPairScanning:
+    """Tests for YES/NO arb on a single market (same ticker)."""
+
+    def test_add_yesno_pair(self):
+        scanner = ArbitrageScanner(OrderBookManager())
+        scanner.add_pair(
+            "MKT-TICKER", "MKT-TICKER", "MKT-TICKER",
+            side_a="yes", side_b="no",
+        )
+        assert len(scanner.pairs) == 1
+        pair = scanner.pairs[0]
+        assert pair.side_a == "yes"
+        assert pair.side_b == "no"
+        assert pair.is_same_ticker is True
+
+    def test_yesno_edge_detection(self):
+        """YES ask=48, NO ask=45 -> edge = 100-48-45 = 7."""
+        mgr = OrderBookManager()
+        scanner = ArbitrageScanner(mgr)
+        scanner.add_pair(
+            "MKT-TICKER", "MKT-TICKER", "MKT-TICKER",
+            side_a="yes", side_b="no",
+        )
+        mgr.apply_snapshot("MKT-TICKER", OrderBookSnapshot(
+            market_ticker="MKT-TICKER", market_id="m1",
+            yes=[[48, 100]], no=[[45, 200]],
+        ))
+        scanner.scan("MKT-TICKER")
+        opps = scanner.opportunities
+        assert len(opps) == 1
+        assert opps[0].raw_edge == 7
+        assert opps[0].no_a == 48  # YES side price (leg A)
+        assert opps[0].no_b == 45  # NO side price (leg B)
+        assert opps[0].tradeable_qty == 100
+
+    def test_yesno_no_edge(self):
+        """YES ask=55, NO ask=48 -> edge = -3, no opportunity."""
+        mgr = OrderBookManager()
+        scanner = ArbitrageScanner(mgr)
+        scanner.add_pair(
+            "MKT-TICKER", "MKT-TICKER", "MKT-TICKER",
+            side_a="yes", side_b="no",
+        )
+        mgr.apply_snapshot("MKT-TICKER", OrderBookSnapshot(
+            market_ticker="MKT-TICKER", market_id="m1",
+            yes=[[55, 100]], no=[[48, 200]],
+        ))
+        scanner.scan("MKT-TICKER")
+        assert len(scanner.opportunities) == 0
+
+    def test_yesno_missing_yes_side(self):
+        """Empty YES book -> no opportunity."""
+        mgr = OrderBookManager()
+        scanner = ArbitrageScanner(mgr)
+        scanner.add_pair(
+            "MKT-TICKER", "MKT-TICKER", "MKT-TICKER",
+            side_a="yes", side_b="no",
+        )
+        mgr.apply_snapshot("MKT-TICKER", OrderBookSnapshot(
+            market_ticker="MKT-TICKER", market_id="m1",
+            yes=[], no=[[45, 200]],
+        ))
+        scanner.scan("MKT-TICKER")
+        assert len(scanner.opportunities) == 0
+
+    def test_cross_no_still_works(self):
+        """Existing NO+NO behavior is unbroken."""
+        mgr = OrderBookManager()
+        scanner = ArbitrageScanner(mgr)
+        scanner.add_pair("EVT", "TK-A", "TK-B")
+        mgr.apply_snapshot("TK-A", OrderBookSnapshot(
+            market_ticker="TK-A", market_id="m1", yes=[], no=[[45, 100]],
+        ))
+        mgr.apply_snapshot("TK-B", OrderBookSnapshot(
+            market_ticker="TK-B", market_id="m2", yes=[], no=[[48, 100]],
+        ))
+        scanner.scan("TK-A")
+        opps = scanner.opportunities
+        assert len(opps) == 1
+        assert opps[0].raw_edge == 7
+
+
 class TestDynamicFeeRate:
     """Phase 9: scanner uses pair-specific fee rate for edge calculation."""
 
