@@ -1236,6 +1236,10 @@ class TradingEngine:
 
         current_stale: set[str] = set()
         for pair in self._scanner.pairs:
+            # Same-ticker YES/NO pairs: positions API reports net (YES+NO=0),
+            # so position=0 doesn't mean settled. Skip stale detection.
+            if pair.is_same_ticker:
+                continue
             pos_a = pos_map.get(pair.ticker_a)
             pos_b = pos_map.get(pair.ticker_b)
             both_zero = (
