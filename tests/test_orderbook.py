@@ -391,6 +391,50 @@ class TestDeltaBuffering:
         assert book.yes[0].quantity == 100
 
 
+class TestBestAskSide:
+    def test_best_ask_no_side_default(self) -> None:
+        """Default side='no' returns top of NO book (existing behavior)."""
+        mgr = OrderBookManager()
+        mgr.apply_snapshot("MKT", OrderBookSnapshot(
+            market_ticker="MKT", market_id="m1",
+            yes=[[60, 10]], no=[[45, 20]],
+        ))
+        result = mgr.best_ask("MKT")
+        assert result is not None
+        assert result.price == 45
+
+    def test_best_ask_yes_side(self) -> None:
+        """side='yes' returns top of YES book."""
+        mgr = OrderBookManager()
+        mgr.apply_snapshot("MKT", OrderBookSnapshot(
+            market_ticker="MKT", market_id="m1",
+            yes=[[60, 10], [55, 5]], no=[[45, 20]],
+        ))
+        result = mgr.best_ask("MKT", side="yes")
+        assert result is not None
+        assert result.price == 60
+
+    def test_best_ask_yes_side_empty(self) -> None:
+        """side='yes' returns None when YES book is empty."""
+        mgr = OrderBookManager()
+        mgr.apply_snapshot("MKT", OrderBookSnapshot(
+            market_ticker="MKT", market_id="m1",
+            yes=[], no=[[45, 20]],
+        ))
+        assert mgr.best_ask("MKT", side="yes") is None
+
+    def test_best_ask_no_side_explicit(self) -> None:
+        """Explicit side='no' matches default behavior."""
+        mgr = OrderBookManager()
+        mgr.apply_snapshot("MKT", OrderBookSnapshot(
+            market_ticker="MKT", market_id="m1",
+            yes=[[60, 10]], no=[[45, 20]],
+        ))
+        result = mgr.best_ask("MKT", side="no")
+        assert result is not None
+        assert result.price == 45
+
+
 class TestStaleTickers:
     def test_fresh_book_not_stale(self) -> None:
         mgr = OrderBookManager()

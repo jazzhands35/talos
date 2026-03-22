@@ -144,16 +144,20 @@ class OrderBookManager:
             return book.yes[0]
         return None
 
-    def best_ask(self, ticker: str) -> OrderBookLevel | None:
-        """Best implied YES ask. Returns top of NO side.
+    def best_ask(self, ticker: str, side: str = "no") -> OrderBookLevel | None:
+        """Best price on the given side of the book.
 
+        Default ``side='no'`` returns top of NO side (existing behavior).
         The implied YES ask price is ``100 - level.price``.
         Conversion is left to the strategy layer.
+
+        ``side='yes'`` returns top of YES side (for YES/NO arb).
         """
         book = self._books.get(ticker)
-        if book and book.no:
-            return book.no[0]
-        return None
+        if not book:
+            return None
+        levels = book.no if side == "no" else book.yes
+        return levels[0] if levels else None
 
     def remove(self, ticker: str) -> None:
         """Stop tracking a ticker."""
