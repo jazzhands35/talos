@@ -597,14 +597,11 @@ class TalosApp(App):
             MarketPickerScreen(e.markets, event_title=e.event.title or e.event.event_ticker)
         )
         if selected:
-            gm = self._engine._game_manager
-            for market in selected:
-                try:
-                    pair = await gm.add_market_as_pair(e.event, market)
-                    self._engine._adjuster.add_event(pair)
-                except Exception as ex:
-                    self.notify(f"Failed to add {market.ticker}: {ex}", severity="error")
-            self.notify(f"Added {len(selected)} market(s)")
+            pairs = await self._engine.add_market_pairs(e.event, selected)
+            if pairs and self._scanner:
+                table = self.query_one(OpportunitiesTable)
+                tracker = self._engine.tracker if self._engine else None
+                table.refresh_from_scanner(self._scanner, tracker)
 
     def action_scan(self) -> None:
         if self._engine is not None:

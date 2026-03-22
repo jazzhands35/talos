@@ -1890,6 +1890,41 @@ class TradingEngine:
             self._notify(f"Error: {e}", "error", toast=True)
             logger.exception("add_games_error")
 
+    async def add_market_pairs(
+        self, event: object, markets: list[object],
+    ) -> list[ArbPair]:
+        """Add YES/NO arb pairs for selected markets from a non-sports event.
+
+        Called from the UI after the market picker selects markets.
+        Handles full engine wiring: adjuster, game status, persistence.
+        """
+        from talos.models.market import Event as EventModel
+        from talos.models.market import Market as MarketModel
+
+        if not isinstance(event, EventModel):
+            return []
+        pairs: list[ArbPair] = []
+        for market in markets:
+            if not isinstance(market, MarketModel):
+                continue
+            try:
+                pair = await self._game_manager.add_market_as_pair(event, market)
+                self._adjuster.add_event(pair)
+                if self._game_status_resolver is not None:
+                    self._game_status_resolver.set_expiration(
+                        pair.event_ticker, pair.expected_expiration_time,
+                    )
+                pairs.append(pair)
+            except Exception:
+                logger.warning(
+                    "add_market_pair_failed",
+                    market_ticker=getattr(market, "ticker", "?"),
+                    exc_info=True,
+                )
+        if pairs:
+            self._notify(f"Added {len(pairs)} market pair(s)", toast=True)
+        return pairs
+
     async def remove_game(self, event_ticker: str) -> None:
         """Remove a game from monitoring."""
         try:
