@@ -742,9 +742,6 @@ class MarketPickerScreen(ModalScreen[list[Market]]):
 
     def on_key(self, event: Key) -> None:
         """Handle Space, Enter, Shift+Space before DataTable consumes them."""
-        from pathlib import Path
-        with open(Path(__file__).resolve().parents[3] / "talos_debug.log", "a") as f:
-            f.write(f"on_key: key={event.key!r} character={event.character!r}\n")
         if event.key == "space":
             event.prevent_default()
             event.stop()
