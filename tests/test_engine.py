@@ -556,7 +556,7 @@ class FakeBookManager(OrderBookManager):
         super().__init__()
         self._prices = prices
 
-    def best_ask(self, ticker: str) -> OrderBookLevel | None:
+    def best_ask(self, ticker: str, side: str = "no") -> OrderBookLevel | None:
         price = self._prices.get(ticker)
         if price is None:
             return None

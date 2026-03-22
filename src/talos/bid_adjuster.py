@@ -36,17 +36,18 @@ class BidAdjuster:
         self._books = book_manager
         self._unit_size = unit_size
 
-        # Ticker → (pair, side) lookup
-        self._ticker_map: dict[str, tuple[ArbPair, Side]] = {}
+        # Ticker → list of (pair, side) — list handles same-ticker pairs
+        self._ticker_map: dict[str, list[tuple[ArbPair, Side]]] = {}
         for pair in pairs:
-            self._ticker_map[pair.ticker_a] = (pair, Side.A)
-            self._ticker_map[pair.ticker_b] = (pair, Side.B)
+            self._register_pair(pair)
 
         # Per-event ledgers
         self._ledgers: dict[str, PositionLedger] = {}
         for pair in pairs:
             self._ledgers[pair.event_ticker] = PositionLedger(
-                event_ticker=pair.event_ticker, unit_size=unit_size
+                event_ticker=pair.event_ticker, unit_size=unit_size,
+                side_a_str=pair.side_a, side_b_str=pair.side_b,
+                is_same_ticker=pair.is_same_ticker,
             )
 
         # Pending proposals: event_ticker → {side → proposal}
@@ -70,12 +71,35 @@ class BidAdjuster:
         for ledger in self._ledgers.values():
             ledger.unit_size = unit_size
 
+    def _register_pair(self, pair: ArbPair) -> None:
+        """Add a pair to the ticker map. Handles same-ticker pairs."""
+        self._ticker_map.setdefault(pair.ticker_a, []).append((pair, Side.A))
+        self._ticker_map.setdefault(pair.ticker_b, []).append((pair, Side.B))
+
+    def resolve_pair(
+        self, ticker: str, order_side: str | None = None,
+    ) -> tuple[ArbPair, Side] | None:
+        """Resolve a ticker to (pair, side). Disambiguates same-ticker pairs by order_side."""
+        entries = self._ticker_map.get(ticker)
+        if not entries:
+            return None
+        if len(entries) == 1:
+            return entries[0]
+        # Same-ticker: disambiguate by order side
+        if order_side is not None:
+            for pair, side in entries:
+                pair_side = pair.side_a if side == Side.A else pair.side_b
+                if pair_side == order_side:
+                    return (pair, side)
+        return entries[0]  # fallback
+
     def add_event(self, pair: ArbPair) -> None:
         """Register a new event pair."""
-        self._ticker_map[pair.ticker_a] = (pair, Side.A)
-        self._ticker_map[pair.ticker_b] = (pair, Side.B)
+        self._register_pair(pair)
         self._ledgers[pair.event_ticker] = PositionLedger(
-            event_ticker=pair.event_ticker, unit_size=self._unit_size
+            event_ticker=pair.event_ticker, unit_size=self._unit_size,
+            side_a_str=pair.side_a, side_b_str=pair.side_b,
+            is_same_ticker=pair.is_same_ticker,
         )
 
     def remove_event(self, event_ticker: str) -> None:
@@ -83,10 +107,16 @@ class BidAdjuster:
         self._ledgers.pop(event_ticker, None)
         self._proposals.pop(event_ticker, None)
         self._deferred.pop(event_ticker, None)
-        # Clean ticker map
-        to_remove = [t for t, (p, _) in self._ticker_map.items() if p.event_ticker == event_ticker]
-        for t in to_remove:
-            del self._ticker_map[t]
+        # Clean ticker map — remove entries for this event
+        to_clean: list[str] = []
+        for ticker, entries in self._ticker_map.items():
+            self._ticker_map[ticker] = [
+                (p, s) for p, s in entries if p.event_ticker != event_ticker
+            ]
+            if not self._ticker_map[ticker]:
+                to_clean.append(ticker)
+        for ticker in to_clean:
+            del self._ticker_map[ticker]
 
     # ── Decision logic (synchronous, testable) ──────────────────────
 
@@ -95,6 +125,7 @@ class BidAdjuster:
         ticker: str,
         at_top: bool,
         exit_only: bool = False,
+        side: str = "no",
     ) -> ProposedAdjustment | None:
         """Evaluate a jump event and return a proposal if appropriate.
 
@@ -103,21 +134,27 @@ class BidAdjuster:
 
         When exit_only=True, only allows adjustments on the behind side
         (to catch up to delta neutral). The ahead side is blocked.
+
+        ``side`` is the order side ("yes" or "no") used to disambiguate
+        same-ticker YES/NO pairs.
         """
-        lookup = self._ticker_map.get(ticker)
-        if lookup is None:
+        result = self.resolve_pair(ticker, order_side=side)
+        if result is None:
             return None
 
-        pair, side = lookup
+        pair, adj_side = result
 
         # Back at top — nothing to do
         if at_top:
             # Clear any deferred for this side
             deferred = self._deferred.get(pair.event_ticker, set())
-            deferred.discard(side)
+            deferred.discard(adj_side)
             return None
 
         ledger = self._ledgers[pair.event_ticker]
+
+        # Determine the order side string for this adj_side
+        pair_side = pair.side_a if adj_side == Side.A else pair.side_b
 
         # Exit-only gate: block adjustments on the ahead side
         if exit_only:
@@ -127,28 +164,28 @@ class BidAdjuster:
                 # Balanced — block all adjustments
                 return None
             ahead = Side.A if filled_a > filled_b else Side.B
-            if side is ahead:
+            if adj_side is ahead:
                 # This is the ahead side — don't adjust
                 return None
 
         # No resting order on this side — nothing to adjust
-        if ledger.resting_order_id(side) is None:
+        if ledger.resting_order_id(adj_side) is None:
             return None
 
         # Get new top-of-market price
-        best = self._books.best_ask(ticker)
+        best = self._books.best_ask(ticker, side=pair_side)
         if best is None:
             return None
         new_price = best.price
 
         # If new price equals current resting price, no action needed
-        if new_price <= ledger.resting_price(side):
+        if new_price <= ledger.resting_price(adj_side):
             return None
 
         def _hold(reason: str) -> ProposedAdjustment:
             return ProposedAdjustment(
                 event_ticker=pair.event_ticker,
-                side=side.value,
+                side=adj_side.value,
                 action="hold",
                 reason=reason,
                 position_before=(
@@ -158,7 +195,7 @@ class BidAdjuster:
 
         # Profitability check (Principle 18)
         rate = pair.fee_rate
-        other_side = side.other
+        other_side = adj_side.other
         if ledger.filled_count(other_side) > 0:
             other_effective = fee_adjusted_cost(
                 int(round(ledger.avg_filled_price(other_side))), rate=rate
@@ -166,7 +203,8 @@ class BidAdjuster:
         elif ledger.resting_count(other_side) > 0:
             # Use top-of-market for other side (worst case / most conservative)
             other_ticker = pair.ticker_a if other_side is Side.A else pair.ticker_b
-            other_best = self._books.best_ask(other_ticker)
+            other_pair_side = pair.side_a if other_side is Side.A else pair.side_b
+            other_best = self._books.best_ask(other_ticker, side=other_pair_side)
             other_book_price = other_best.price if other_best else ledger.resting_price(other_side)
             other_effective = fee_adjusted_cost(other_book_price, rate=rate)
         else:
@@ -185,7 +223,7 @@ class BidAdjuster:
                 )
                 return ProposedAdjustment(
                     event_ticker=pair.event_ticker,
-                    side=side.value,
+                    side=adj_side.value,
                     action="withdraw",
                     reason=(
                         f"no fills — withdraw both sides, "
@@ -204,7 +242,7 @@ class BidAdjuster:
                 effective_sum=this_effective + other_effective,
             )
             return _hold(
-                f"stay at {ledger.resting_price(side)}c — "
+                f"stay at {ledger.resting_price(adj_side)}c — "
                 f"following to {new_price}c not profitable "
                 f"({this_effective:.1f}+{other_effective:.1f}"
                 f"={this_effective + other_effective:.1f} >= 100)"
@@ -212,23 +250,24 @@ class BidAdjuster:
 
         # Dual-jump tiebreaker (Principle 19)
         other_ticker = pair.ticker_a if other_side is Side.A else pair.ticker_b
-        other_jumped = self._is_jumped(other_ticker, ledger, other_side)
+        other_pair_side = pair.side_a if other_side is Side.A else pair.side_b
+        other_jumped = self._is_jumped(other_ticker, ledger, other_side, side=other_pair_side)
         if other_jumped:
-            this_remaining = ledger.unit_remaining(side)
+            this_remaining = ledger.unit_remaining(adj_side)
             other_remaining = ledger.unit_remaining(other_side)
             if this_remaining == 0:
-                this_remaining = ledger.resting_count(side)
+                this_remaining = ledger.resting_count(adj_side)
             if other_remaining == 0:
                 other_remaining = ledger.resting_count(other_side)
 
             if this_remaining <= other_remaining:
                 # Other side is more behind (or equal) — defer this side
                 # Equal case: deterministic tiebreak by deferring this side
-                self._deferred.setdefault(pair.event_ticker, set()).add(side)
+                self._deferred.setdefault(pair.event_ticker, set()).add(adj_side)
                 logger.info(
                     "jump_deferred",
                     ticker=ticker,
-                    side=side.value,
+                    side=adj_side.value,
                     reason=f"other side needs {other_remaining} vs this side {this_remaining}",
                 )
                 return _hold(
@@ -243,27 +282,29 @@ class BidAdjuster:
                         "proposal_superseded_by_tiebreaker",
                         event_ticker=pair.event_ticker,
                         superseded_side=other_side.value,
-                        winning_side=side.value,
+                        winning_side=adj_side.value,
                     )
                     del evt_proposals[other_side]
                 self._deferred.setdefault(pair.event_ticker, set()).add(other_side)
 
         # Build proposal — resting_order_id is guaranteed non-None (checked above)
-        cancel_id = ledger.resting_order_id(side)
+        cancel_id = ledger.resting_order_id(adj_side)
         assert cancel_id is not None
-        cancel_count = ledger.resting_count(side)
-        cancel_price = ledger.resting_price(side)
+        cancel_count = ledger.resting_count(adj_side)
+        cancel_price = ledger.resting_price(adj_side)
         new_count = cancel_count  # same quantity at new price
 
         # Safety gate check (simulating the post-cancel state)
-        test_ok, test_reason = self._check_post_cancel_safety(ledger, side, new_count, new_price)
+        test_ok, test_reason = self._check_post_cancel_safety(
+            ledger, adj_side, new_count, new_price,
+        )
         if not test_ok:
             logger.info("jump_blocked_by_safety", ticker=ticker, reason=test_reason)
             return _hold(f"stay — safety gate: {test_reason}")
 
         proposal = ProposedAdjustment(
             event_ticker=pair.event_ticker,
-            side=side.value,
+            side=adj_side.value,
             action="follow_jump",
             cancel_order_id=cancel_id,
             cancel_count=cancel_count,
@@ -278,10 +319,10 @@ class BidAdjuster:
             position_before=(
                 f"A: {ledger.format_position(Side.A)} | B: {ledger.format_position(Side.B)}"
             ),
-            position_after=self._format_position_after(ledger, side, new_count, new_price),
+            position_after=self._format_position_after(ledger, adj_side, new_count, new_price),
             safety_check=(
                 f"filled_in_unit+new="
-                f"{ledger.filled_count(side) % ledger.unit_size + new_count}"
+                f"{ledger.filled_count(adj_side) % ledger.unit_size + new_count}"
                 f" <= unit({ledger.unit_size}), "
                 f"arb={this_effective + other_effective:.1f}c < 100"
             ),
@@ -289,14 +330,14 @@ class BidAdjuster:
 
         # Store as pending (supersedes any existing proposal on this side)
         evt_proposals = self._proposals.setdefault(pair.event_ticker, {})
-        old = evt_proposals.get(side)
+        old = evt_proposals.get(adj_side)
         if old is not None:
-            logger.info("proposal_superseded", event_ticker=pair.event_ticker, side=side.value)
-        evt_proposals[side] = proposal
+            logger.info("proposal_superseded", event_ticker=pair.event_ticker, side=adj_side.value)
+        evt_proposals[adj_side] = proposal
 
         # Clear deferred flag for this side
         deferred = self._deferred.get(pair.event_ticker, set())
-        deferred.discard(side)
+        deferred.discard(adj_side)
 
         return proposal
 
@@ -315,16 +356,17 @@ class BidAdjuster:
         deferred.discard(other)
 
         # Find the ticker for the deferred side
-        for ticker, (pair, side) in self._ticker_map.items():
-            if pair.event_ticker == event_ticker and side is other:
-                # Re-evaluate the jump
-                return self.evaluate_jump(ticker, at_top=False)
+        for ticker, entries in self._ticker_map.items():
+            for pair, s in entries:
+                if pair.event_ticker == event_ticker and s is other:
+                    pair_side = pair.side_a if other == Side.A else pair.side_b
+                    return self.evaluate_jump(ticker, at_top=False, side=pair_side)
         return None
 
     def resolve_event(self, ticker: str) -> str | None:
         """Resolve a market ticker to its event ticker, or None if unknown."""
-        lookup = self._ticker_map.get(ticker)
-        return lookup[0].event_ticker if lookup is not None else None
+        result = self.resolve_pair(ticker)
+        return result[0].event_ticker if result is not None else None
 
     # ── Query methods ───────────────────────────────────────────────
 
@@ -356,26 +398,39 @@ class BidAdjuster:
             proposal: the approved ProposedAdjustment
             rest_client: KalshiRESTClient instance (typed as object for testability)
         """
-        side = Side(proposal.side)
+        adj_side = Side(proposal.side)
         ledger = self._ledgers[proposal.event_ticker]
 
         # Staleness check: verify the proposal's order still matches ledger state.
         # Silently dismiss if stale — this commonly happens when rebalance
         # cancelled the order between proposal creation and execution.
-        current_resting = ledger.resting_order_id(side)
+        current_resting = ledger.resting_order_id(adj_side)
         if current_resting != proposal.cancel_order_id:
             logger.info(
                 "adjustment_stale_dismissed",
                 event_ticker=proposal.event_ticker,
-                side=side.value,
+                side=adj_side.value,
                 expected=proposal.cancel_order_id,
                 actual=current_resting,
             )
-            self.clear_proposal(proposal.event_ticker, side)
+            self.clear_proposal(proposal.event_ticker, adj_side)
             return
 
         # Find the ticker for this side
-        ticker = self._side_ticker(proposal.event_ticker, side)
+        ticker = self._side_ticker(proposal.event_ticker, adj_side)
+
+        # Determine the order side string (yes/no) for this adj_side
+        result = self.resolve_pair(ticker, order_side=None)
+        if result is not None:
+            pair, _ = result
+            # Find the pair entry that matches adj_side for this event
+            for p, s in self._ticker_map.get(ticker, []):
+                if p.event_ticker == proposal.event_ticker and s is adj_side:
+                    pair = p
+                    break
+            pair_side = pair.side_a if adj_side == Side.A else pair.side_b
+        else:
+            pair_side = "no"  # fallback
 
         # Fetch the ORDER's own state — amend needs order-specific fill_count,
         # not the ledger aggregate which includes archived orders (P7/P21).
@@ -391,50 +446,51 @@ class BidAdjuster:
                 logger.info(
                     "adjustment_order_gone",
                     event_ticker=proposal.event_ticker,
-                    side=side.value,
+                    side=adj_side.value,
                     order_id=proposal.cancel_order_id,
                 )
-                self.clear_proposal(proposal.event_ticker, side)
+                self.clear_proposal(proposal.event_ticker, adj_side)
                 return
             raise
         total_count = fresh_order.fill_count + fresh_order.remaining_count
 
         # Skip if the order is already at the target price (avoids AMEND_ORDER_NO_OP)
-        if fresh_order.no_price == proposal.new_price:
+        fresh_price = fresh_order.no_price if pair_side == "no" else fresh_order.yes_price
+        if fresh_price == proposal.new_price:
             logger.info(
                 "adjustment_already_at_target",
                 event_ticker=proposal.event_ticker,
-                side=side.value,
+                side=adj_side.value,
                 price=proposal.new_price,
             )
-            self.clear_proposal(proposal.event_ticker, side)
+            self.clear_proposal(proposal.event_ticker, adj_side)
             return
 
         # Re-check P18 profitability with current ledger state.
         # Between proposal and execution, the other side may have filled
         # at a different price than expected at proposal time.
-        pair_lookup = self._ticker_map.get(ticker)
+        pair_lookup = self.resolve_pair(ticker)
         if pair_lookup is not None:
             pair, _ = pair_lookup
             ok, reason = ledger.is_placement_safe(
-                side, fresh_order.remaining_count, proposal.new_price,
+                adj_side, fresh_order.remaining_count, proposal.new_price,
                 rate=pair.fee_rate, catchup=True,
             )
             if not ok:
                 logger.warning(
                     "adjustment_blocked_p18_recheck",
                     event_ticker=proposal.event_ticker,
-                    side=side.value,
+                    side=adj_side.value,
                     new_price=proposal.new_price,
                     reason=reason,
                 )
-                self.clear_proposal(proposal.event_ticker, side)
+                self.clear_proposal(proposal.event_ticker, adj_side)
                 return
 
         logger.info(
             "adjustment_amend",
             event_ticker=proposal.event_ticker,
-            side=side.value,
+            side=adj_side.value,
             order_id=proposal.cancel_order_id,
             old_price=proposal.cancel_price,
             new_price=proposal.new_price,
@@ -443,71 +499,85 @@ class BidAdjuster:
             order_remaining=fresh_order.remaining_count,
         )
 
+        # Build side-aware amend kwargs
+        amend_kwargs: dict[str, object] = {
+            "ticker": ticker,
+            "side": pair_side,
+            "action": "buy",
+            "count": total_count,
+        }
+        if pair_side == "yes":
+            amend_kwargs["yes_price"] = proposal.new_price
+        else:
+            amend_kwargs["no_price"] = proposal.new_price
+
         # Single atomic amend call
         old_order, amended_order = await rest_client.amend_order(  # type: ignore[attr-defined]
             proposal.cancel_order_id,
-            ticker=ticker,
-            side="no",
-            action="buy",
-            no_price=proposal.new_price,
-            count=total_count,
+            **amend_kwargs,
         )
 
         # Update fills from amend response (handles fills that arrived during approval)
-        fill_delta = old_order.fill_count - ledger.filled_count(side)
+        fill_delta = old_order.fill_count - ledger.filled_count(adj_side)
         if fill_delta > 0:
             # Prorate maker fees for the new fills
-            fee_delta = old_order.maker_fees - ledger.filled_fees(side)
+            old_price = old_order.no_price if pair_side == "no" else old_order.yes_price
+            fee_delta = old_order.maker_fees - ledger.filled_fees(adj_side)
             ledger.record_fill(
-                side,
+                adj_side,
                 count=fill_delta,
-                price=old_order.no_price,
+                price=old_price,
                 fees=max(0, fee_delta),
             )
 
         # Update ledger from amend response
+        amended_price = amended_order.no_price if pair_side == "no" else amended_order.yes_price
         ledger.record_resting(
-            side,
+            adj_side,
             order_id=amended_order.order_id,
             count=amended_order.remaining_count,
-            price=amended_order.no_price,
+            price=amended_price,
         )
 
         # Clear the proposal
-        self.clear_proposal(proposal.event_ticker, side)
+        self.clear_proposal(proposal.event_ticker, adj_side)
 
         logger.info(
             "adjustment_complete",
             event_ticker=proposal.event_ticker,
-            side=side.value,
+            side=adj_side.value,
             order_id=amended_order.order_id,
             new_price=proposal.new_price,
         )
 
     def _side_ticker(self, event_ticker: str, side: Side) -> str:
         """Look up the market ticker for a given event + side."""
-        for ticker, (pair, s) in self._ticker_map.items():
-            if pair.event_ticker == event_ticker and s is side:
-                return ticker
+        for ticker, entries in self._ticker_map.items():
+            for pair, s in entries:
+                if pair.event_ticker == event_ticker and s is side:
+                    return ticker
         raise ValueError(f"No ticker found for {event_ticker} side {side.value}")
 
     # ── Internal helpers ────────────────────────────────────────────
 
     def _fee_rate_for(self, event_ticker: str) -> float:
         """Look up the fee rate for a pair by event ticker."""
-        for pair, _ in self._ticker_map.values():
-            if pair.event_ticker == event_ticker:
-                return pair.fee_rate
+        for entries in self._ticker_map.values():
+            for pair, _ in entries:
+                if pair.event_ticker == event_ticker:
+                    return pair.fee_rate
         return MAKER_FEE_RATE
 
-    def _is_jumped(self, ticker: str, ledger: PositionLedger, side: Side) -> bool:
+    def _is_jumped(
+        self, ticker: str, ledger: PositionLedger, adj_side: Side, side: str = "no",
+    ) -> bool:
         """Check if a side has been jumped (book price > resting price)."""
-        if ledger.resting_order_id(side) is None:
+        if ledger.resting_order_id(adj_side) is None:
             return False
-        best = self._books.best_ask(ticker)
+        best = self._books.best_ask(ticker, side=side)
         if best is None:
             return False
-        return best.price > ledger.resting_price(side)
+        return best.price > ledger.resting_price(adj_side)
 
     def _check_post_cancel_safety(
         self,

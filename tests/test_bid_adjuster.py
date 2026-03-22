@@ -19,7 +19,7 @@ class FakeBookManager(OrderBookManager):
         super().__init__()
         self._prices = prices
 
-    def best_ask(self, ticker: str) -> OrderBookLevel | None:
+    def best_ask(self, ticker: str, side: str = "no") -> OrderBookLevel | None:
         price = self._prices.get(ticker)
         if price is None:
             return None
@@ -280,3 +280,62 @@ class TestAsyncExecution:
         # Original order should still be in ledger (amend is atomic — failure = no change)
         assert ledger.resting_order_id(Side.B) == "ord-b"
         assert ledger.resting_price(Side.B) == 47
+
+
+class TestYesNoPairAdjuster:
+    """BidAdjuster handles YES/NO pairs where ticker_a == ticker_b."""
+
+    def test_add_event_same_ticker_no_collision(self):
+        books = FakeBookManager({})
+        pair = ArbPair(
+            event_ticker="MKT-1", ticker_a="MKT-1", ticker_b="MKT-1",
+            side_a="yes", side_b="no",
+        )
+        adj = BidAdjuster(books, [pair])
+        result_a = adj.resolve_pair("MKT-1", order_side="yes")
+        result_b = adj.resolve_pair("MKT-1", order_side="no")
+        assert result_a is not None
+        assert result_b is not None
+        assert result_a[1] == Side.A
+        assert result_b[1] == Side.B
+
+    def test_cross_no_unchanged(self):
+        books = FakeBookManager({})
+        pair = ArbPair(event_ticker="EVT", ticker_a="TK-A", ticker_b="TK-B")
+        adj = BidAdjuster(books, [pair])
+        result_a = adj.resolve_pair("TK-A")
+        result_b = adj.resolve_pair("TK-B")
+        assert result_a is not None
+        assert result_b is not None
+        assert result_a[1] == Side.A
+        assert result_b[1] == Side.B
+
+    def test_resolve_event_still_works(self):
+        """The existing resolve_event(ticker) -> str method still works."""
+        books = FakeBookManager({})
+        pair = ArbPair(event_ticker="EVT", ticker_a="TK-A", ticker_b="TK-B")
+        adj = BidAdjuster(books, [pair])
+        assert adj.resolve_event("TK-A") == "EVT"
+        assert adj.resolve_event("TK-B") == "EVT"
+
+    def test_resolve_event_same_ticker(self):
+        """resolve_event works for same-ticker pairs."""
+        books = FakeBookManager({})
+        pair = ArbPair(
+            event_ticker="MKT-1", ticker_a="MKT-1", ticker_b="MKT-1",
+            side_a="yes", side_b="no",
+        )
+        adj = BidAdjuster(books, [pair])
+        assert adj.resolve_event("MKT-1") == "MKT-1"
+
+    def test_remove_event_same_ticker(self):
+        """remove_event cleans up all entries for same-ticker pairs."""
+        books = FakeBookManager({})
+        pair = ArbPair(
+            event_ticker="MKT-1", ticker_a="MKT-1", ticker_b="MKT-1",
+            side_a="yes", side_b="no",
+        )
+        adj = BidAdjuster(books, [pair])
+        adj.remove_event("MKT-1")
+        assert adj.resolve_pair("MKT-1") is None
+        assert adj.resolve_event("MKT-1") is None
