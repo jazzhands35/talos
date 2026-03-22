@@ -13,7 +13,7 @@ from textual.widgets import Button, DataTable, Input, Label, TextArea
 
 from talos.game_manager import extract_leg_labels
 from talos.game_status import GameStatus, _extract_date_from_ticker
-from talos.models.market import Event
+from talos.models.market import Event, Market
 from talos.models.portfolio import Settlement
 from talos.models.position import EventPositionSummary
 from talos.models.strategy import BidConfirmation, Opportunity
@@ -649,3 +649,130 @@ class SettlementHistoryScreen(ModalScreen[None]):
 
     def action_cancel(self) -> None:
         self.dismiss(None)
+
+
+class MarketPickerScreen(ModalScreen[list[Market]]):
+    """Select markets from a non-sports event for YES/NO arb monitoring."""
+
+    DEFAULT_CSS = """
+    MarketPickerScreen {
+        align: center middle;
+    }
+    #picker-dialog {
+        width: 90%;
+        height: 70%;
+        border: thick $surface;
+        background: $surface;
+        padding: 1 2;
+    }
+    #picker-dialog Label {
+        width: 100%;
+        margin: 0 0 1 0;
+    }
+    #picker-table {
+        height: 1fr;
+    }
+    """
+
+    BINDINGS = [
+        ("escape", "cancel", "Cancel"),
+        ("space", "toggle_selection", "Toggle"),
+        ("enter", "confirm", "Add Selected"),
+        ("a", "select_all", "Select All"),
+    ]
+
+    def __init__(self, markets: list[Market], event_title: str = "") -> None:
+        super().__init__()
+        self._markets = markets
+        self._event_title = event_title
+        self._selected: set[str] = set()  # market tickers
+        # Ordered list of tickers matching table row order
+        self._row_tickers: list[str] = []
+
+    def compose(self) -> ComposeResult:
+        count = len(self._markets)
+        with Vertical(id="picker-dialog"):
+            title = f"Select Markets — {count} available"
+            if self._event_title:
+                title += f"  [{self._event_title}]"
+            title += "  Space:Toggle  Enter:Add  Esc:Cancel"
+            yield Label(title, classes="modal-title", markup=False)
+            yield DataTable(id="picker-table")
+
+    def on_mount(self) -> None:
+        table = self.query_one("#picker-table", DataTable)
+        table.cursor_type = "row"
+        table.zebra_stripes = True
+
+        r = "right"
+        table.add_column("✓", width=2)
+        table.add_column("Market")
+        table.add_column("Ticker", width=30)
+        table.add_column(RichText("Volume", justify=r), width=10)
+
+        # Sort by 24h volume descending (most liquid first)
+        sorted_markets = sorted(
+            self._markets,
+            key=lambda m: m.volume_24h or 0,
+            reverse=True,
+        )
+
+        self._row_tickers = []
+        for market in sorted_markets:
+            self._row_tickers.append(market.ticker)
+            vol_str = _fmt_vol_compact(market.volume_24h or 0)
+            table.add_row(
+                "",  # ✓ column
+                market.title or market.ticker,
+                market.ticker,
+                RichText(vol_str, justify="right"),
+                key=market.ticker,
+            )
+
+    def action_cancel(self) -> None:
+        self.dismiss([])
+
+    def action_toggle_selection(self) -> None:
+        table = self.query_one("#picker-table", DataTable)
+        if table.cursor_row is None or table.row_count == 0:
+            return
+        row_idx = table.cursor_row
+        if row_idx < 0 or row_idx >= len(self._row_tickers):
+            return
+        ticker = self._row_tickers[row_idx]
+        check_col = table.ordered_columns[0].key
+        if ticker in self._selected:
+            self._selected.discard(ticker)
+            table.update_cell(ticker, check_col, "")
+        else:
+            self._selected.add(ticker)
+            table.update_cell(ticker, check_col, "✓")
+
+    def action_select_all(self) -> None:
+        """Toggle all markets selected/unselected."""
+        table = self.query_one("#picker-table", DataTable)
+        check_col = table.ordered_columns[0].key
+        if len(self._selected) == len(self._markets):
+            # All selected — deselect all
+            self._selected.clear()
+            for ticker in self._row_tickers:
+                table.update_cell(ticker, check_col, "")
+        else:
+            # Select all
+            for market in self._markets:
+                self._selected.add(market.ticker)
+            for ticker in self._row_tickers:
+                table.update_cell(ticker, check_col, "✓")
+
+    def action_confirm(self) -> None:
+        if self._selected:
+            # Return markets in display order (by volume desc)
+            selected = [
+                m for t in self._row_tickers
+                if t in self._selected
+                for m in self._markets
+                if m.ticker == t
+            ]
+            self.dismiss(selected)
+        else:
+            self.dismiss([])
