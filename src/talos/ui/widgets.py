@@ -303,7 +303,7 @@ class OpportunitiesTable(DataTable):
         self.add_column("Team")  # 1: Team name
         self.add_column("Lg", width=5)  # 2: League
         self.add_column(RichText("Game", justify=r), width=9)  # 3: Game status
-        self.add_column(RichText("NO", justify=r), width=5)  # 4: NO price
+        self.add_column(RichText("Price", justify=r), width=5)  # 4: Leg price
         self.add_column(RichText("Vol", justify=r), width=6)  # 5: Volume
         self.add_column(RichText("Pos", justify=r), width=14)  # 6: Position
         self.add_column(RichText("Queue", justify=r), width=6)  # 7: Queue position
@@ -393,8 +393,8 @@ class OpportunitiesTable(DataTable):
             return (self._labels.get(opp.event_ticker) or opp.event_ticker).lower()
         if key_name == "league":
             prefix = opp.event_ticker.split("-")[0]
-            pair = _SPORT_LEAGUE.get(prefix, ("~", "~"))
-            return pair[1].lower()
+            sl = _SPORT_LEAGUE.get(prefix)
+            return (sl[1] if sl else prefix).lower()
         if key_name == "no_a":
             return opp.no_a
         if key_name == "fee_edge":
@@ -508,7 +508,8 @@ class OpportunitiesTable(DataTable):
 
         # Game status (row 1 only)
         prefix = opp.event_ticker.split("-")[0]
-        _, league = _SPORT_LEAGUE.get(prefix, ("—", "—"))
+        sport_league = _SPORT_LEAGUE.get(prefix)
+        league = sport_league[1] if sport_league else prefix
         game_status = self._resolver.get(opp.event_ticker) if self._resolver else None
         game_col = _fmt_game_status(game_status)
 
@@ -581,9 +582,12 @@ class OpportunitiesTable(DataTable):
             status = _fmt_status(self._event_statuses.get(opp.event_ticker, ""))
 
         if tracker is not None:
-            if tracker.is_at_top(opp.ticker_a) is False:
+            # For same-ticker YES/NO pairs, check the correct side
+            side_a = "yes" if opp.ticker_a == opp.ticker_b else "no"
+            side_b = "no"
+            if tracker.is_at_top(opp.ticker_a, side_a) is False:
                 q_a = RichText(f"!! {q_a}", style=YELLOW, justify="right")
-            if tracker.is_at_top(opp.ticker_b) is False:
+            if tracker.is_at_top(opp.ticker_b, side_b) is False:
                 q_b = RichText(f"!! {q_b}", style=YELLOW, justify="right")
 
         # Row 1: team A + shared event-level info
