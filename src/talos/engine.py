@@ -566,6 +566,8 @@ class TradingEngine:
             for data in self._initial_games_full:
                 try:
                     pair = self._game_manager.restore_game(data)
+                    if pair is None:
+                        continue
                     self._adjuster.add_event(pair)
                     pairs.append(pair)
                     cached_tickers.add(pair.event_ticker)

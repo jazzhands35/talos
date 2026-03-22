@@ -6,7 +6,7 @@ from unittest.mock import AsyncMock, MagicMock, Mock
 
 import pytest
 
-from talos.game_manager import GameManager, parse_kalshi_url
+from talos.game_manager import SCAN_SERIES, SPORTS_SERIES, GameManager, parse_kalshi_url
 from talos.market_feed import MarketFeed
 from talos.models.market import Event, Market, Series
 from talos.rest_client import KalshiRESTClient
@@ -82,7 +82,7 @@ class TestGameManager:
         ]
         return Event(
             event_ticker=event_ticker,
-            series_ticker="SER-1",
+            series_ticker="KXNHLGAME",
             title="Game",
             category="sports",
             status="open",
@@ -293,3 +293,195 @@ class TestGameManager:
         manager.on_change = callback
         await manager.add_game("EVT-1")
         callback.assert_not_called()
+
+
+class TestSportsBlock:
+    """Tests for sports_enabled toggle and YES/NO pair handling."""
+
+    def _make_mock_deps(self) -> tuple[MagicMock, MagicMock, MagicMock]:
+        rest = MagicMock(spec=KalshiRESTClient)
+        rest.get_event = AsyncMock()
+        rest.get_series = AsyncMock(
+            return_value=Series(
+                series_ticker="SER-1",
+                title="Test Series",
+                category="sports",
+                fee_type="quadratic_with_maker_fees",
+                fee_multiplier=0.0175,
+            )
+        )
+        feed = MagicMock(spec=MarketFeed)
+        feed.subscribe = AsyncMock()
+        feed.subscribe_bulk = AsyncMock()
+        feed.unsubscribe = AsyncMock()
+        scanner = MagicMock(spec=ArbitrageScanner)
+        return rest, feed, scanner
+
+    def test_scan_series_alias_matches_sports_series(self) -> None:
+        """SCAN_SERIES backward-compatible alias points to SPORTS_SERIES."""
+        assert SCAN_SERIES is SPORTS_SERIES
+
+    def test_restore_skips_sports_when_disabled(self) -> None:
+        """Sports pairs from cache are skipped when sports_enabled=False."""
+        rest, feed, scanner = self._make_mock_deps()
+        gm = GameManager(rest, feed, scanner, sports_enabled=False)
+
+        result = gm.restore_game({
+            "event_ticker": "KXNHLGAME-26MAR14BOSWSH",
+            "ticker_a": "KXNHLGAME-26MAR14BOSWSH-A",
+            "ticker_b": "KXNHLGAME-26MAR14BOSWSH-B",
+        })
+        assert result is None
+        assert len(gm.active_games) == 0
+
+    def test_restore_allows_non_sports(self) -> None:
+        """Non-sports pairs restore fine when sports disabled."""
+        rest, feed, scanner = self._make_mock_deps()
+        gm = GameManager(rest, feed, scanner, sports_enabled=False)
+
+        result = gm.restore_game({
+            "event_ticker": "SOME-NONSPORT-MKT",
+            "ticker_a": "SOME-NONSPORT-MKT",
+            "ticker_b": "SOME-NONSPORT-MKT",
+            "side_a": "yes",
+            "side_b": "no",
+            "kalshi_event_ticker": "SOME-NONSPORT-EVT",
+        })
+        assert result is not None
+        assert result.side_a == "yes"
+        assert result.side_b == "no"
+        assert result.kalshi_event_ticker == "SOME-NONSPORT-EVT"
+
+    def test_restore_allows_sports_when_enabled(self) -> None:
+        """Sports pairs restore normally when sports_enabled=True (default)."""
+        rest, feed, scanner = self._make_mock_deps()
+        gm = GameManager(rest, feed, scanner)  # default sports_enabled=True
+
+        result = gm.restore_game({
+            "event_ticker": "KXNHLGAME-26MAR14BOSWSH",
+            "ticker_a": "KXNHLGAME-26MAR14BOSWSH-A",
+            "ticker_b": "KXNHLGAME-26MAR14BOSWSH-B",
+        })
+        assert result is not None
+        assert result.event_ticker == "KXNHLGAME-26MAR14BOSWSH"
+
+    def test_restore_reads_new_fields_with_defaults(self) -> None:
+        """Old cache entries without side_a/side_b/kalshi_event_ticker get defaults."""
+        rest, feed, scanner = self._make_mock_deps()
+        gm = GameManager(rest, feed, scanner)
+
+        result = gm.restore_game({
+            "event_ticker": "EVT-OLD",
+            "ticker_a": "TICK-A",
+            "ticker_b": "TICK-B",
+        })
+        assert result is not None
+        assert result.side_a == "no"
+        assert result.side_b == "no"
+        assert result.kalshi_event_ticker == ""
+
+    async def test_add_game_blocks_sports_when_disabled(self) -> None:
+        """add_game raises ValueError for sports series when disabled."""
+        rest, feed, scanner = self._make_mock_deps()
+        gm = GameManager(rest, feed, scanner, sports_enabled=False)
+
+        event = Event(
+            event_ticker="KXNHLGAME-26MAR14BOSWSH",
+            series_ticker="KXNHLGAME",
+            title="Game",
+            category="sports",
+            status="open",
+            markets=[
+                Market(ticker="T-A", event_ticker="KXNHLGAME-26MAR14BOSWSH",
+                       title="Team A", status="active"),
+                Market(ticker="T-B", event_ticker="KXNHLGAME-26MAR14BOSWSH",
+                       title="Team B", status="active"),
+            ],
+        )
+        rest.get_event.return_value = event
+
+        with pytest.raises(ValueError, match="Sports markets blocked"):
+            await gm.add_game("KXNHLGAME-26MAR14BOSWSH")
+
+    async def test_add_market_as_pair_creates_yes_no(self) -> None:
+        """add_market_as_pair creates a same-ticker YES/NO pair."""
+        rest, feed, scanner = self._make_mock_deps()
+        gm = GameManager(rest, feed, scanner)
+
+        event = Event(
+            event_ticker="EVT-1",
+            series_ticker="NONSPORT",
+            title="Some Event",
+            category="politics",
+            status="open",
+            markets=[],
+        )
+        market = Market(
+            ticker="MKT-1",
+            event_ticker="EVT-1",
+            title="Will something happen?",
+            status="active",
+        )
+
+        pair = await gm.add_market_as_pair(event, market)
+        assert pair.ticker_a == "MKT-1"
+        assert pair.ticker_b == "MKT-1"
+        assert pair.side_a == "yes"
+        assert pair.side_b == "no"
+        assert pair.kalshi_event_ticker == "EVT-1"
+        assert pair.is_same_ticker is True
+        assert len(gm.active_games) == 1
+
+        # Check labels were built
+        labels = gm.leg_labels
+        assert "MKT-1" in labels
+        assert "YES" in labels["MKT-1"][0]
+        assert "NO" in labels["MKT-1"][1]
+
+    async def test_add_game_nonsports_single_market_auto_pairs(self) -> None:
+        """Non-sports event with 1 active market auto-creates YES/NO pair."""
+        rest, feed, scanner = self._make_mock_deps()
+        gm = GameManager(rest, feed, scanner)
+
+        event = Event(
+            event_ticker="NONSPORT-EVT",
+            series_ticker="NONSPORT",
+            title="Some Event",
+            category="politics",
+            status="open",
+            markets=[
+                Market(ticker="MKT-1", event_ticker="NONSPORT-EVT",
+                       title="Will it happen?", status="active"),
+            ],
+        )
+        rest.get_event.return_value = event
+
+        pair = await gm.add_game("NONSPORT-EVT")
+        assert pair.side_a == "yes"
+        assert pair.side_b == "no"
+        assert pair.ticker_a == pair.ticker_b == "MKT-1"
+
+    async def test_add_game_nonsports_multi_market_raises(self) -> None:
+        """Non-sports event with multiple active markets raises for market picker."""
+        rest, feed, scanner = self._make_mock_deps()
+        gm = GameManager(rest, feed, scanner)
+
+        event = Event(
+            event_ticker="NONSPORT-EVT",
+            series_ticker="NONSPORT",
+            title="Some Event",
+            category="politics",
+            status="open",
+            markets=[
+                Market(ticker="MKT-1", event_ticker="NONSPORT-EVT",
+                       title="Option A", status="active"),
+                Market(ticker="MKT-2", event_ticker="NONSPORT-EVT",
+                       title="Option B", status="active"),
+                Market(ticker="MKT-3", event_ticker="NONSPORT-EVT",
+                       title="Option C", status="active"),
+            ],
+        )
+        rest.get_event.return_value = event
+
+        with pytest.raises(ValueError, match="market picker"):
+            await gm.add_game("NONSPORT-EVT")

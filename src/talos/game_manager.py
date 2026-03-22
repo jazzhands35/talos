@@ -10,14 +10,14 @@ import structlog
 
 from talos.errors import KalshiAPIError
 from talos.market_feed import MarketFeed
-from talos.models.market import Event
+from talos.models.market import Event, Market
 from talos.models.strategy import ArbPair
 from talos.rest_client import KalshiRESTClient
 from talos.scanner import ArbitrageScanner
 
 logger = structlog.get_logger()
 
-SCAN_SERIES = [
+SPORTS_SERIES = [
     "KXNHLGAME",
     "KXNBAGAME",
     "KXMLBGAME",
@@ -84,6 +84,13 @@ SCAN_SERIES = [
     "KXIWWMN",
 ]
 
+NON_SPORTS_SERIES: list[str] = []
+
+_SPORTS_SET = set(SPORTS_SERIES)
+
+# Backward-compatible alias for external consumers
+SCAN_SERIES = SPORTS_SERIES
+
 
 def parse_kalshi_url(url_or_ticker: str) -> str:
     """Extract event ticker from a Kalshi URL or return bare ticker.
@@ -138,10 +145,13 @@ class GameManager:
         rest: KalshiRESTClient,
         feed: MarketFeed,
         scanner: ArbitrageScanner,
+        *,
+        sports_enabled: bool = True,
     ) -> None:
         self._rest = rest
         self._feed = feed
         self._scanner = scanner
+        self._sports_enabled = sports_enabled
         self._games: dict[str, ArbPair] = {}
         self._labels: dict[str, str] = {}
         self._subtitles: dict[str, str] = {}
@@ -166,12 +176,33 @@ class GameManager:
             market = await self._rest.get_market(ticker)
             event = await self._rest.get_event(market.event_ticker, with_nested_markets=True)
 
+        # Sports block check
+        if not self._sports_enabled and event.series_ticker in _SPORTS_SET:
+            raise ValueError(f"Sports markets blocked: {event.series_ticker}")
+
         # Filter to active markets only (tournament events have many finalized markets)
         active_markets = [m for m in event.markets if m.status == "active"]
-        if len(active_markets) != 2:
+
+        if event.series_ticker in _SPORTS_SET:
+            # Sports path: exactly 2 markets (cross-NO arb)
+            if len(active_markets) != 2:
+                raise ValueError(
+                    f"Event {ticker} has {len(active_markets)} active markets "
+                    f"({len(event.markets)} total), expected exactly 2"
+                )
+        else:
+            # Non-sports path
+            if len(active_markets) == 0:
+                raise ValueError(f"Event {ticker} has no active markets")
+            if len(active_markets) == 1:
+                # Auto-add single market as YES/NO pair
+                return await self.add_market_as_pair(
+                    event, active_markets[0], subscribe=subscribe,
+                )
+            # Multiple markets — caller needs to show market picker
             raise ValueError(
-                f"Event {ticker} has {len(active_markets)} active markets "
-                f"({len(event.markets)} total), expected exactly 2"
+                f"Event {ticker} has {len(active_markets)} active markets — "
+                f"use market picker to select specific markets"
             )
 
         ticker_a = active_markets[0].ticker
@@ -260,18 +291,105 @@ class GameManager:
         )
         return pair
 
-    def restore_game(self, data: dict[str, str | float]) -> ArbPair:
-        """Restore a game from cached data — no REST calls needed."""
+    async def add_market_as_pair(
+        self, event: Event, market: Market, *, subscribe: bool = True,
+    ) -> ArbPair:
+        """Create a YES/NO arb pair from a single market within an event."""
+        if market.ticker in self._games:
+            return self._games[market.ticker]
+
+        # Fetch series for fee metadata
+        fee_type = "quadratic_with_maker_fees"
+        fee_rate = 0.0175
+        try:
+            series = await self._rest.get_series(event.series_ticker)
+            fee_type = series.fee_type
+            fee_rate = series.fee_multiplier
+        except Exception:
+            logger.warning(
+                "series_fee_fetch_failed", series=event.series_ticker, exc_info=True,
+            )
+
+        pair = ArbPair(
+            event_ticker=market.ticker,  # market ticker as unique pair key
+            ticker_a=market.ticker,
+            ticker_b=market.ticker,
+            side_a="yes",
+            side_b="no",
+            kalshi_event_ticker=event.event_ticker,
+            fee_type=fee_type,
+            fee_rate=fee_rate,
+            close_time=market.close_time,
+            expected_expiration_time=market.expected_expiration_time,
+        )
+        self._scanner.add_pair(
+            market.ticker,
+            market.ticker,
+            market.ticker,
+            side_a="yes",
+            side_b="no",
+            kalshi_event_ticker=event.event_ticker,
+            fee_type=fee_type,
+            fee_rate=fee_rate,
+            close_time=market.close_time,
+            expected_expiration_time=market.expected_expiration_time,
+        )
+        if subscribe:
+            await self._feed.subscribe(market.ticker)
+        self._games[market.ticker] = pair
+
+        # Store metadata
+        self._subtitles[market.ticker] = event.sub_title
+        self._volumes_24h[market.ticker] = market.volume_24h or 0
+
+        # Build YES/NO labels from market title
+        short = (market.title or "").removeprefix("Will ").removesuffix("?").strip()
+        if len(short) > 30:
+            short = short[:27] + "..."
+        self._labels[market.ticker] = short
+        self._leg_labels[market.ticker] = (f"{short} - YES", f"{short} - NO")
+
+        if self.on_change:
+            self.on_change()
+        logger.info(
+            "market_pair_added",
+            market_ticker=market.ticker,
+            event_ticker=event.event_ticker,
+        )
+        return pair
+
+    def restore_game(self, data: dict[str, str | float]) -> ArbPair | None:
+        """Restore a game from cached data — no REST calls needed.
+
+        Returns None when the pair is a sports pair and sports are disabled.
+        """
         event_ticker = str(data["event_ticker"])
+
+        # Sports block check
+        if not self._sports_enabled:
+            series_prefix = event_ticker.split("-")[0]
+            if series_prefix in _SPORTS_SET:
+                logger.info("restore_skipped_sports", event_ticker=event_ticker)
+                return None
+
         if event_ticker in self._games:
             return self._games[event_ticker]
 
         ticker_a = str(data["ticker_a"])
         ticker_b = str(data["ticker_b"])
+
+        # Read new fields with backward-compatible defaults
+        side_a = str(data.get("side_a", "no"))
+        side_b = str(data.get("side_b", "no"))
+        kalshi_event_ticker = str(data.get("kalshi_event_ticker", ""))
+
         pair = ArbPair(
             event_ticker=event_ticker,
             ticker_a=ticker_a,
             ticker_b=ticker_b,
+            side_a=side_a,
+            side_b=side_b,
+            kalshi_event_ticker=kalshi_event_ticker,
             fee_type=str(data.get("fee_type", "quadratic_with_maker_fees")),
             fee_rate=float(data.get("fee_rate", 0.0175)),
             close_time=str(data["close_time"]) if data.get("close_time") else None,
@@ -285,6 +403,9 @@ class GameManager:
             event_ticker,
             ticker_a,
             ticker_b,
+            side_a=side_a,
+            side_b=side_b,
+            kalshi_event_ticker=kalshi_event_ticker,
             fee_type=pair.fee_type,
             fee_rate=pair.fee_rate,
             close_time=pair.close_time,
@@ -394,6 +515,12 @@ class GameManager:
         active_tickers = {p.event_ticker for p in self.active_games}
         sem = asyncio.Semaphore(4)
 
+        # Use appropriate series list based on sports toggle
+        series_list: list[str] = []
+        if self._sports_enabled:
+            series_list.extend(SPORTS_SERIES)
+        series_list.extend(NON_SPORTS_SERIES)
+
         async def fetch_series(series: str) -> list[Event]:
             async with sem:
                 try:
@@ -407,7 +534,7 @@ class GameManager:
                     logger.warning("scan_series_failed", series=series, exc_info=True)
                     return []
 
-        all_results = await asyncio.gather(*(fetch_series(s) for s in SCAN_SERIES))
+        all_results = await asyncio.gather(*(fetch_series(s) for s in series_list))
 
         events: list[Event] = []
         for batch in all_results:
@@ -415,7 +542,11 @@ class GameManager:
                 if event.event_ticker in active_tickers:
                     continue
                 active_mkts = [m for m in event.markets if m.status == "active"]
-                if len(active_mkts) != 2:
+                # Sports: exactly 2 markets. Non-sports: any number of active markets.
+                is_sports = event.series_ticker in _SPORTS_SET
+                if is_sports and len(active_mkts) != 2:
+                    continue
+                if not is_sports and len(active_mkts) == 0:
                     continue
                 events.append(event)
         return events
