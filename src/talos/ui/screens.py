@@ -8,6 +8,7 @@ from zoneinfo import ZoneInfo
 from rich.text import Text as RichText
 from textual.app import ComposeResult
 from textual.containers import Vertical
+from textual.events import Key
 from textual.screen import ModalScreen
 from textual.widgets import Button, DataTable, Input, Label, TextArea
 
@@ -676,8 +677,6 @@ class MarketPickerScreen(ModalScreen[list[Market]]):
 
     BINDINGS = [
         ("escape", "cancel", "Cancel"),
-        ("space", "toggle_selection", "Toggle"),
-        ("enter", "confirm", "Add Selected"),
         ("a", "select_all", "Select All"),
     ]
 
@@ -688,6 +687,7 @@ class MarketPickerScreen(ModalScreen[list[Market]]):
         self._selected: set[str] = set()  # market tickers
         # Ordered list of tickers matching table row order
         self._row_tickers: list[str] = []
+        self._last_toggled_idx: int | None = None  # for shift-select range
 
     def compose(self) -> ComposeResult:
         count = len(self._markets)
@@ -695,7 +695,7 @@ class MarketPickerScreen(ModalScreen[list[Market]]):
             title = f"Select Markets — {count} available"
             if self._event_title:
                 title += f"  [{self._event_title}]"
-            title += "  Space:Toggle  Enter:Add  Esc:Cancel"
+            title += "  Space:Toggle  Shift+Space:Range  Enter:Add  Esc:Cancel"
             yield Label(title, classes="modal-title", markup=False)
             yield DataTable(id="picker-table")
 
@@ -729,14 +729,32 @@ class MarketPickerScreen(ModalScreen[list[Market]]):
                 key=market.ticker,
             )
 
+    def on_key(self, event: Key) -> None:
+        """Handle Space, Enter, Shift+Space before DataTable consumes them."""
+        if event.key == "space":
+            event.prevent_default()
+            event.stop()
+            self._toggle_current()
+        elif event.key == "shift+space":
+            event.prevent_default()
+            event.stop()
+            self._toggle_range()
+        elif event.key == "enter":
+            event.prevent_default()
+            event.stop()
+            self._confirm()
+
+    def on_data_table_row_selected(self, event: DataTable.RowSelected) -> None:
+        """DataTable fires RowSelected on Enter — treat as confirm."""
+        event.stop()
+        self._confirm()
+
     def action_cancel(self) -> None:
         self.dismiss([])
 
-    def action_toggle_selection(self) -> None:
+    def _toggle_at(self, row_idx: int) -> None:
+        """Toggle selection state for a single row by index."""
         table = self.query_one("#picker-table", DataTable)
-        if table.cursor_row is None or table.row_count == 0:
-            return
-        row_idx = table.cursor_row
         if row_idx < 0 or row_idx >= len(self._row_tickers):
             return
         ticker = self._row_tickers[row_idx]
@@ -748,25 +766,55 @@ class MarketPickerScreen(ModalScreen[list[Market]]):
             self._selected.add(ticker)
             table.update_cell(ticker, check_col, "✓")
 
+    def _select_at(self, row_idx: int) -> None:
+        """Ensure a row is selected (for range select)."""
+        if row_idx < 0 or row_idx >= len(self._row_tickers):
+            return
+        ticker = self._row_tickers[row_idx]
+        if ticker not in self._selected:
+            self._selected.add(ticker)
+            table = self.query_one("#picker-table", DataTable)
+            check_col = table.ordered_columns[0].key
+            table.update_cell(ticker, check_col, "✓")
+
+    def _toggle_current(self) -> None:
+        """Toggle the row at the cursor."""
+        table = self.query_one("#picker-table", DataTable)
+        if table.cursor_row is None or table.row_count == 0:
+            return
+        row_idx = table.cursor_row
+        self._toggle_at(row_idx)
+        self._last_toggled_idx = row_idx
+
+    def _toggle_range(self) -> None:
+        """Select all rows from last toggle to current cursor (shift+space)."""
+        table = self.query_one("#picker-table", DataTable)
+        if table.cursor_row is None or table.row_count == 0:
+            return
+        current = table.cursor_row
+        anchor = self._last_toggled_idx if self._last_toggled_idx is not None else current
+        lo, hi = min(anchor, current), max(anchor, current)
+        for idx in range(lo, hi + 1):
+            self._select_at(idx)
+        self._last_toggled_idx = current
+
     def action_select_all(self) -> None:
         """Toggle all markets selected/unselected."""
         table = self.query_one("#picker-table", DataTable)
         check_col = table.ordered_columns[0].key
         if len(self._selected) == len(self._markets):
-            # All selected — deselect all
             self._selected.clear()
             for ticker in self._row_tickers:
                 table.update_cell(ticker, check_col, "")
         else:
-            # Select all
             for market in self._markets:
                 self._selected.add(market.ticker)
             for ticker in self._row_tickers:
                 table.update_cell(ticker, check_col, "✓")
 
-    def action_confirm(self) -> None:
+    def _confirm(self) -> None:
+        """Add selected markets and dismiss."""
         if self._selected:
-            # Return markets in display order (by volume desc)
             selected = [
                 m for t in self._row_tickers
                 if t in self._selected
