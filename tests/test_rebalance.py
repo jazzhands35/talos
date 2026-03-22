@@ -12,7 +12,12 @@ from talos.models.proposal import ProposedRebalance
 from talos.models.strategy import ArbPair, Opportunity
 from talos.orderbook import OrderBookManager
 from talos.position_ledger import PositionLedger, Side
-from talos.rebalance import compute_rebalance_proposal, compute_topup_needs, execute_rebalance
+from talos.rebalance import (
+    compute_overcommit_reduction,
+    compute_rebalance_proposal,
+    compute_topup_needs,
+    execute_rebalance,
+)
 from talos.rest_client import KalshiRESTClient
 from talos.scanner import ArbitrageScanner
 
@@ -267,12 +272,12 @@ class TestComputeRebalanceProposal:
         assert result.rebalance is not None
         assert result.rebalance.catchup_qty == 30  # full gap: 50 - 20
 
-    def test_catchup_skipped_when_unprofitable(self):
-        """Catch-up is omitted from proposal when arb is unprofitable after fees.
+    def test_catchup_falls_back_to_profitable_price(self):
+        """When snapshot price is unprofitable, catch-up uses max profitable price.
 
-        Regression test: prevents the catch-up BLOCKED spam where every cycle
-        proposes a catch-up that immediately fails the P18 profitability gate.
-        The cancel step (step 1) is still included — only catch-up is omitted.
+        Regression: previously catch-up was omitted entirely, leaving positions
+        stuck in "Waiting" indefinitely. Now falls back to a resting bid at the
+        highest price that IS profitable against historical fills.
         """
         pair = _make_pair()
         ledger = PositionLedger(event_ticker="EVT-1", unit_size=20)
@@ -292,9 +297,26 @@ class TestComputeRebalanceProposal:
         # Cancel step is present (reduce over-side resting)
         assert result.rebalance.current_resting == 10
         assert result.rebalance.target_resting == 0
-        # Catch-up is omitted (unprofitable)
-        assert result.rebalance.catchup_qty == 0
-        assert result.rebalance.catchup_ticker is None
+        # Catch-up falls back to max profitable price (44¢ < snapshot 48¢)
+        assert result.rebalance.catchup_qty == 5
+        assert result.rebalance.catchup_ticker == "TK-B"
+        assert result.rebalance.catchup_price == 44  # max profitable vs 55¢ fills
+
+    def test_catchup_skipped_when_no_profitable_price_exists(self):
+        """Catch-up is omitted when even the max profitable price is 0."""
+        pair = _make_pair()
+        ledger = PositionLedger(event_ticker="EVT-1", unit_size=20)
+        # Over-side fills at extreme price — no profitable catch-up possible
+        ledger.record_fill(Side.A, 20, 99)
+        ledger.record_fill(Side.B, 10, 48)
+        snapshot = _make_snapshot(no_a=99, no_b=48)
+
+        result = compute_rebalance_proposal(
+            "EVT-1", ledger, pair, snapshot, "Test", _books_with_data(no_a=99, no_b=48)
+        )
+        assert result is not None
+        # No executable step — can't profitably catch up
+        assert result.rebalance is None or result.rebalance.catchup_qty == 0
 
     def test_catchup_full_gap_not_capped(self):
         """Catch-up quantity is the full gap, not capped at unit_size."""
@@ -429,6 +451,7 @@ class TestExecuteRebalance:
             ticker="TK-B",
             action="buy",
             side="no",
+            yes_price=None,
             no_price=48,
             count=10,
             order_group_id="grp-test",
@@ -846,6 +869,7 @@ class TestFreshSyncBeforeCatchup:
             ticker="TK-B",
             action="buy",
             side="no",
+            yes_price=None,
             no_price=48,
             count=10,
             order_group_id="grp-test",
@@ -925,3 +949,173 @@ class TestTopUpDetection:
         snapshot = _make_snapshot(no_a=45, no_b=48)
         result = compute_topup_needs(ledger, pair, snapshot)
         assert result == {}
+
+
+# ── Overcommit reduction tests ─────────────────────────────────────
+
+
+class TestOvercommitReduction:
+    def test_balanced_overcommit_returns_reduction(self):
+        """Balanced committed counts but unit overcommit → reduce resting.
+
+        Reproduces the Cloud9 bug: Side A 20f+3r=23, Side B 3f+20r=23.
+        Delta=0 so compute_rebalance_proposal returns None.
+        But Side B has filled_in_unit=3, 3+20=23 > unit=20.
+        """
+        pair = _make_pair()
+        ledger = PositionLedger(event_ticker="EVT-1", unit_size=20)
+        ledger.record_fill(Side.A, 20, 45)
+        ledger.record_resting(Side.A, "ord-a", 3, 45)
+        ledger.record_fill(Side.B, 3, 48)
+        ledger.record_resting(Side.B, "ord-b", 20, 48)
+
+        # Verify rebalance_proposal sees no imbalance (delta=0)
+        assert compute_rebalance_proposal(
+            "EVT-1", ledger, pair, None, "Test", OrderBookManager()
+        ) is None
+
+        # Overcommit reduction SHOULD fire on side B
+        result = compute_overcommit_reduction("EVT-1", ledger, pair, "Test")
+        assert result is not None
+        assert result.side == "B"
+        assert result.order_id == "ord-b"
+        assert result.current_resting == 20
+        assert result.target_resting == 17  # 20 - 3 filled_in_unit
+        assert result.catchup_qty == 0  # reduce only, no catch-up
+
+    def test_no_overcommit_returns_none(self):
+        """Within unit capacity → no reduction needed."""
+        pair = _make_pair()
+        ledger = PositionLedger(event_ticker="EVT-1", unit_size=20)
+        ledger.record_fill(Side.A, 10, 45)
+        ledger.record_resting(Side.A, "ord-a", 10, 45)
+        ledger.record_fill(Side.B, 10, 48)
+        ledger.record_resting(Side.B, "ord-b", 10, 48)
+
+        result = compute_overcommit_reduction("EVT-1", ledger, pair, "Test")
+        assert result is None
+
+    def test_overcommit_with_no_order_id_skipped(self):
+        """Overcommit detected but no resting order ID → can't reduce."""
+        pair = _make_pair()
+        ledger = PositionLedger(event_ticker="EVT-1", unit_size=20)
+        ledger.record_fill(Side.B, 5, 48)
+        # Simulate resting without a tracked order_id (e.g., orphaned)
+        ledger._sides[Side.B].resting_count = 20
+
+        result = compute_overcommit_reduction("EVT-1", ledger, pair, "Test")
+        assert result is None
+
+    def test_multi_unit_overcommit(self):
+        """Overcommit after crossing a unit boundary (fills % unit_size)."""
+        pair = _make_pair()
+        ledger = PositionLedger(event_ticker="EVT-1", unit_size=20)
+        ledger.record_fill(Side.A, 40, 45)
+        ledger.record_resting(Side.A, "ord-a", 3, 45)
+        ledger.record_fill(Side.B, 23, 48)
+        ledger.record_resting(Side.B, "ord-b", 20, 48)
+
+        # Side B: filled_in_unit = 23 % 20 = 3, 3 + 20 = 23 > 20
+        result = compute_overcommit_reduction("EVT-1", ledger, pair, "Test")
+        assert result is not None
+        assert result.side == "B"
+        assert result.target_resting == 17
+
+    def test_exact_unit_boundary_no_overcommit(self):
+        """Exactly at unit boundary → no overcommit."""
+        pair = _make_pair()
+        ledger = PositionLedger(event_ticker="EVT-1", unit_size=20)
+        ledger.record_fill(Side.A, 20, 45)
+        ledger.record_resting(Side.A, "ord-a", 20, 45)
+        ledger.record_fill(Side.B, 20, 48)
+        ledger.record_resting(Side.B, "ord-b", 20, 48)
+
+        # filled_in_unit = 20 % 20 = 0, 0 + 20 = 20, NOT > 20
+        result = compute_overcommit_reduction("EVT-1", ledger, pair, "Test")
+        assert result is None
+
+
+# ── YES/NO side-awareness tests ──────────────────────────────────────
+
+
+class TestYesNoRebalance:
+    def test_catchup_proposal_carries_side(self):
+        """ProposedRebalance.catchup_side is set from the pair."""
+        pair = ArbPair(
+            event_ticker="MKT-1",
+            ticker_a="MKT-1",
+            ticker_b="MKT-1",
+            side_a="yes",
+            side_b="no",
+        )
+        ledger = PositionLedger(
+            event_ticker="MKT-1",
+            unit_size=10,
+            side_a_str="yes",
+            side_b_str="no",
+            is_same_ticker=True,
+        )
+        # Side A (YES) over-extended with resting
+        ledger.record_fill(Side.A, count=10, price=48)
+        ledger.record_resting(Side.A, order_id="yes-ord", count=10, price=48)
+
+        books = OrderBookManager()
+        from talos.models.ws import OrderBookSnapshot
+
+        books.apply_snapshot(
+            "MKT-1",
+            OrderBookSnapshot(
+                market_ticker="MKT-1",
+                market_id="m1",
+                yes=[[48, 100]],
+                no=[[45, 100]],
+            ),
+        )
+        snapshot = Opportunity(
+            event_ticker="MKT-1",
+            ticker_a="MKT-1",
+            ticker_b="MKT-1",
+            no_a=48,
+            no_b=45,
+            qty_a=100,
+            qty_b=100,
+            raw_edge=7,
+            tradeable_qty=100,
+            timestamp="2026-01-01",
+        )
+        result = compute_rebalance_proposal(
+            "MKT-1",
+            ledger,
+            pair,
+            snapshot,
+            "test",
+            books,
+        )
+        assert result is not None
+        rebalance = result.rebalance
+        assert rebalance is not None
+        assert rebalance.reduce_side == "yes"  # Over-side is YES (Side.A)
+        assert rebalance.catchup_side == "no"  # Under-side is NO (Side.B)
+
+    def test_cross_no_defaults_preserved(self):
+        """Cross-NO rebalance still has catchup_side='no'."""
+        pair = ArbPair(event_ticker="EVT-1", ticker_a="TK-A", ticker_b="TK-B")
+        ledger = PositionLedger(event_ticker="EVT-1", unit_size=10)
+        ledger.record_fill(Side.A, count=10, price=45)
+        ledger.record_resting(Side.A, order_id="ord-a", count=10, price=45)
+
+        books = _books_with_data(no_a=45, no_b=48)
+        snapshot = _make_snapshot(no_a=45, no_b=48)
+        result = compute_rebalance_proposal(
+            "EVT-1",
+            ledger,
+            pair,
+            snapshot,
+            "test",
+            books,
+        )
+        assert result is not None
+        rebalance = result.rebalance
+        assert rebalance is not None
+        assert rebalance.reduce_side == "no"
+        assert rebalance.catchup_side == "no"
