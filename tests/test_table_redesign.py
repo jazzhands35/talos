@@ -89,6 +89,6 @@ def test_build_two_rows_returns_pair():
     assert "Boston Bruins" in str(row1[1])
     # Row 2 should have team name "Washington Capitals"
     assert "Washington Capitals" in str(row2[1])
-    # Both rows have 14 cells
-    assert len(row1) == 14
-    assert len(row2) == 14
+    # Both rows have 15 cells (added Sport column)
+    assert len(row1) == 15
+    assert len(row2) == 15

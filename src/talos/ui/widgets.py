@@ -244,12 +244,13 @@ class OpportunitiesTable(DataTable):
 
     # Column index -> sort key extractor from (opp, positions, volumes, resolver, labels)
     _SORT_KEYS: dict[int, str] = {
-        1: "label",  # Team name (col 1) — sorts by event label
-        2: "league",  # Lg (col 2)
-        3: "state",  # Game (col 3)
-        4: "no_a",  # NO (col 4) — sorts by leg A price
-        5: "vol_a",  # Vol (col 5)
-        10: "fee_edge",  # Edge (col 10)
+        1: "label",  # Team name (col 1)
+        2: "sport",  # Sport (col 2)
+        3: "league",  # Lg (col 3)
+        4: "state",  # Game (col 4)
+        5: "no_a",  # Price (col 5)
+        6: "vol_a",  # Vol (col 6)
+        11: "fee_edge",  # Edge (col 11)
     }
 
     def __init__(self, **kwargs: Any) -> None:
@@ -301,18 +302,19 @@ class OpportunitiesTable(DataTable):
         c = "center"
         self.add_column(RichText("", justify=c), width=2)  # 0: Freshness dot
         self.add_column("Team")  # 1: Team name
-        self.add_column("Lg", width=5)  # 2: League
-        self.add_column(RichText("Game", justify=r), width=9)  # 3: Game status
-        self.add_column(RichText("Price", justify=r), width=5)  # 4: Leg price
-        self.add_column(RichText("Vol", justify=r), width=6)  # 5: Volume
-        self.add_column(RichText("Pos", justify=r), width=14)  # 6: Position
-        self.add_column(RichText("Queue", justify=r), width=6)  # 7: Queue position
-        self.add_column(RichText("CPM", justify=r), width=8)  # 8: Contracts/min
-        self.add_column(RichText("ETA", justify=r), width=7)  # 9: Est. time to fill
-        self.add_column(RichText("Edge", justify=r), width=6)  # 10: Fee-adjusted edge
-        self.add_column("Status", width=16)  # 11: Event status
-        self.add_column(RichText("Locked", justify=r), width=10)  # 12: Locked profit
-        self.add_column(RichText("Expos", justify=r), width=10)  # 13: Exposure
+        self.add_column("Sport", width=6)  # 2: Sport / series prefix
+        self.add_column("Lg", width=5)  # 3: League / submarket
+        self.add_column(RichText("Game", justify=r), width=9)  # 4: Game status
+        self.add_column(RichText("Price", justify=r), width=5)  # 5: Leg price
+        self.add_column(RichText("Vol", justify=r), width=6)  # 6: Volume
+        self.add_column(RichText("Pos", justify=r), width=14)  # 7: Position
+        self.add_column(RichText("Queue", justify=r), width=6)  # 8: Queue position
+        self.add_column(RichText("CPM", justify=r), width=8)  # 9: Contracts/min
+        self.add_column(RichText("ETA", justify=r), width=7)  # 10: Est. time to fill
+        self.add_column(RichText("Edge", justify=r), width=6)  # 11: Fee-adjusted edge
+        self.add_column("Status", width=16)  # 12: Event status
+        self.add_column(RichText("Locked", justify=r), width=10)  # 13: Locked profit
+        self.add_column(RichText("Expos", justify=r), width=10)  # 14: Exposure
 
     def _get_row_style(self, row_index: int, base_style: RichStyle) -> RichStyle:  # type: ignore[override]
         """Pair striping: alternate background per event pair (every 2 rows)."""
@@ -391,10 +393,18 @@ class OpportunitiesTable(DataTable):
             if labels:
                 return labels[0].lower()
             return (self._labels.get(opp.event_ticker) or opp.event_ticker).lower()
+        if key_name == "sport":
+            prefix = opp.event_ticker.split("-")[0]
+            sl = _SPORT_LEAGUE.get(prefix)
+            return (sl[0] if sl else prefix).lower()
         if key_name == "league":
             prefix = opp.event_ticker.split("-")[0]
             sl = _SPORT_LEAGUE.get(prefix)
-            return (sl[1] if sl else prefix).lower()
+            if sl:
+                return sl[1].lower()
+            # Non-sports: submarket suffix (e.g., "80" from "KXRT-REA-80")
+            parts = opp.event_ticker.split("-")
+            return parts[-1].lower() if len(parts) > 1 else ""
         if key_name == "no_a":
             return opp.no_a
         if key_name == "fee_edge":
@@ -506,10 +516,16 @@ class OpportunitiesTable(DataTable):
         vol_a = _fmt_vol(self._volumes_24h.get(opp.ticker_a, 0))
         vol_b = _fmt_vol(self._volumes_24h.get(opp.ticker_b, 0))
 
-        # Game status (row 1 only)
+        # Sport + League (row 1 only)
         prefix = opp.event_ticker.split("-")[0]
         sport_league = _SPORT_LEAGUE.get(prefix)
-        league = sport_league[1] if sport_league else prefix
+        if sport_league:
+            sport, league = sport_league
+        else:
+            # Non-sports: sport=prefix, league=submarket suffix
+            sport = prefix
+            parts = opp.event_ticker.split("-")
+            league = parts[-1] if len(parts) > 1 else ""
         game_status = self._resolver.get(opp.event_ticker) if self._resolver else None
         game_col = _fmt_game_status(game_status)
 
@@ -594,6 +610,7 @@ class OpportunitiesTable(DataTable):
         row1 = (
             dot_a,
             team_a,
+            sport,
             league,
             game_col,
             no_a,
@@ -612,6 +629,7 @@ class OpportunitiesTable(DataTable):
         row2 = (
             dot_b,
             team_b,
+            "",
             "",
             "",
             no_b,

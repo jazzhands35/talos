@@ -72,11 +72,11 @@ class TestOpportunitiesTable:
             # Row 0 = team A, Row 1 = team B (two-row layout)
             row_a = table.get_row_at(0)
             row_b = table.get_row_at(1)
-            # Col 4 = NO price per leg
-            assert "38¢" in str(row_a[4])
-            assert "55¢" in str(row_b[4])
-            # Col 10 = Edge (on row A only)
-            assert "6.2" in str(row_a[10])
+            # Col 5 = Price per leg
+            assert "38¢" in str(row_a[5])
+            assert "55¢" in str(row_b[5])
+            # Col 11 = Edge (on row A only)
+            assert "6.2" in str(row_a[11])
 
     async def test_short_event_label_displayed(self) -> None:
         """Table should show team names from leg_labels."""
@@ -136,7 +136,7 @@ class TestOpportunitiesTable:
             await pilot.pause()
             assert table.row_count == 2  # still visible (2 rows)
             row_a = table.get_row_at(0)
-            assert "-" in str(row_a[10])  # Edge col 10 shows negative
+            assert "-" in str(row_a[11])  # Edge col 11 shows negative
 
 
 class TestPortfolioPanel:
@@ -196,17 +196,17 @@ class TestTablePositions:
             # Two-row layout: row 0 = team A, row 1 = team B
             row_a = table.get_row_at(0)
             row_b = table.get_row_at(1)
-            # Col 6 = Pos, Col 7 = Queue, Col 8 = CPM, Col 9 = ETA
-            assert "3/5 31.4" in str(row_a[6])  # Pos-A with fee-adjusted avg
-            assert "3/5 67.4" in str(row_b[6])  # Pos-B with fee-adjusted avg
-            assert "8" in str(row_a[7])  # Queue-A
-            assert "15" in str(row_b[7])  # Queue-B
-            assert "12.5" in str(row_a[8])  # CPM-A
-            assert "6.00*" in str(row_b[8])  # CPM-B (partial)
-            assert "1m" in str(row_a[9])  # ETA-A
-            assert "2m*" in str(row_b[9])  # ETA-B (partial)
-            # Col 12 = Locked profit
-            assert "0.02" in str(row_a[12])  # Locked (2.38 cents ≈ $0.02)
+            # Col 7 = Pos, Col 8 = Queue, Col 9 = CPM, Col 10 = ETA
+            assert "3/5 31.4" in str(row_a[7])  # Pos-A with fee-adjusted avg
+            assert "3/5 67.4" in str(row_b[7])  # Pos-B with fee-adjusted avg
+            assert "8" in str(row_a[8])  # Queue-A
+            assert "15" in str(row_b[8])  # Queue-B
+            assert "12.5" in str(row_a[9])  # CPM-A
+            assert "6.00*" in str(row_b[9])  # CPM-B (partial)
+            assert "1m" in str(row_a[10])  # ETA-A
+            assert "2m*" in str(row_b[10])  # ETA-B (partial)
+            # Col 13 = Locked profit
+            assert "0.02" in str(row_a[13])  # Locked (2.38 cents ≈ $0.02)
 
     async def test_table_shows_odds_without_positions(self) -> None:
         scanner = _make_scanner_with_opportunity()
@@ -217,8 +217,8 @@ class TestTablePositions:
             table = app.query_one(OpportunitiesTable)
             row_a = table.get_row_at(0)
             row_b = table.get_row_at(1)
-            assert str(row_a[6]) == "—"  # Pos col shows dim dash (no positions)
-            assert str(row_b[6]) == "—"
+            assert str(row_a[7]) == "—"  # Pos col shows dim dash (no positions)
+            assert str(row_b[7]) == "—"
 
 
 class TestRichTextCells:
@@ -231,8 +231,8 @@ class TestRichTextCells:
             await pilot.pause()
             table = app.query_one(OpportunitiesTable)
             row_a = table.get_row_at(0)
-            # Pos (col 6) should be a dim Rich Text em-dash (no positions loaded)
-            pos = row_a[6]
+            # Pos (col 7) should be a dim Rich Text em-dash (no positions loaded)
+            pos = row_a[7]
             assert isinstance(pos, RichText)
             assert str(pos) == "—"
 
@@ -245,8 +245,8 @@ class TestRichTextCells:
             await pilot.pause()
             table = app.query_one(OpportunitiesTable)
             row_a = table.get_row_at(0)
-            # NO price (col 4) should be right-aligned
-            no_a = row_a[4]
+            # Price (col 5) should be right-aligned
+            no_a = row_a[5]
             assert isinstance(no_a, RichText)
             assert no_a.justify == "right"
             assert "38¢" in str(no_a)
@@ -260,7 +260,7 @@ class TestRichTextCells:
             await pilot.pause()
             table = app.query_one(OpportunitiesTable)
             row_a = table.get_row_at(0)
-            edge = row_a[10]  # Edge column (col 10)
+            edge = row_a[11]  # Edge column (col 11)
             assert isinstance(edge, RichText)
             # Scanner has positive edge (NO-A=38, NO-B=55, fee_edge≈6.2)
             assert edge.style is not None
@@ -303,7 +303,7 @@ class TestRichTextCells:
             table.refresh_from_scanner(scanner, tracker)
             await pilot.pause()
             row_a = table.get_row_at(0)
-            q_a = row_a[7]  # Queue column (col 7) on row A
+            q_a = row_a[8]  # Queue column (col 8) on row A
             assert isinstance(q_a, RichText)
             assert "!!" in str(q_a)
 
@@ -346,8 +346,8 @@ class TestRichTextCells:
             # Two-row layout: row 0 = team A, row 1 = team B
             row_a = table.get_row_at(0)
             row_b = table.get_row_at(1)
-            pos_a = row_a[6]  # Pos column (col 6) on row A
-            pos_b = row_b[6]  # Pos column (col 6) on row B
+            pos_a = row_a[7]  # Pos column (col 7) on row A
+            pos_b = row_b[7]  # Pos column (col 7) on row B
             # Behind side (A) should show yellow styling
             assert isinstance(pos_a, RichText)
             assert isinstance(pos_b, RichText)
