@@ -45,6 +45,8 @@ class ProposedRebalance(BaseModel):
     catchup_ticker: str | None = None
     catchup_price: int = 0
     catchup_qty: int = 0
+    catchup_side: str = "no"  # Kalshi side for catch-up order
+    reduce_side: str = "no"  # Kalshi side for reduce order
 
 
 class ProposalKey(BaseModel, frozen=True):

@@ -86,6 +86,40 @@ class TestOpportunity:
         assert opp.fee_rate == 0.03
 
 
+class TestArbPairSideAwareness:
+    def test_defaults_to_no_no(self):
+        pair = ArbPair(event_ticker="EVT", ticker_a="A", ticker_b="B")
+        assert pair.side_a == "no"
+        assert pair.side_b == "no"
+
+    def test_yes_no_pair(self):
+        pair = ArbPair(
+            event_ticker="MKT-TICKER",
+            ticker_a="MKT-TICKER",
+            ticker_b="MKT-TICKER",
+            side_a="yes",
+            side_b="no",
+            kalshi_event_ticker="EVT-TICKER",
+        )
+        assert pair.side_a == "yes"
+        assert pair.side_b == "no"
+        assert pair.is_same_ticker is True
+        assert pair.api_event_ticker == "EVT-TICKER"
+
+    def test_cross_no_is_not_same_ticker(self):
+        pair = ArbPair(event_ticker="EVT", ticker_a="A", ticker_b="B")
+        assert pair.is_same_ticker is False
+        assert pair.api_event_ticker == "EVT"
+
+    def test_api_event_ticker_falls_back_to_event_ticker(self):
+        pair = ArbPair(event_ticker="EVT", ticker_a="A", ticker_b="B")
+        assert pair.api_event_ticker == "EVT"
+
+    def test_kalshi_event_ticker_empty_string_falls_back(self):
+        pair = ArbPair(event_ticker="EVT", ticker_a="A", ticker_b="B", kalshi_event_ticker="")
+        assert pair.api_event_ticker == "EVT"
+
+
 class TestBidConfirmation:
     def test_construction(self):
         bid = BidConfirmation(
