@@ -607,7 +607,12 @@ class TradingEngine:
             all_tickers = [t for t in all_tickers if t not in cached_tickers]
 
         if all_tickers:
-            pairs = await self._game_manager.add_games(all_tickers)
+            try:
+                pairs = await self._game_manager.add_games(all_tickers)
+            except Exception:
+                # MarketPickerNeeded or other errors during discovery — skip
+                pairs = []
+                logger.warning("initial_add_games_failed", exc_info=True)
             for pair in pairs:
                 self._adjuster.add_event(pair)
             if pairs:

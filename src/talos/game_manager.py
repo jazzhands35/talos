@@ -442,12 +442,19 @@ class GameManager:
         """
         sem = asyncio.Semaphore(10)
 
+        # Single URL: propagate MarketPickerNeeded to UI for market picker.
+        # Multiple URLs (batch): swallow it (discovery can't show picker).
+        propagate_picker = len(urls) == 1
+
         async def _add(url: str) -> ArbPair | None:
             async with sem:
                 try:
                     return await self.add_game(url, subscribe=False)
                 except MarketPickerNeeded:
-                    raise  # Propagate to UI for market picker
+                    if propagate_picker:
+                        raise
+                    logger.info("add_game_needs_picker", url=url)
+                    return None
                 except Exception:
                     logger.warning("add_game_failed", url=url, exc_info=True)
                     return None
