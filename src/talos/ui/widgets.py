@@ -128,6 +128,20 @@ _SPORT_LEAGUE: dict[str, tuple[str, str]] = {
     "KXIWWMN": ("TEN", "IW-W"),
 }
 
+# API category -> short label for non-sports display
+_CATEGORY_SHORT: dict[str, str] = {
+    "Climate and Weather": "Clim",
+    "Crypto": "Cryp",
+    "Companies": "Comp",
+    "Politics": "Pol",
+    "Science and Technology": "Sci",
+    "Mentions": "Ment",
+    "Entertainment": "Ent",
+    "World": "Wrld",
+    "Elections": "Elec",
+    "Health": "Hlth",
+}
+
 
 def _fmt_vol(volume: int) -> RichText:
     """Format 24h volume as compact number."""
@@ -209,12 +223,15 @@ def _fmt_freshness(age_seconds: float | None) -> RichText:
     """Format freshness dot based on seconds since last WS update.
 
     Uses markup-style spans so the dot color survives cursor highlight.
+
+    Thresholds are calibrated to the 120s recovery cycle — quiet markets
+    with valid snapshots shouldn't show red just because nobody's trading.
     """
     if age_seconds is None:
         return RichText("○", style="dim", justify="center")
-    if age_seconds < 5.0:
+    if age_seconds < 30.0:
         color = GREEN
-    elif age_seconds < 30.0:
+    elif age_seconds < 120.0:
         color = YELLOW
     else:
         color = RED
@@ -251,6 +268,7 @@ class OpportunitiesTable(DataTable):
         5: "no_a",  # Price (col 5)
         6: "vol_a",  # Vol (col 6)
         11: "fee_edge",  # Edge (col 11)
+        12: "status",  # Status (col 12)
     }
 
     def __init__(self, **kwargs: Any) -> None:
@@ -409,6 +427,8 @@ class OpportunitiesTable(DataTable):
             return opp.no_a
         if key_name == "fee_edge":
             return opp.fee_edge
+        if key_name == "status":
+            return (self._event_statuses.get(opp.event_ticker) or "").lower()
         if key_name == "vol_a":
             return self._volumes_24h.get(opp.ticker_a, 0)
         if key_name == "state":

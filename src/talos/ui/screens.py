@@ -75,6 +75,20 @@ _SPORT_LEAGUE: dict[str, tuple[str, str]] = {
     "KXIWWMN": ("TEN", "IW-W"),
 }
 
+# API category -> short label for non-sports display
+_CATEGORY_SHORT: dict[str, str] = {
+    "Climate and Weather": "Clim",
+    "Crypto": "Cryp",
+    "Companies": "Comp",
+    "Politics": "Pol",
+    "Science and Technology": "Sci",
+    "Mentions": "Ment",
+    "Entertainment": "Ent",
+    "World": "Wrld",
+    "Elections": "Elec",
+    "Health": "Hlth",
+}
+
 _PT = ZoneInfo("America/Los_Angeles")
 
 
