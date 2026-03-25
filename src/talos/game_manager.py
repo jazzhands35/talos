@@ -252,6 +252,7 @@ class GameManager:
             event_ticker=event.event_ticker,
             ticker_a=ticker_a,
             ticker_b=ticker_b,
+            series_ticker=event.series_ticker,
             fee_type=fee_type,
             fee_rate=fee_rate,
             close_time=close_time,
@@ -327,6 +328,7 @@ class GameManager:
             side_a="yes",
             side_b="no",
             kalshi_event_ticker=event.event_ticker,
+            series_ticker=event.series_ticker,
             fee_type=fee_type,
             fee_rate=fee_rate,
             close_time=market.close_time,
@@ -392,6 +394,7 @@ class GameManager:
         side_a = str(data.get("side_a", "no"))
         side_b = str(data.get("side_b", "no"))
         kalshi_event_ticker = str(data.get("kalshi_event_ticker", ""))
+        series_ticker = str(data.get("series_ticker", ""))
 
         pair = ArbPair(
             event_ticker=event_ticker,
@@ -400,6 +403,7 @@ class GameManager:
             side_a=side_a,
             side_b=side_b,
             kalshi_event_ticker=kalshi_event_ticker,
+            series_ticker=series_ticker,
             fee_type=str(data.get("fee_type", "quadratic_with_maker_fees")),
             fee_rate=float(data.get("fee_rate", 0.0175)),
             close_time=str(data["close_time"]) if data.get("close_time") else None,
@@ -502,11 +506,11 @@ class GameManager:
 
     async def refresh_volumes(self) -> None:
         """Re-fetch 24h volume for all monitored markets, batched by series."""
-        # Group active games by series prefix
+        # Group active games by series ticker (with fallback for old data)
         series_tickers: set[str] = set()
         for pair in self.active_games:
-            prefix = pair.event_ticker.split("-")[0]
-            series_tickers.add(prefix)
+            st = pair.series_ticker or pair.event_ticker.split("-")[0]
+            series_tickers.add(st)
 
         sem = asyncio.Semaphore(4)
 

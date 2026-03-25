@@ -126,6 +126,7 @@ def main() -> None:
                 "side_a": p.side_a,
                 "side_b": p.side_b,
                 "kalshi_event_ticker": p.kalshi_event_ticker,
+                "series_ticker": p.series_ticker,
             }
             for p in game_mgr.active_games
         ])

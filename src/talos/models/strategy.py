@@ -14,6 +14,7 @@ class ArbPair(BaseModel):
     side_a: str = "no"  # "yes" or "no" — Kalshi side for leg A
     side_b: str = "no"  # "yes" or "no" — Kalshi side for leg B
     kalshi_event_ticker: str = ""  # Real Kalshi event ticker for API calls
+    series_ticker: str = ""  # for volume refresh and category display
     fee_type: str = "quadratic_with_maker_fees"
     fee_rate: float = 0.0175
     close_time: str | None = None

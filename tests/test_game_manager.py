@@ -493,3 +493,167 @@ class TestSportsBlock:
             await gm.add_game("NONSPORT-EVT")
         assert exc_info.value.event is event
         assert len(exc_info.value.markets) == 3
+
+
+class TestSeriesTicker:
+    """Tests for series_ticker field on ArbPair and its population in GameManager."""
+
+    def _make_mock_deps(self) -> tuple[MagicMock, MagicMock, MagicMock]:
+        rest = MagicMock(spec=KalshiRESTClient)
+        rest.get_event = AsyncMock()
+        rest.get_series = AsyncMock(
+            return_value=Series(
+                series_ticker="SER-1",
+                title="Test Series",
+                category="sports",
+                fee_type="quadratic_with_maker_fees",
+                fee_multiplier=0.0175,
+            )
+        )
+        feed = MagicMock(spec=MarketFeed)
+        feed.subscribe = AsyncMock()
+        feed.subscribe_bulk = AsyncMock()
+        feed.unsubscribe = AsyncMock()
+        scanner = MagicMock(spec=ArbitrageScanner)
+        return rest, feed, scanner
+
+    def test_arb_pair_has_series_ticker_field_with_default(self) -> None:
+        """ArbPair.series_ticker defaults to empty string."""
+        from talos.models.strategy import ArbPair
+        pair = ArbPair(event_ticker="EVT-1", ticker_a="A", ticker_b="B")
+        assert pair.series_ticker == ""
+
+    def test_arb_pair_series_ticker_can_be_set(self) -> None:
+        """ArbPair.series_ticker stores the provided value."""
+        from talos.models.strategy import ArbPair
+        pair = ArbPair(event_ticker="EVT-1", ticker_a="A", ticker_b="B",
+                       series_ticker="KXNHLGAME")
+        assert pair.series_ticker == "KXNHLGAME"
+
+    async def test_add_game_sets_series_ticker(self) -> None:
+        """add_game() populates series_ticker from event.series_ticker."""
+        rest, feed, scanner = self._make_mock_deps()
+        gm = GameManager(rest, feed, scanner)
+
+        event = Event(
+            event_ticker="KXNHLGAME-26MAR14BOSWSH",
+            series_ticker="KXNHLGAME",
+            title="BOS vs WSH",
+            category="sports",
+            status="open",
+            markets=[
+                Market(ticker="T-A", event_ticker="KXNHLGAME-26MAR14BOSWSH",
+                       title="Boston", status="active"),
+                Market(ticker="T-B", event_ticker="KXNHLGAME-26MAR14BOSWSH",
+                       title="Washington", status="active"),
+            ],
+        )
+        rest.get_event.return_value = event
+
+        pair = await gm.add_game("KXNHLGAME-26MAR14BOSWSH")
+        assert pair.series_ticker == "KXNHLGAME"
+
+    async def test_add_market_as_pair_sets_series_ticker(self) -> None:
+        """add_market_as_pair() populates series_ticker from event.series_ticker."""
+        rest, feed, scanner = self._make_mock_deps()
+        gm = GameManager(rest, feed, scanner)
+
+        event = Event(
+            event_ticker="NONSPORT-EVT",
+            series_ticker="KXNONSPORT",
+            title="Some Event",
+            category="politics",
+            status="open",
+            markets=[],
+        )
+        market = Market(
+            ticker="MKT-1",
+            event_ticker="NONSPORT-EVT",
+            title="Will it happen?",
+            status="active",
+        )
+
+        pair = await gm.add_market_as_pair(event, market)
+        assert pair.series_ticker == "KXNONSPORT"
+
+    def test_restore_game_reads_series_ticker(self) -> None:
+        """restore_game() reads series_ticker from persisted data."""
+        rest, feed, scanner = self._make_mock_deps()
+        gm = GameManager(rest, feed, scanner)
+
+        result = gm.restore_game({
+            "event_ticker": "NONSPORT-MKT",
+            "ticker_a": "NONSPORT-MKT",
+            "ticker_b": "NONSPORT-MKT",
+            "side_a": "yes",
+            "side_b": "no",
+            "kalshi_event_ticker": "NONSPORT-EVT",
+            "series_ticker": "KXNONSPORT",
+        })
+        assert result is not None
+        assert result.series_ticker == "KXNONSPORT"
+
+    def test_restore_game_series_ticker_defaults_to_empty(self) -> None:
+        """restore_game() defaults series_ticker to '' for old cache entries."""
+        rest, feed, scanner = self._make_mock_deps()
+        gm = GameManager(rest, feed, scanner)
+
+        result = gm.restore_game({
+            "event_ticker": "EVT-OLD",
+            "ticker_a": "TICK-A",
+            "ticker_b": "TICK-B",
+        })
+        assert result is not None
+        assert result.series_ticker == ""
+
+    async def test_refresh_volumes_uses_series_ticker(self) -> None:
+        """refresh_volumes() uses pair.series_ticker when set, not event_ticker prefix."""
+        rest, feed, scanner = self._make_mock_deps()
+        gm = GameManager(rest, feed, scanner)
+
+        # Simulate a YES/NO pair where event_ticker is a market ticker (no "-" split works)
+        # series_ticker is set explicitly to the correct value
+        result = gm.restore_game({
+            "event_ticker": "KXNONSPORT-MKT",
+            "ticker_a": "KXNONSPORT-MKT",
+            "ticker_b": "KXNONSPORT-MKT",
+            "side_a": "yes",
+            "side_b": "no",
+            "kalshi_event_ticker": "KXNONSPORT-EVT",
+            "series_ticker": "KXNONSPORT",
+        })
+        assert result is not None
+
+        rest.get_events = AsyncMock(return_value=[])
+        await gm.refresh_volumes()
+
+        # Should call get_events with series_ticker="KXNONSPORT" (from pair.series_ticker)
+        rest.get_events.assert_called_once_with(
+            series_ticker="KXNONSPORT",
+            status="open",
+            with_nested_markets=True,
+            limit=200,
+        )
+
+    async def test_refresh_volumes_falls_back_to_event_ticker_split(self) -> None:
+        """refresh_volumes() falls back to splitting event_ticker when series_ticker is ''."""
+        rest, feed, scanner = self._make_mock_deps()
+        gm = GameManager(rest, feed, scanner)
+
+        # Old cache entry without series_ticker
+        result = gm.restore_game({
+            "event_ticker": "KXNHLGAME-26MAR14BOSWSH",
+            "ticker_a": "KXNHLGAME-26MAR14BOSWSH-A",
+            "ticker_b": "KXNHLGAME-26MAR14BOSWSH-B",
+        })
+        assert result is not None
+
+        rest.get_events = AsyncMock(return_value=[])
+        await gm.refresh_volumes()
+
+        rest.get_events.assert_called_once_with(
+            series_ticker="KXNHLGAME",
+            status="open",
+            with_nested_markets=True,
+            limit=200,
+        )
