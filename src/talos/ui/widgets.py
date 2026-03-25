@@ -269,6 +269,8 @@ class OpportunitiesTable(DataTable):
         6: "vol_a",  # Vol (col 6)
         11: "fee_edge",  # Edge (col 11)
         12: "status",  # Status (col 12)
+        13: "locked",  # Locked profit (col 13)
+        14: "exposure",  # Exposure (col 14)
     }
 
     def __init__(self, **kwargs: Any) -> None:
@@ -435,6 +437,12 @@ class OpportunitiesTable(DataTable):
             gs = self._resolver.get(opp.event_ticker) if self._resolver else None
             order = {"live": 0, "pre": 1, "post": 2, "unknown": 3}
             return order.get(gs.state, 3) if gs else 3
+        if key_name == "locked":
+            pos = self._positions.get(opp.event_ticker)
+            return pos.locked_profit_cents if pos else 0
+        if key_name == "exposure":
+            pos = self._positions.get(opp.event_ticker)
+            return pos.exposure_cents if pos else 0
         # Unsupported column — fall back to edge
         return opp.raw_edge
 
