@@ -349,14 +349,20 @@ class ScanScreen(ModalScreen[list[str] | None]):
         table.add_column(RichText("24h A", justify=r), width=7)
         table.add_column(RichText("24h B", justify=r), width=7)
 
-        # Build sortable row data
         rows: list[tuple[float, str, tuple[str, ...]]] = []
         for ev in self._events:
             ticker = ev.event_ticker
             prefix = ev.series_ticker or ticker.split("-")[0]
-            sport, league = _SPORT_LEAGUE.get(prefix, ("—", "—"))
+            sport_league = _SPORT_LEAGUE.get(prefix)
 
-            # Date and time from game status
+            if sport_league:
+                sport, league = sport_league
+            else:
+                # Non-sports: category short label + series prefix
+                sport = _CATEGORY_SHORT.get(ev.category, ev.category[:4])
+                league = prefix.removeprefix("KX")[:5]
+
+            # Date and time from game status (sports)
             gs = self._statuses.get(ticker)
             sort_ts = 0.0
             date_str = "—"
@@ -370,26 +376,50 @@ class ScanScreen(ModalScreen[list[str] | None]):
                 raw_date = _extract_date_from_ticker(ticker)
                 if raw_date is not None:
                     date_str = f"{raw_date[4:6]}/{raw_date[6:8]}"
+                else:
+                    # Non-sports fallback: earliest market close_time
+                    close_times = [
+                        m.close_time for m in ev.markets
+                        if m.status == "active" and m.close_time
+                    ]
+                    if close_times:
+                        earliest = min(close_times)
+                        try:
+                            ct = datetime.fromisoformat(
+                                earliest.replace("Z", "+00:00")
+                            )
+                            pt = ct.astimezone(_PT)
+                            date_str = pt.strftime("%m/%d")
+                            time_str = pt.strftime("%I:%M %p").lstrip("0")
+                            sort_ts = ct.timestamp()
+                        except (ValueError, TypeError):
+                            pass
 
             # Event label
             label = ev.sub_title or ev.title
             if "(" in label:
                 label = label[: label.rfind("(")].strip()
 
-            # Volume
-            vol_a = _fmt_vol_compact(ev.markets[0].volume_24h or 0) if ev.markets else "—"
-            vol_b = _fmt_vol_compact(ev.markets[1].volume_24h or 0) if len(ev.markets) > 1 else "—"
+            # Volume — use active markets only
+            active_mkts = [m for m in ev.markets if m.status == "active"]
+            vol_a = _fmt_vol_compact(active_mkts[0].volume_24h or 0) if active_mkts else "—"
+            vol_b = (
+                _fmt_vol_compact(active_mkts[1].volume_24h or 0)
+                if len(active_mkts) > 1
+                else "—"
+            )
 
-            rows.append((sort_ts, ticker, (sport, league, date_str, time_str, label, vol_a, vol_b)))
+            rows.append(
+                (sort_ts, ticker, (sport, league, date_str, time_str, label, vol_a, vol_b))
+            )
 
-        # Sort by date/time ascending (soonest first)
         rows.sort(key=lambda r: r[0])
 
         self._row_tickers = []
         for _, ticker, (sport, league, date_str, time_str, label, vol_a, vol_b) in rows:
             self._row_tickers.append(ticker)
             table.add_row(
-                "",  # ✓ column
+                "",
                 sport,
                 league,
                 RichText(date_str, justify="right"),

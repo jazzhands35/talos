@@ -24,6 +24,7 @@ from talos.errors import KalshiRateLimitError
 from talos.models.proposal import ProposalKey
 from talos.models.strategy import BidConfirmation
 from talos.scanner import ArbitrageScanner
+from talos.ui.event_review import EventReviewScreen
 from talos.ui.proposal_panel import ProposalPanel
 from talos.ui.screens import (
     AddGamesScreen,
@@ -64,6 +65,7 @@ class TalosApp(App):
         ("E", "exit_all", "Exit All"),
         ("c", "scan", "Scan"),
         ("o", "open_in_browser", "Open"),
+        ("r", "review_event", "Review"),
         ("h", "settlement_history", "History"),
         ("l", "copy_activity_log", "Copy Log"),
         ("q", "quit", "Quit"),
@@ -91,6 +93,10 @@ class TalosApp(App):
             id="ws-disconnect-banner",
         )
         yield OpportunitiesTable(id="opportunities-table")
+        if self._engine is not None:
+            panel = ProposalPanel(self._engine.proposal_queue, id="proposal-panel")
+            panel.display = False
+            yield panel
         with Horizontal(id="bottom-panels"):
             yield PortfolioPanel(id="account-panel")
             yield ActivityLog(id="activity-log")
@@ -137,7 +143,7 @@ class TalosApp(App):
             self.notify(message, severity=cast(SeverityLevel, severity), markup=False)
 
     def _refresh_proposals(self) -> None:
-        """Update subtitle and WS disconnect banner."""
+        """Update subtitle, WS disconnect banner, and proposal panel."""
         # WS disconnect: show red banner and title bar warning
         banner = self.query_one("#ws-disconnect-banner", Static)
         ws_dead = self._engine is not None and not self._engine.ws_connected
@@ -155,6 +161,14 @@ class TalosApp(App):
             )
         else:
             self.sub_title = ""
+
+        # Refresh the proposal panel if it's visible
+        try:
+            panel = self.query_one("#proposal-panel", ProposalPanel)
+            if panel.display:
+                panel.refresh_proposals()
+        except Exception:
+            pass
 
     @work(thread=False)
     async def _auto_accept_tick(self) -> None:
@@ -259,17 +273,17 @@ class TalosApp(App):
         }
 
     def action_show_proposals(self) -> None:
-        """Show pending proposals in a popup."""
+        """Toggle the proposal panel sidebar."""
         if self._engine is None:
             return
-        pending = self._engine.proposal_queue.pending()
-        if not pending:
-            self.notify("No pending proposals", severity="information")
+        try:
+            panel = self.query_one("#proposal-panel", ProposalPanel)
+        except Exception:
             return
-        lines = [f"{len(pending)} pending proposal(s):"]
-        for p in pending[:10]:
-            lines.append(f"  {p.summary}")
-        self.notify("\n".join(lines), severity="information")
+        panel.display = not panel.display
+        if panel.display:
+            panel.refresh_proposals()
+            panel.focus()
 
     def on_proposal_panel_approved(self, event: ProposalPanel.Approved) -> None:
         """Handle operator approving a proposal."""
@@ -642,14 +656,19 @@ class TalosApp(App):
         # Log scan to data collector
         dc = getattr(self._engine, "_data_collector", None)
         if dc is not None:
-            from talos.game_manager import SCAN_SERIES
+            from talos.game_manager import DEFAULT_NONSPORTS_CATEGORIES, SCAN_SERIES
 
             scan_events = []
             for ev in events:
                 prefix = ev.series_ticker or ev.event_ticker.split("-")[0]
-                from talos.ui.widgets import _SPORT_LEAGUE
+                from talos.ui.widgets import _CATEGORY_SHORT, _SPORT_LEAGUE
 
-                sport, league = _SPORT_LEAGUE.get(prefix, ("", ""))
+                sport_league = _SPORT_LEAGUE.get(prefix)
+                if sport_league:
+                    sport, league = sport_league
+                else:
+                    sport = _CATEGORY_SHORT.get(ev.category, ev.category[:4])
+                    league = prefix.removeprefix("KX")[:5]
                 active_mkts = [m for m in ev.markets if m.status == "active"]
                 scan_events.append(
                     {
@@ -673,7 +692,7 @@ class TalosApp(App):
                 events_found=len(events),
                 events_eligible=len(events),
                 events_selected=len(selected_tickers),
-                series_scanned=len(SCAN_SERIES),
+                series_scanned=len(SCAN_SERIES) + (1 if DEFAULT_NONSPORTS_CATEGORIES else 0),
                 duration_ms=_duration,
                 events=scan_events,
             )
@@ -681,6 +700,24 @@ class TalosApp(App):
         if selected and self._engine is not None:
             await self._engine.add_games(selected)
             self.notify(f"Added {len(selected)} event(s)")
+
+    def action_review_event(self) -> None:
+        """Open the event review panel for the selected row."""
+        if self._engine is None:
+            return
+        table = self.query_one(OpportunitiesTable)
+        if table.cursor_row is None or table.row_count == 0:
+            return
+        cell_key = table.coordinate_to_cell_key(table.cursor_coordinate)
+        event_ticker = _event_ticker_from_row_key(str(cell_key.row_key.value))
+        if not event_ticker:
+            return
+        from pathlib import Path
+
+        base = Path(__file__).resolve().parents[3]
+        db_path = base / "talos_data.db"
+        log_path = base / "suggestions.log"
+        self.push_screen(EventReviewScreen(event_ticker, self._engine, db_path, log_path))
 
     def action_open_in_browser(self) -> None:
         """Open the highlighted event on Kalshi's website."""
@@ -696,7 +733,11 @@ class TalosApp(App):
         # For YES/NO pairs, use the real Kalshi event ticker for the URL
         url_ticker = event_ticker
         if self._engine:
-            pair = self._engine.scanner._find_pair(event_ticker) if hasattr(self._engine.scanner, '_find_pair') else None
+            pair = (
+                self._engine.scanner._find_pair(event_ticker)
+                if hasattr(self._engine.scanner, "_find_pair")
+                else None
+            )
             if pair is None:
                 # Try scanner pairs directly
                 for p in self._engine.scanner.pairs:
@@ -814,16 +855,36 @@ class TalosApp(App):
             await self._engine.remove_game(event_ticker)
 
     def action_approve_proposal(self) -> None:
-        if self._engine is not None:
-            pending = self._engine.proposal_queue.pending()
-            if pending:
-                self._execute_approval(pending[0].key)
+        if self._engine is None:
+            return
+        # If proposal panel is open, approve its selected item
+        try:
+            panel = self.query_one("#proposal-panel", ProposalPanel)
+            if panel.display:
+                panel.approve_selected()
+                return
+        except Exception:
+            pass
+        # Fallback: approve first pending
+        pending = self._engine.proposal_queue.pending()
+        if pending:
+            self._execute_approval(pending[0].key)
 
     def action_reject_proposal(self) -> None:
-        if self._engine is not None:
-            pending = self._engine.proposal_queue.pending()
-            if pending:
-                self._engine.reject_proposal(pending[0].key)
+        if self._engine is None:
+            return
+        # If proposal panel is open, reject its selected item
+        try:
+            panel = self.query_one("#proposal-panel", ProposalPanel)
+            if panel.display:
+                panel.reject_selected()
+                return
+        except Exception:
+            pass
+        # Fallback: reject first pending
+        pending = self._engine.proposal_queue.pending()
+        if pending:
+            self._engine.reject_proposal(pending[0].key)
 
     def action_set_unit_size(self) -> None:
         if self._engine is not None:
