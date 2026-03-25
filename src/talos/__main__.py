@@ -45,7 +45,7 @@ def main() -> None:
     from talos.bid_adjuster import BidAdjuster
     from talos.data_collector import DataCollector
     from talos.engine import TradingEngine
-    from talos.game_manager import GameManager
+    from talos.game_manager import DEFAULT_NONSPORTS_CATEGORIES, GameManager
     from talos.game_status import GameStatusResolver
     from talos.lifecycle_feed import LifecycleFeed
     from talos.market_feed import MarketFeed
@@ -84,7 +84,14 @@ def main() -> None:
     lifecycle_feed = LifecycleFeed(ws_client=ws)
     position_feed = PositionFeed(ws_client=ws)
     auto_config = AutomationConfig()
-    game_mgr = GameManager(rest, feed, scanner, sports_enabled=auto_config.sports_enabled)
+    nonsports_categories = settings.get("nonsports_categories", DEFAULT_NONSPORTS_CATEGORIES)
+    nonsports_max_days = int(settings.get("nonsports_max_days", 7))  # type: ignore[arg-type]
+    game_mgr = GameManager(
+        rest, feed, scanner,
+        sports_enabled=auto_config.sports_enabled,
+        nonsports_categories=nonsports_categories,  # type: ignore[arg-type]
+        nonsports_max_days=nonsports_max_days,
+    )
     game_status_resolver = GameStatusResolver()
     db_dir = Path(__file__).resolve().parents[2]
     data_collector = DataCollector(db_dir / "talos_data.db")
