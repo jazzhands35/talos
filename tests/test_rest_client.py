@@ -802,3 +802,80 @@ class TestOrderGroups:
 
         _, kwargs = client._http.request.call_args
         assert "order_group_id" not in kwargs["json"]
+
+
+class TestGetAllEvents:
+    """Tests for paginated get_all_events()."""
+
+    async def test_single_page(
+        self, client: KalshiRESTClient, mock_auth: KalshiAuth
+    ) -> None:
+        """Single page of results — no cursor returned."""
+        client._http = AsyncMock(spec=httpx.AsyncClient)
+        client._http.request.return_value = _mock_response(200, {
+            "events": [
+                {
+                    "event_ticker": "EVT-1",
+                    "series_ticker": "SER-1",
+                    "title": "Test",
+                    "category": "Crypto",
+                    "markets": [],
+                }
+            ],
+            "cursor": "",
+        })
+        events = await client.get_all_events(status="open")
+        assert len(events) == 1
+        assert events[0].event_ticker == "EVT-1"
+
+    async def test_multi_page(
+        self, client: KalshiRESTClient, mock_auth: KalshiAuth
+    ) -> None:
+        """Two pages of results — follows cursor."""
+        page1 = _mock_response(200, {
+            "events": [
+                {"event_ticker": "EVT-1", "series_ticker": "S", "title": "A", "category": "Crypto", "markets": []},
+                {"event_ticker": "EVT-2", "series_ticker": "S", "title": "B", "category": "Crypto", "markets": []},
+            ],
+            "cursor": "abc123",
+        })
+        page2 = _mock_response(200, {
+            "events": [
+                {"event_ticker": "EVT-3", "series_ticker": "S", "title": "C", "category": "Crypto", "markets": []},
+            ],
+            "cursor": "",
+        })
+        client._http = AsyncMock(spec=httpx.AsyncClient)
+        client._http.request.side_effect = [page1, page2]
+        events = await client.get_all_events(status="open", page_size=2)
+        assert len(events) == 3
+        assert [e.event_ticker for e in events] == ["EVT-1", "EVT-2", "EVT-3"]
+
+    async def test_max_pages_safeguard(
+        self, client: KalshiRESTClient, mock_auth: KalshiAuth
+    ) -> None:
+        """Stops after max_pages even if cursor keeps coming."""
+        def _page(*args: object, **kwargs: object) -> httpx.Response:
+            return _mock_response(200, {
+                "events": [
+                    {"event_ticker": "EVT", "series_ticker": "S", "title": "T", "category": "C", "markets": []},
+                ],
+                "cursor": "more",
+            })
+        client._http = AsyncMock(spec=httpx.AsyncClient)
+        client._http.request.side_effect = _page
+        events = await client.get_all_events(status="open", max_pages=3)
+        assert len(events) == 3
+        assert client._http.request.call_count == 3
+
+    async def test_empty_result(
+        self, client: KalshiRESTClient, mock_auth: KalshiAuth
+    ) -> None:
+        """No events returned."""
+        client._http = AsyncMock(spec=httpx.AsyncClient)
+        client._http.request.return_value = _mock_response(200, {
+            "events": [],
+            "cursor": "",
+        })
+        events = await client.get_all_events(status="open")
+        assert events == []

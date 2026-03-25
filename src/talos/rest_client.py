@@ -106,6 +106,43 @@ class KalshiRESTClient:
         data = await self._request("GET", "/events", params=params)
         return [Event.model_validate(e) for e in data["events"]]
 
+    async def get_all_events(
+        self,
+        *,
+        status: str | None = None,
+        series_ticker: str | None = None,
+        with_nested_markets: bool = False,
+        min_close_ts: int | None = None,
+        page_size: int = 200,
+        max_pages: int = 20,
+    ) -> list[Event]:
+        """Fetch all events by paginating through cursor-based results.
+
+        Stops when the cursor is empty, fewer results than page_size are
+        returned, or max_pages is reached (safeguard against runaway queries).
+        """
+        all_events: list[Event] = []
+        cursor: str | None = None
+        for _ in range(max_pages):
+            params: dict[str, Any] = {"limit": page_size}
+            if status:
+                params["status"] = status
+            if series_ticker:
+                params["series_ticker"] = series_ticker
+            if with_nested_markets:
+                params["with_nested_markets"] = "true"
+            if min_close_ts is not None:
+                params["min_close_ts"] = min_close_ts
+            if cursor:
+                params["cursor"] = cursor
+            data = await self._request("GET", "/events", params=params)
+            events = [Event.model_validate(e) for e in data["events"]]
+            all_events.extend(events)
+            cursor = data.get("cursor")
+            if not cursor:
+                break
+        return all_events
+
     async def get_event(self, event_ticker: str, *, with_nested_markets: bool = False) -> Event:
         params: dict[str, Any] = {}
         if with_nested_markets:
