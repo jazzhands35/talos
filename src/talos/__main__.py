@@ -86,11 +86,13 @@ def main() -> None:
     auto_config = AutomationConfig()
     nonsports_categories = settings.get("nonsports_categories", DEFAULT_NONSPORTS_CATEGORIES)
     nonsports_max_days = int(settings.get("nonsports_max_days", 7))  # type: ignore[arg-type]
+    ticker_blacklist = settings.get("ticker_blacklist", [])
     game_mgr = GameManager(
         rest, feed, scanner,
         sports_enabled=auto_config.sports_enabled,
         nonsports_categories=nonsports_categories,  # type: ignore[arg-type]
         nonsports_max_days=nonsports_max_days,
+        ticker_blacklist=ticker_blacklist,  # type: ignore[arg-type]
     )
     game_status_resolver = GameStatusResolver()
     db_dir = Path(__file__).resolve().parents[2]
@@ -166,6 +168,14 @@ def main() -> None:
         save_settings(s)
 
     engine.on_unit_size_change = _persist_unit_size
+
+    # Wire blacklist persistence
+    def _persist_blacklist(blacklist: list[str]) -> None:
+        s = load_settings()
+        s["ticker_blacklist"] = blacklist
+        save_settings(s)
+
+    engine.on_blacklist_change = _persist_blacklist
 
     # Wire suggestion audit log
     log_path = Path(__file__).resolve().parents[2] / "suggestions.log"

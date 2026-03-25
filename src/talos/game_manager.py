@@ -187,6 +187,7 @@ class GameManager:
         sports_enabled: bool = True,
         nonsports_categories: list[str] | None = None,
         nonsports_max_days: int = 7,
+        ticker_blacklist: list[str] | None = None,
     ) -> None:
         self._rest = rest
         self._feed = feed
@@ -197,6 +198,7 @@ class GameManager:
             else DEFAULT_NONSPORTS_CATEGORIES
         )
         self._nonsports_max_days = nonsports_max_days
+        self._ticker_blacklist: list[str] = list(ticker_blacklist or [])
         self._games: dict[str, ArbPair] = {}
         self._labels: dict[str, str] = {}
         self._subtitles: dict[str, str] = {}
@@ -204,9 +206,42 @@ class GameManager:
         self._volumes_24h: dict[str, int] = {}  # market_ticker -> 24h volume
         self.on_change: Callable[[], None] | None = None
 
+    def is_blacklisted(self, ticker: str) -> bool:
+        """Check if a ticker matches any blacklist entry (prefix or exact)."""
+        return any(ticker.startswith(b) for b in self._ticker_blacklist)
+
+    def add_to_blacklist(self, entry: str) -> None:
+        """Add an entry to the blacklist (prefix or specific ticker)."""
+        if entry not in self._ticker_blacklist:
+            self._ticker_blacklist.append(entry)
+
+    async def remove_blacklisted_games(self) -> list[str]:
+        """Remove any currently monitored games that match the blacklist.
+
+        Returns list of removed event tickers.
+        """
+        to_remove = [
+            et for et, pair in self._games.items()
+            if self.is_blacklisted(et)
+            or self.is_blacklisted(pair.ticker_a)
+            or self.is_blacklisted(pair.series_ticker)
+            or (pair.kalshi_event_ticker and self.is_blacklisted(pair.kalshi_event_ticker))
+        ]
+        for et in to_remove:
+            await self.remove_game(et)
+        return to_remove
+
+    @property
+    def ticker_blacklist(self) -> list[str]:
+        """Current blacklist entries."""
+        return list(self._ticker_blacklist)
+
     async def add_game(self, url_or_ticker: str, *, subscribe: bool = True) -> ArbPair:
         """Set up monitoring for a game from a URL or event ticker."""
         ticker = parse_kalshi_url(url_or_ticker)
+
+        if self.is_blacklisted(ticker):
+            raise ValueError(f"Ticker blacklisted: {ticker}")
 
         if ticker in self._games:
             return self._games[ticker]
@@ -597,6 +632,8 @@ class GameManager:
                 for event in batch:
                     if event.event_ticker in all_active:
                         continue
+                    if self.is_blacklisted(event.event_ticker) or self.is_blacklisted(event.series_ticker):
+                        continue
                     active_mkts = [m for m in event.markets if m.status == "active"]
                     if len(active_mkts) != 2:
                         continue
@@ -618,6 +655,8 @@ class GameManager:
 
             for event in raw_events:
                 if event.event_ticker in all_active:
+                    continue
+                if self.is_blacklisted(event.event_ticker) or self.is_blacklisted(event.series_ticker):
                     continue
                 if event.series_ticker in _SPORTS_SET:
                     continue

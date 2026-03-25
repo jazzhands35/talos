@@ -153,6 +153,7 @@ class TradingEngine:
         # Callbacks for UI communication and persistence
         self.on_notification: Callable[[str, str, bool], None] | None = None
         self.on_unit_size_change: Callable[[int], None] | None = None
+        self.on_blacklist_change: Callable[[list[str]], None] | None = None
 
     # ── Read-only properties ─────────────────────────────────────────
 
@@ -232,6 +233,14 @@ class TradingEngine:
         logger.info("unit_size_changed", unit_size=size)
         if self.on_unit_size_change is not None:
             self.on_unit_size_change(size)
+
+    async def blacklist_ticker(self, entry: str) -> list[str]:
+        """Add entry to blacklist, remove matching games, persist. Returns removed tickers."""
+        self._game_manager.add_to_blacklist(entry)
+        removed = await self._game_manager.remove_blacklisted_games()
+        if self.on_blacklist_change is not None:
+            self.on_blacklist_change(self._game_manager.ticker_blacklist)
+        return removed
 
     # ── Exit-only mode ────────────────────────────────────────────
 
@@ -1657,6 +1666,8 @@ class TradingEngine:
             return
         pending_keys = {p.key for p in self._proposal_queue.pending()}
         for pair in self._scanner.pairs:
+            if self._game_manager.is_blacklisted(pair.event_ticker):
+                continue
             opp = self._scanner.get_opportunity(pair.event_ticker)
             if opp is None:
                 continue
@@ -2216,18 +2227,18 @@ class TradingEngine:
             # No position — show why proposer isn't suggesting (fall through)
             return self._compute_proposer_status(event_ticker)
 
-        # Settled — no resting orders and either balanced fills or markets closed
+        # Balanced — no resting orders and either balanced fills or markets closed
         if resting_a == 0 and resting_b == 0 and (filled_a > 0 or filled_b > 0):
             if filled_a == filled_b:
-                return "Settled"
-            # Unbalanced fills but markets closed → settled with loss
+                return "Balanced"
+            # Unbalanced fills but markets closed → balanced with loss
             pair = self._find_pair(event_ticker)
             if pair is not None:
                 books = self._feed.book_manager
                 no_ask_a = not books.best_ask(pair.ticker_a, side=pair.side_a)
                 no_ask_b = not books.best_ask(pair.ticker_b, side=pair.side_b)
                 if no_ask_a and no_ask_b:
-                    return "Settled"
+                    return "Balanced"
 
         # Jumped — resting orders not at top of market
         if resting_a > 0 or resting_b > 0:

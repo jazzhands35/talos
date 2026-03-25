@@ -68,6 +68,7 @@ class TalosApp(App):
         ("r", "review_event", "Review"),
         ("h", "settlement_history", "History"),
         ("l", "copy_activity_log", "Copy Log"),
+        ("b", "blacklist_ticker", "Blacklist"),
         ("q", "quit", "Quit"),
     ]
 
@@ -853,6 +854,34 @@ class TalosApp(App):
     async def _remove_game(self, event_ticker: str) -> None:
         if self._engine is not None:
             await self._engine.remove_game(event_ticker)
+
+    def action_blacklist_ticker(self) -> None:
+        if self._engine is None:
+            return
+        table = self.query_one(OpportunitiesTable)
+        if table.cursor_row is not None:
+            try:
+                row_key, _ = table.coordinate_to_cell_key(table.cursor_coordinate)
+                event_ticker = _event_ticker_from_row_key(str(row_key.value))
+                # Blacklist by series prefix (blocks entire series)
+                pair = self._engine.game_manager._games.get(event_ticker)
+                if pair and pair.series_ticker:
+                    entry = pair.series_ticker
+                else:
+                    entry = event_ticker.split("-")[0]
+                self._blacklist_ticker(entry)
+            except CellDoesNotExist:
+                logger.debug("blacklist_no_selection")
+
+    @work(thread=False)
+    async def _blacklist_ticker(self, entry: str) -> None:
+        if self._engine is not None:
+            removed = await self._engine.blacklist_ticker(entry)
+            self.notify(f"Blacklisted {entry} — removed {len(removed)} game(s)")
+            if removed:
+                table = self.query_one(OpportunitiesTable)
+                tracker = self._engine.tracker if self._engine else None
+                table.refresh_from_scanner(self._scanner, tracker)
 
     def action_approve_proposal(self) -> None:
         if self._engine is None:

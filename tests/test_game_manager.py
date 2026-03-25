@@ -801,3 +801,92 @@ class TestNonSportsScan:
         events = await mgr.scan_events()
         assert events == []
         mock_rest.get_all_events.assert_not_called()
+
+
+class TestTickerBlacklist:
+    """Tests for ticker blacklist filtering."""
+
+    @pytest.fixture()
+    def mock_rest(self) -> KalshiRESTClient:
+        rest = MagicMock(spec=KalshiRESTClient)
+        rest.get_event = AsyncMock()
+        rest.get_events = AsyncMock(return_value=[])
+        rest.get_all_events = AsyncMock(return_value=[])
+        rest.get_series = AsyncMock(
+            return_value=Series(
+                series_ticker="S", title="S", category="Crypto",
+                fee_type="quadratic_with_maker_fees", fee_multiplier=0.0175,
+            )
+        )
+        return rest
+
+    @pytest.fixture()
+    def manager(self, mock_rest: KalshiRESTClient) -> GameManager:
+        feed = MagicMock(spec=MarketFeed)
+        feed.subscribe = AsyncMock()
+        feed.subscribe_bulk = AsyncMock()
+        feed.unsubscribe = AsyncMock()
+        scanner = MagicMock(spec=ArbitrageScanner)
+        return GameManager(
+            rest=mock_rest,
+            feed=feed,
+            scanner=scanner,
+            sports_enabled=False,
+            nonsports_categories=["Crypto"],
+            nonsports_max_days=7,
+            ticker_blacklist=["KXSURV", "KXBTC-SPECIFIC"],
+        )
+
+    def test_prefix_match(self, manager: GameManager) -> None:
+        assert manager.is_blacklisted("KXSURV-SAFE-26MAR25") is True
+        assert manager.is_blacklisted("KXSURV") is True
+
+    def test_exact_match(self, manager: GameManager) -> None:
+        assert manager.is_blacklisted("KXBTC-SPECIFIC") is True
+
+    def test_no_match(self, manager: GameManager) -> None:
+        assert manager.is_blacklisted("KXOTHER-123") is False
+
+    def test_partial_no_match(self, manager: GameManager) -> None:
+        """KXBTC-OTHER should not match KXBTC-SPECIFIC."""
+        assert manager.is_blacklisted("KXBTC-OTHER") is False
+
+    async def test_add_game_rejects_blacklisted(
+        self, manager: GameManager
+    ) -> None:
+        with pytest.raises(ValueError, match="blacklisted"):
+            await manager.add_game("KXSURV-SAFE-26MAR25")
+
+    async def test_scan_excludes_blacklisted(
+        self, manager: GameManager, mock_rest: KalshiRESTClient
+    ) -> None:
+        close = (datetime.now(UTC) + timedelta(days=1)).isoformat()
+        mock_rest.get_all_events.return_value = [
+            _make_nonsports_event("E1", "KXSURV", "Crypto", close),
+            _make_nonsports_event("E2", "KXOTHER", "Crypto", close),
+        ]
+        events = await manager.scan_events()
+        tickers = [e.event_ticker for e in events]
+        assert "E1" not in tickers
+        assert "E2" in tickers
+
+    async def test_remove_blacklisted_games(
+        self, manager: GameManager, mock_rest: KalshiRESTClient
+    ) -> None:
+        close = (datetime.now(UTC) + timedelta(days=1)).isoformat()
+        ev = _make_nonsports_event("E1", "KXOTHER", "Crypto", close)
+        mock_rest.get_event.return_value = ev
+        await manager.add_game("E1")
+        assert len(manager.active_games) == 1
+        # Now blacklist and remove
+        manager.add_to_blacklist("KXOTHER")
+        removed = await manager.remove_blacklisted_games()
+        assert "E1-MKT0" in removed  # YES/NO pair keys on market ticker
+        assert len(manager.active_games) == 0
+
+    def test_add_to_blacklist(self, manager: GameManager) -> None:
+        manager.add_to_blacklist("KXNEW")
+        assert "KXNEW" in manager.ticker_blacklist
+        # No duplicates
+        manager.add_to_blacklist("KXNEW")
+        assert manager.ticker_blacklist.count("KXNEW") == 1

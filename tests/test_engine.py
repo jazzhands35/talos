@@ -725,9 +725,11 @@ def _engine_with_automation() -> tuple[TradingEngine, AsyncMock]:
         stability_seconds=0.0,
         enabled=True,
     )
+    gm = MagicMock(spec=GameManager)
+    gm.is_blacklisted.return_value = False
     engine = TradingEngine(
         scanner=scanner,
-        game_manager=MagicMock(spec=GameManager),
+        game_manager=gm,
         rest_client=rest,
         market_feed=MagicMock(spec=MarketFeed),
         tracker=TopOfMarketTracker(books),
