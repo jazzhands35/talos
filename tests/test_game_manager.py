@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import UTC, datetime, timedelta
 from unittest.mock import AsyncMock, MagicMock, Mock
 
 import pytest
@@ -657,3 +658,146 @@ class TestSeriesTicker:
             with_nested_markets=True,
             limit=200,
         )
+
+
+def _make_nonsports_event(
+    event_ticker: str,
+    series_ticker: str,
+    category: str,
+    close_time: str | None,
+    *,
+    market_count: int = 1,
+    status: str = "active",
+) -> Event:
+    """Helper to create non-sports events for scan tests."""
+    markets = [
+        Market(
+            ticker=f"{event_ticker}-MKT{i}",
+            event_ticker=event_ticker,
+            title=f"Market {i}",
+            status=status,
+            close_time=close_time,
+        )
+        for i in range(market_count)
+    ]
+    return Event(
+        event_ticker=event_ticker,
+        series_ticker=series_ticker,
+        title=f"Test {event_ticker}",
+        category=category,
+        status="open",
+        markets=markets,
+    )
+
+
+class TestNonSportsScan:
+    """Tests for non-sports scan path in scan_events()."""
+
+    @pytest.fixture()
+    def mock_rest(self) -> KalshiRESTClient:
+        rest = MagicMock(spec=KalshiRESTClient)
+        rest.get_event = AsyncMock()  # needed for add_game() in already-monitored test
+        rest.get_events = AsyncMock(return_value=[])
+        rest.get_all_events = AsyncMock(return_value=[])
+        rest.get_series = AsyncMock(
+            return_value=Series(
+                series_ticker="S", title="S", category="Crypto",
+                fee_type="quadratic_with_maker_fees", fee_multiplier=0.0175,
+            )
+        )
+        return rest
+
+    @pytest.fixture()
+    def manager(self, mock_rest: KalshiRESTClient) -> GameManager:
+        feed = MagicMock(spec=MarketFeed)
+        feed.subscribe = AsyncMock()
+        feed.subscribe_bulk = AsyncMock()
+        scanner = MagicMock(spec=ArbitrageScanner)
+        return GameManager(
+            rest=mock_rest,
+            feed=feed,
+            scanner=scanner,
+            sports_enabled=False,
+            nonsports_categories=["Crypto", "Politics"],
+            nonsports_max_days=7,
+        )
+
+    async def test_filters_by_category(
+        self, manager: GameManager, mock_rest: KalshiRESTClient
+    ) -> None:
+        close = (datetime.now(UTC) + timedelta(days=3)).isoformat()
+        mock_rest.get_all_events.return_value = [
+            _make_nonsports_event("E1", "KXBTC", "Crypto", close),
+            _make_nonsports_event("E2", "KXWX", "Climate and Weather", close),
+        ]
+        events = await manager.scan_events()
+        tickers = [e.event_ticker for e in events]
+        assert "E1" in tickers
+        assert "E2" not in tickers
+
+    async def test_filters_by_time_window(
+        self, manager: GameManager, mock_rest: KalshiRESTClient
+    ) -> None:
+        within = (datetime.now(UTC) + timedelta(days=3)).isoformat()
+        beyond = (datetime.now(UTC) + timedelta(days=14)).isoformat()
+        mock_rest.get_all_events.return_value = [
+            _make_nonsports_event("E1", "KXBTC", "Crypto", within),
+            _make_nonsports_event("E2", "KXBTC2", "Crypto", beyond),
+        ]
+        events = await manager.scan_events()
+        tickers = [e.event_ticker for e in events]
+        assert "E1" in tickers
+        assert "E2" not in tickers
+
+    async def test_excludes_sports_series(
+        self, manager: GameManager, mock_rest: KalshiRESTClient
+    ) -> None:
+        close = (datetime.now(UTC) + timedelta(days=1)).isoformat()
+        mock_rest.get_all_events.return_value = [
+            _make_nonsports_event("E1", "KXNHLGAME", "Crypto", close),
+        ]
+        events = await manager.scan_events()
+        assert len(events) == 0
+
+    async def test_excludes_no_active_markets(
+        self, manager: GameManager, mock_rest: KalshiRESTClient
+    ) -> None:
+        close = (datetime.now(UTC) + timedelta(days=1)).isoformat()
+        mock_rest.get_all_events.return_value = [
+            _make_nonsports_event("E1", "KXBTC", "Crypto", close, status="closed"),
+        ]
+        events = await manager.scan_events()
+        assert len(events) == 0
+
+    async def test_excludes_null_close_time(
+        self, manager: GameManager, mock_rest: KalshiRESTClient
+    ) -> None:
+        mock_rest.get_all_events.return_value = [
+            _make_nonsports_event("E1", "KXBTC", "Crypto", None),
+        ]
+        events = await manager.scan_events()
+        assert len(events) == 0
+
+    async def test_excludes_already_monitored(
+        self, manager: GameManager, mock_rest: KalshiRESTClient
+    ) -> None:
+        close = (datetime.now(UTC) + timedelta(days=1)).isoformat()
+        ev = _make_nonsports_event("E1", "KXBTC", "Crypto", close)
+        mock_rest.get_all_events.return_value = [ev]
+        mock_rest.get_event.return_value = ev
+        await manager.add_game("E1")
+        events = await manager.scan_events()
+        assert len(events) == 0
+
+    async def test_empty_categories_disables_scan(
+        self, mock_rest: KalshiRESTClient
+    ) -> None:
+        feed = MagicMock(spec=MarketFeed)
+        scanner = MagicMock(spec=ArbitrageScanner)
+        mgr = GameManager(
+            rest=mock_rest, feed=feed, scanner=scanner,
+            sports_enabled=False, nonsports_categories=[], nonsports_max_days=7,
+        )
+        events = await mgr.scan_events()
+        assert events == []
+        mock_rest.get_all_events.assert_not_called()

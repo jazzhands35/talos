@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Callable
+from datetime import UTC, datetime, timedelta
 from urllib.parse import urlparse
 
 import structlog
@@ -97,12 +98,21 @@ SPORTS_SERIES = [
     "KXIWWMN",
 ]
 
-NON_SPORTS_SERIES: list[str] = []
-
 _SPORTS_SET = set(SPORTS_SERIES)
 
 # Backward-compatible alias for external consumers
 SCAN_SERIES = SPORTS_SERIES
+
+DEFAULT_NONSPORTS_CATEGORIES: list[str] = [
+    "Climate and Weather",
+    "Crypto",
+    "Companies",
+    "Politics",
+    "Science and Technology",
+    "Mentions",
+    "Entertainment",
+    "World",
+]
 
 
 def parse_kalshi_url(url_or_ticker: str) -> str:
@@ -147,6 +157,21 @@ def extract_leg_labels(sub_title: str) -> tuple[str, str]:
     return (label, label)
 
 
+def _has_market_closing_within(event: Event, max_days: int) -> bool:
+    """Check if any active market on the event closes within max_days from now."""
+    cutoff = datetime.now(UTC) + timedelta(days=max_days)
+    for m in event.markets:
+        if m.status != "active" or not m.close_time:
+            continue
+        try:
+            close_dt = datetime.fromisoformat(m.close_time.replace("Z", "+00:00"))
+            if close_dt <= cutoff:
+                return True
+        except (ValueError, TypeError):
+            continue
+    return False
+
+
 class GameManager:
     """Orchestrates game setup, teardown, and ties layers together.
 
@@ -160,11 +185,18 @@ class GameManager:
         scanner: ArbitrageScanner,
         *,
         sports_enabled: bool = True,
+        nonsports_categories: list[str] | None = None,
+        nonsports_max_days: int = 7,
     ) -> None:
         self._rest = rest
         self._feed = feed
         self._scanner = scanner
         self._sports_enabled = sports_enabled
+        self._nonsports_categories: set[str] = set(
+            nonsports_categories if nonsports_categories is not None
+            else DEFAULT_NONSPORTS_CATEGORIES
+        )
+        self._nonsports_max_days = nonsports_max_days
         self._games: dict[str, ArbPair] = {}
         self._labels: dict[str, str] = {}
         self._subtitles: dict[str, str] = {}
@@ -536,43 +568,69 @@ class GameManager:
     async def scan_events(self) -> list[Event]:
         """Discover all open arb-eligible events not already monitored."""
         active_tickers = {p.event_ticker for p in self.active_games}
+        active_kalshi_tickers = {
+            p.kalshi_event_ticker for p in self.active_games
+            if p.kalshi_event_ticker
+        }
+        all_active = active_tickers | active_kalshi_tickers
+
         sem = asyncio.Semaphore(4)
 
-        # Use appropriate series list based on sports toggle
-        series_list: list[str] = []
+        # --- Sports path (unchanged) ---
+        sports_events: list[Event] = []
         if self._sports_enabled:
-            series_list.extend(SPORTS_SERIES)
-        series_list.extend(NON_SPORTS_SERIES)
+            async def fetch_series(series: str) -> list[Event]:
+                async with sem:
+                    try:
+                        return await self._rest.get_events(
+                            series_ticker=series,
+                            status="open",
+                            with_nested_markets=True,
+                            limit=200,
+                        )
+                    except Exception:
+                        logger.warning("scan_series_failed", series=series, exc_info=True)
+                        return []
 
-        async def fetch_series(series: str) -> list[Event]:
-            async with sem:
-                try:
-                    return await self._rest.get_events(
-                        series_ticker=series,
-                        status="open",
-                        with_nested_markets=True,
-                        limit=200,
-                    )
-                except Exception:
-                    logger.warning("scan_series_failed", series=series, exc_info=True)
-                    return []
+            all_results = await asyncio.gather(*(fetch_series(s) for s in SPORTS_SERIES))
+            for batch in all_results:
+                for event in batch:
+                    if event.event_ticker in all_active:
+                        continue
+                    active_mkts = [m for m in event.markets if m.status == "active"]
+                    if len(active_mkts) != 2:
+                        continue
+                    sports_events.append(event)
 
-        all_results = await asyncio.gather(*(fetch_series(s) for s in series_list))
+        # --- Non-sports path (new) ---
+        nonsports_events: list[Event] = []
+        if self._nonsports_categories:
+            min_close_ts = int(datetime.now(UTC).timestamp())
+            try:
+                raw_events = await self._rest.get_all_events(
+                    status="open",
+                    with_nested_markets=True,
+                    min_close_ts=min_close_ts,
+                )
+            except Exception:
+                logger.warning("nonsports_scan_failed", exc_info=True)
+                raw_events = []
 
-        events: list[Event] = []
-        for batch in all_results:
-            for event in batch:
-                if event.event_ticker in active_tickers:
+            for event in raw_events:
+                if event.event_ticker in all_active:
+                    continue
+                if event.series_ticker in _SPORTS_SET:
+                    continue
+                if event.category not in self._nonsports_categories:
                     continue
                 active_mkts = [m for m in event.markets if m.status == "active"]
-                # Sports: exactly 2 markets. Non-sports: any number of active markets.
-                is_sports = event.series_ticker in _SPORTS_SET
-                if is_sports and len(active_mkts) != 2:
+                if len(active_mkts) == 0:
                     continue
-                if not is_sports and len(active_mkts) == 0:
+                if not _has_market_closing_within(event, self._nonsports_max_days):
                     continue
-                events.append(event)
-        return events
+                nonsports_events.append(event)
+
+        return sports_events + nonsports_events
 
     @property
     def active_games(self) -> list[ArbPair]:
