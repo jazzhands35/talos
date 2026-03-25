@@ -707,6 +707,107 @@ class _PickerTable(DataTable):
         super()._on_key(event)
 
 
+class BlacklistScreen(ModalScreen[list[str] | None]):
+    """Modal for editing the ticker blacklist."""
+
+    DEFAULT_CSS = """
+    BlacklistScreen {
+        align: center middle;
+    }
+    #blacklist-dialog {
+        width: 70;
+        height: 24;
+        border: thick $surface;
+        background: $surface;
+        padding: 1 2;
+    }
+    #blacklist-dialog Label {
+        width: 100%;
+        margin: 0 0 1 0;
+    }
+    #blacklist-table {
+        height: 1fr;
+    }
+    #blacklist-input {
+        margin: 1 0 0 0;
+    }
+    """
+
+    BINDINGS = [
+        ("escape", "cancel", "Cancel"),
+        ("delete", "delete_entry", "Delete"),
+    ]
+
+    def __init__(self, entries: list[str]) -> None:
+        super().__init__()
+        self._entries = list(entries)
+
+    def action_cancel(self) -> None:
+        self.dismiss(None)
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="blacklist-dialog"):
+            yield Label(
+                f"Ticker Blacklist — {len(self._entries)} entries  "
+                "Del:Remove  Enter:Add  Esc:Done",
+                classes="modal-title",
+                markup=False,
+            )
+            yield DataTable(id="blacklist-table")
+            yield Input(
+                placeholder="Add prefix or ticker (e.g. KXSURV)",
+                id="blacklist-input",
+            )
+
+    def on_mount(self) -> None:
+        table = self.query_one("#blacklist-table", DataTable)
+        table.cursor_type = "row"
+        table.zebra_stripes = True
+        table.add_column("Entry", width=40)
+        table.add_column("Type", width=10)
+        self._rebuild_table()
+
+    def _rebuild_table(self) -> None:
+        table = self.query_one("#blacklist-table", DataTable)
+        table.clear()
+        for entry in sorted(self._entries):
+            kind = "prefix" if len(entry.split("-")) == 1 else "ticker"
+            table.add_row(entry, kind, key=entry)
+        self.query_one("#blacklist-dialog Label", Label).update(
+            f"Ticker Blacklist — {len(self._entries)} entries  "
+            "Del:Remove  Enter:Add  Esc:Done"
+        )
+
+    def action_delete_entry(self) -> None:
+        table = self.query_one("#blacklist-table", DataTable)
+        if table.cursor_row is None or table.row_count == 0:
+            return
+        try:
+            row_key, _ = table.coordinate_to_cell_key(table.cursor_coordinate)
+            entry = str(row_key.value)
+            if entry in self._entries:
+                self._entries.remove(entry)
+                self._rebuild_table()
+        except Exception:
+            pass
+
+    def on_input_submitted(self, event: Input.Submitted) -> None:
+        value = event.value.strip().upper()
+        if not value:
+            return
+        if value not in self._entries:
+            self._entries.append(value)
+            self._rebuild_table()
+        event.input.value = ""
+
+    def on_key(self, event: Key) -> None:
+        if event.key == "enter" and self.query_one("#blacklist-input", Input).has_focus:
+            return  # Let Input.Submitted handle it
+        if event.key == "enter" and not self.query_one("#blacklist-input", Input).has_focus:
+            # Dismiss with updated list
+            self.dismiss(self._entries)
+
+
 class MarketPickerScreen(ModalScreen[list[Market]]):
     """Select markets from a non-sports event for YES/NO arb monitoring."""
 

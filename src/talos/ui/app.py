@@ -69,6 +69,7 @@ class TalosApp(App):
         ("h", "settlement_history", "History"),
         ("l", "copy_activity_log", "Copy Log"),
         ("b", "blacklist_ticker", "Blacklist"),
+        ("B", "edit_blacklist", "Edit Blacklist"),
         ("q", "quit", "Quit"),
     ]
 
@@ -882,6 +883,36 @@ class TalosApp(App):
                 table = self.query_one(OpportunitiesTable)
                 tracker = self._engine.tracker if self._engine else None
                 table.refresh_from_scanner(self._scanner, tracker)
+
+    def action_edit_blacklist(self) -> None:
+        if self._engine is None:
+            return
+        from talos.ui.screens import BlacklistScreen
+
+        current = self._engine.game_manager.ticker_blacklist
+        self._show_blacklist_editor(current)
+
+    @work(thread=False)
+    async def _show_blacklist_editor(self, current: list[str]) -> None:
+        from talos.ui.screens import BlacklistScreen
+
+        result = await self.push_screen_wait(BlacklistScreen(current))
+        if result is None or self._engine is None:
+            return
+        # Replace the full blacklist
+        gm = self._engine.game_manager
+        gm._ticker_blacklist = list(result)
+        removed = await gm.remove_blacklisted_games()
+        if self._engine.on_blacklist_change is not None:
+            self._engine.on_blacklist_change(gm.ticker_blacklist)
+        msg = f"Blacklist updated — {len(result)} entries"
+        if removed:
+            msg += f", removed {len(removed)} game(s)"
+        self.notify(msg)
+        if removed:
+            table = self.query_one(OpportunitiesTable)
+            tracker = self._engine.tracker if self._engine else None
+            table.refresh_from_scanner(self._scanner, tracker)
 
     def action_approve_proposal(self) -> None:
         if self._engine is None:
