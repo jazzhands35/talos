@@ -236,6 +236,48 @@ The subclass overrides:
 
 All other behavior (bid placement, rebalance, proposals, settlement history, event review, keybindings) is inherited unchanged.
 
+### Portfolio Panel Replacement
+
+Talos's `PortfolioPanel` shows cash, locked, exposure, invested, and historical P&L. This is replaced entirely in Argo with a simpler **pair status summary** that gives an at-a-glance view of trading progress.
+
+**ArgoPortfolioPanel display:**
+
+```
+Completed: 12
+Partial:    3
+Open:       8
+───────────────────
+Tickers:  45
+Active:   23
+```
+
+**Definitions (all relative to `unit_size` / batch size):**
+
+| Metric | Definition |
+|--------|-----------|
+| **Completed** | Fully arbed pairs — full batch filled on BOTH YES and NO. Per ticker: `min(yes_qty, no_qty) // unit_size`. Summed across all tickers. |
+| **Partial** | Pairs with some fills but not a matched full batch on both sides. Per ticker: after removing completed batches, if any remaining position exists on either side, count the unmatched batches (full or partial). Summed across all tickers. |
+| **Open** | Pairs with resting bids on at least one side but ZERO fills on both sides. Summed across all tickers. |
+| **Tickers** | Total number of market tickers currently in the opportunities table. |
+| **Active** | Number of tickers where we have either a position (fills > 0) OR resting orders. |
+
+**Worked example** (unit_size = 10):
+
+| Ticker | YES filled | NO filled | Resting? | Completed | Partial | Open |
+|--------|-----------|----------|----------|-----------|---------|------|
+| HARPER-3 | 20 | 10 | — | 1 | 1 | 0 |
+| SEAGER-2 | 10 | 10 | — | 1 | 0 | 0 |
+| BOHM-1 | 5 | 0 | — | 0 | 1 | 0 |
+| TURNER-4 | 0 | 0 | YES bid | 0 | 0 | 1 |
+| **Totals** | | | | **2** | **2** | **1** |
+
+For HARPER-3: `min(20, 10) // 10 = 1` completed. Remaining: 10 YES, 0 NO → 1 unmatched batch → 1 partial.
+For BOHM-1: `min(5, 0) // 10 = 0` completed. 5 YES remaining → partial fill, not a full batch, but still counts as 1 partial.
+
+**Data sources:** The panel reads from `PositionLedger` (fill counts per ticker per side) and `TradingEngine` (resting order state). It refreshes on every position or order state change, same as the existing panel.
+
+**Implementation:** New `ArgoPortfolioPanel(Static)` widget in `src/argo/widgets.py`. ArgoApp's `compose()` mounts this instead of the Talos `PortfolioPanel`.
+
 ### Configuration
 
 `src/argo/config.py`:
@@ -324,6 +366,13 @@ packages = ["src/talos", "src/drip", "src/argo"]
 - Unit size configuration
 - Market blacklisting
 - All keybindings (except scan, which is overridden)
+
+## What Argo Replaces
+
+| Talos Component | Argo Replacement | Reason |
+|----------------|-----------------|--------|
+| `PortfolioPanel` (cash, locked, exposure, P&L) | `ArgoPortfolioPanel` (completed/partial/open pairs, ticker counts) | Pair status is more actionable than raw account metrics for prop trading |
+| `ScanScreen` (2-market sports events) | `ArgoScanScreen` (multi-market prop events) | MLB props have 70-85 markets per event |
 
 ## What Argo Removes / Does Not Include
 
