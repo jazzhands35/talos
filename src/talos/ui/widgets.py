@@ -264,13 +264,14 @@ class OpportunitiesTable(DataTable):
         1: "label",  # Team name (col 1)
         2: "sport",  # Sport (col 2)
         3: "league",  # Lg (col 3)
-        4: "state",  # Game (col 4)
-        5: "no_a",  # Price (col 5)
-        6: "vol_a",  # Vol (col 6)
-        11: "fee_edge",  # Edge (col 11)
-        12: "status",  # Status (col 12)
-        13: "locked",  # Locked profit (col 13)
-        14: "exposure",  # Exposure (col 14)
+        4: "date",  # Date (col 4)
+        5: "state",  # Game (col 5)
+        6: "no_a",  # Price (col 6)
+        7: "vol_a",  # Vol (col 7)
+        12: "fee_edge",  # Edge (col 12)
+        13: "status",  # Status (col 13)
+        14: "locked",  # Locked profit (col 14)
+        15: "exposure",  # Exposure (col 15)
     }
 
     def __init__(self, **kwargs: Any) -> None:
@@ -324,17 +325,18 @@ class OpportunitiesTable(DataTable):
         self.add_column("Team")  # 1: Team name
         self.add_column("Sport", width=6)  # 2: Sport / series prefix
         self.add_column("Lg", width=5)  # 3: League / submarket
-        self.add_column(RichText("Game", justify=r), width=9)  # 4: Game status
-        self.add_column(RichText("Price", justify=r), width=5)  # 5: Leg price
-        self.add_column(RichText("24h Vol", justify=r), width=7)  # 6: 24h Volume
-        self.add_column(RichText("Pos", justify=r), width=14)  # 7: Position
-        self.add_column(RichText("Queue", justify=r), width=6)  # 8: Queue position
-        self.add_column(RichText("CPM", justify=r), width=8)  # 9: Contracts/min
-        self.add_column(RichText("ETA", justify=r), width=7)  # 10: Est. time to fill
-        self.add_column(RichText("Edge", justify=r), width=6)  # 11: Fee-adjusted edge
-        self.add_column("Status", width=16)  # 12: Event status
-        self.add_column(RichText("Locked", justify=r), width=10)  # 13: Locked profit
-        self.add_column(RichText("Expos", justify=r), width=10)  # 14: Exposure
+        self.add_column(RichText("Date", justify=r), width=6)  # 4: Date
+        self.add_column(RichText("Game", justify=r), width=9)  # 5: Game status
+        self.add_column(RichText("Price", justify=r), width=5)  # 6: Leg price
+        self.add_column(RichText("24h Vol", justify=r), width=7)  # 7: 24h Volume
+        self.add_column(RichText("Pos", justify=r), width=14)  # 8: Position
+        self.add_column(RichText("Queue", justify=r), width=6)  # 9: Queue position
+        self.add_column(RichText("CPM", justify=r), width=8)  # 10: Contracts/min
+        self.add_column(RichText("ETA", justify=r), width=7)  # 11: Est. time to fill
+        self.add_column(RichText("Edge", justify=r), width=6)  # 12: Fee-adjusted edge
+        self.add_column("Status", width=16)  # 13: Event status
+        self.add_column(RichText("Locked", justify=r), width=10)  # 14: Locked profit
+        self.add_column(RichText("Expos", justify=r), width=10)  # 15: Exposure
 
     def _get_row_style(self, row_index: int, base_style: RichStyle) -> RichStyle:  # type: ignore[override]
         """Pair striping: alternate background per event pair (every 2 rows)."""
@@ -433,6 +435,18 @@ class OpportunitiesTable(DataTable):
             return (self._event_statuses.get(opp.event_ticker) or "").lower()
         if key_name == "vol_a":
             return self._volumes_24h.get(opp.ticker_a, 0)
+        if key_name == "date":
+            gs = self._resolver.get(opp.event_ticker) if self._resolver else None
+            if gs and gs.scheduled_start:
+                return gs.scheduled_start.timestamp()
+            if opp.close_time:
+                try:
+                    return datetime.fromisoformat(
+                        opp.close_time.replace("Z", "+00:00")
+                    ).timestamp()
+                except (ValueError, TypeError):
+                    pass
+            return 0.0
         if key_name == "state":
             gs = self._resolver.get(opp.event_ticker) if self._resolver else None
             order = {"live": 0, "pre": 1, "post": 2, "unknown": 3}
@@ -557,6 +571,18 @@ class OpportunitiesTable(DataTable):
         game_status = self._resolver.get(opp.event_ticker) if self._resolver else None
         game_col = _fmt_game_status(game_status)
 
+        # Date column: prefer GameStatus scheduled_start, fall back to close_time
+        if game_status is not None and game_status.scheduled_start is not None:
+            date_col = _fmt_game_date(game_status.scheduled_start)
+        elif opp.close_time:
+            try:
+                ct = datetime.fromisoformat(opp.close_time.replace("Z", "+00:00"))
+                date_col = RichText(ct.astimezone(_PT).strftime("%m/%d"), justify="right")
+            except (ValueError, TypeError):
+                date_col = DIM_DASH
+        else:
+            date_col = DIM_DASH
+
         # Position data
         pos = self._positions.get(opp.event_ticker)
         if pos is not None:
@@ -640,6 +666,7 @@ class OpportunitiesTable(DataTable):
             team_a,
             sport,
             league,
+            date_col,
             game_col,
             no_a,
             vol_a,
@@ -657,6 +684,7 @@ class OpportunitiesTable(DataTable):
         row2 = (
             dot_b,
             team_b,
+            "",
             "",
             "",
             "",

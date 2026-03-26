@@ -157,19 +157,25 @@ def extract_leg_labels(sub_title: str) -> tuple[str, str]:
     return (label, label)
 
 
+def _market_closes_within(market: Market, max_days: int) -> bool:
+    """Check if a single market closes within max_days from now."""
+    if not market.close_time:
+        return False
+    try:
+        cutoff = datetime.now(UTC) + timedelta(days=max_days)
+        close_dt = datetime.fromisoformat(market.close_time.replace("Z", "+00:00"))
+        return close_dt <= cutoff
+    except (ValueError, TypeError):
+        return False
+
+
 def _has_market_closing_within(event: Event, max_days: int) -> bool:
     """Check if any active market on the event closes within max_days from now."""
-    cutoff = datetime.now(UTC) + timedelta(days=max_days)
-    for m in event.markets:
-        if m.status != "active" or not m.close_time:
-            continue
-        try:
-            close_dt = datetime.fromisoformat(m.close_time.replace("Z", "+00:00"))
-            if close_dt <= cutoff:
-                return True
-        except (ValueError, TypeError):
-            continue
-    return False
+    return any(
+        _market_closes_within(m, max_days)
+        for m in event.markets
+        if m.status == "active"
+    )
 
 
 class GameManager:
@@ -526,8 +532,13 @@ class GameManager:
                     if propagate_picker:
                         raise
                     # Batch mode: auto-add each market as its own YES/NO pair
+                    # Only add markets that individually close within the time window
                     added: list[ArbPair] = []
                     for market in e.markets:
+                        if market.status != "active":
+                            continue
+                        if self._nonsports_max_days and not _market_closes_within(market, self._nonsports_max_days):
+                            continue
                         try:
                             p = await self.add_market_as_pair(
                                 e.event, market, subscribe=False,

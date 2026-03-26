@@ -35,20 +35,20 @@ def test_extract_leg_labels_empty():
 
 
 def test_freshness_dot_fresh():
-    """< 5 seconds → green dot."""
+    """< 30 seconds → green dot."""
     result = _fmt_freshness(2.0)
     assert "●" in str(result)
 
 
 def test_freshness_dot_warming():
-    """5-30 seconds → yellow dot."""
-    result = _fmt_freshness(15.0)
+    """30-120 seconds → yellow dot."""
+    result = _fmt_freshness(60.0)
     assert "●" in str(result)
 
 
 def test_freshness_dot_stale():
-    """30+ seconds → red dot."""
-    result = _fmt_freshness(45.0)
+    """120+ seconds → red dot."""
+    result = _fmt_freshness(150.0)
     assert "●" in str(result)
 
 
@@ -89,6 +89,6 @@ def test_build_two_rows_returns_pair():
     assert "Boston Bruins" in str(row1[1])
     # Row 2 should have team name "Washington Capitals"
     assert "Washington Capitals" in str(row2[1])
-    # Both rows have 15 cells (added Sport column)
-    assert len(row1) == 15
-    assert len(row2) == 15
+    # Both rows have 16 cells (added Date column)
+    assert len(row1) == 16
+    assert len(row2) == 16
