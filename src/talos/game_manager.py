@@ -537,6 +537,8 @@ class GameManager:
                     for market in e.markets:
                         if market.status != "active":
                             continue
+                        if (market.volume_24h or 0) == 0:
+                            continue
                         if self._nonsports_max_days and not _market_closes_within(market, self._nonsports_max_days):
                             continue
                         try:
@@ -688,8 +690,7 @@ class GameManager:
                 active_mkts = [m for m in event.markets if m.status == "active"]
                 if len(active_mkts) == 0:
                     continue
-                if all((m.volume_24h or 0) == 0 for m in active_mkts):
-                    continue
+                # Per-market volume filter happens at batch-add time, not here
                 if not _has_market_closing_within(event, self._nonsports_max_days):
                     continue
                 nonsports_events.append(event)
