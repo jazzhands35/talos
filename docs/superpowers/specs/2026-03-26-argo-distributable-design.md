@@ -278,6 +278,32 @@ For BOHM-1: `min(5, 0) // 10 = 0` completed. 5 YES remaining → partial fill, n
 
 **Implementation:** New `ArgoPortfolioPanel(Static)` widget in `src/argo/widgets.py`. ArgoApp's `compose()` mounts this instead of the Talos `PortfolioPanel`.
 
+### Zero-Fee Configuration
+
+MLB player props are currently fee-free on Kalshi. Argo hardcodes this rather than reading it from the API, so behavior doesn't silently change if Kalshi adds fees later.
+
+**How it works:** The existing fee system is fully parameterized — every `ArbPair` carries `fee_type` and `fee_rate`, propagated through scanner edge calculations, rebalance catch-up pricing, `max_profitable_price()`, and position safety checks. Argo overrides these at pair construction time:
+
+```python
+# In Argo's add flow, when constructing ArbPair:
+ArbPair(
+    ...,
+    fee_type="fee_free",   # from argo.config.FEE_TYPE
+    fee_rate=0.0,           # from argo.config.FEE_RATE
+)
+```
+
+The existing `compute_fee()` in `fees.py:34` already returns `0.0` for `fee_type="fee_free"`. No changes to any fee calculation code — this is purely a config override at pair construction.
+
+**Impact on calculations:**
+- `fee_adjusted_edge()` → raw edge (no fee deduction)
+- `fee_adjusted_cost()` → just the NO price (no fee added)
+- `max_profitable_price()` → higher ceiling (no fee drag)
+- `scenario_pnl()` → higher per-pair profit
+- Scanner opportunity detection → more opportunities surface (lower threshold)
+
+**Future:** When Kalshi adds fees to MLB props, update `FEE_TYPE` and `FEE_RATE` in `argo/config.py` and rebuild.
+
 ### Configuration
 
 `src/argo/config.py`:
@@ -296,6 +322,11 @@ SERIES_LABELS = {
 }
 
 DEFAULT_UNIT_SIZE = 10
+
+# MLB props are currently fee-free on Kalshi.
+# Hardcode this so Argo ignores any future API fee_type changes.
+FEE_TYPE = "fee_free"
+FEE_RATE = 0.0
 ```
 
 ## Build
