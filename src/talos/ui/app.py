@@ -706,8 +706,20 @@ class TalosApp(App):
             )
 
         if selected and self._engine is not None:
-            await self._engine.add_games(selected)
-            self.notify(f"Added {len(selected)} event(s)")
+            pairs = await self._engine.add_games(selected)
+            skipped = len(selected) - len(pairs)
+            msg = f"Added {len(pairs)} event(s)"
+            if skipped:
+                msg += f" ({skipped} skipped — multi-market or failed)"
+            self.notify(msg)
+            # Refresh table immediately so new rows appear
+            table = self.query_one(OpportunitiesTable)
+            gm = self._engine.game_manager
+            table.update_labels(gm.labels)
+            table.update_leg_labels(gm.leg_labels)
+            table.update_volumes(gm.volumes_24h)
+            tracker = self._engine.tracker if self._engine else None
+            table.refresh_from_scanner(self._scanner, tracker)
 
     def action_review_event(self) -> None:
         """Open the event review panel for the selected row."""
