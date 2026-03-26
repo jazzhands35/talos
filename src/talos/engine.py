@@ -1842,6 +1842,20 @@ class TradingEngine:
             # "post only cross" means our local book is stale — the price we
             # tried would immediately match on Kalshi's real book. Resubscribe
             # to get a fresh snapshot and correct our local state.
+            # 403 "not permitted" = market restricted, auto-blacklist to stop retrying
+            is_not_permitted = (
+                isinstance(e, KalshiAPIError)
+                and e.status_code == 403
+                and "not_permitted" in str(e).lower()
+            )
+            if is_not_permitted and event_ticker:
+                series = event_ticker.split("-")[0]
+                self._game_manager.add_to_blacklist(series)
+                if self.on_blacklist_change is not None:
+                    self.on_blacklist_change(self._game_manager.ticker_blacklist)
+                logger.info("auto_blacklisted_not_permitted", series=series)
+                self._notify(f"Auto-blacklisted {series} (not permitted)", "warning")
+
             is_cross = (
                 isinstance(e, KalshiAPIError)
                 and "post only cross" in str(e).lower()
