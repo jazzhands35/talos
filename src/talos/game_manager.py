@@ -517,21 +517,31 @@ class GameManager:
         # Multiple URLs (batch): swallow it (discovery can't show picker).
         propagate_picker = len(urls) == 1
 
-        async def _add(url: str) -> ArbPair | None:
+        async def _add(url: str) -> list[ArbPair]:
             async with sem:
                 try:
-                    return await self.add_game(url, subscribe=False)
-                except MarketPickerNeeded:
+                    pair = await self.add_game(url, subscribe=False)
+                    return [pair]
+                except MarketPickerNeeded as e:
                     if propagate_picker:
                         raise
-                    logger.info("add_game_needs_picker", url=url)
-                    return None
+                    # Batch mode: auto-add each market as its own YES/NO pair
+                    added: list[ArbPair] = []
+                    for market in e.markets:
+                        try:
+                            p = await self.add_market_as_pair(
+                                e.event, market, subscribe=False,
+                            )
+                            added.append(p)
+                        except Exception:
+                            logger.debug("auto_add_market_failed", ticker=market.ticker)
+                    return added
                 except Exception:
                     logger.warning("add_game_failed", url=url, exc_info=True)
-                    return None
+                    return []
 
         results = await asyncio.gather(*(_add(url) for url in urls))
-        pairs = [p for p in results if p is not None]
+        pairs = [p for batch in results for p in batch]
         tickers = [t for p in pairs for t in (p.ticker_a, p.ticker_b)]
         if tickers:
             await self._feed.subscribe_bulk(tickers)
