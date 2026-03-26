@@ -713,7 +713,7 @@ class TradingEngine:
 
             # Fetch queue positions and merge into cache
             try:
-                tickers = self._active_market_tickers()
+                tickers = list({o.ticker for o in orders if o.remaining_count > 0})
                 if tickers:
                     new_qp = await self._rest.get_queue_positions(market_tickers=tickers)
                     for oid, qp in new_qp.items():
@@ -2415,7 +2415,7 @@ class TradingEngine:
         stale = self._feed.book_manager.stale_tickers()
         if not stale:
             return
-        active = set(self._active_market_tickers())
+        active = {t for p in self._scanner.pairs for t in (p.ticker_a, p.ticker_b)}
         for ticker in stale:
             if ticker not in active:
                 continue
@@ -2427,12 +2427,14 @@ class TradingEngine:
                 logger.warning("stale_book_recovery_failed", ticker=ticker, exc_info=True)
 
     def _active_market_tickers(self) -> list[str]:
-        """Collect market tickers from all active scanner pairs."""
-        tickers: list[str] = []
-        for pair in self._scanner.pairs:
-            tickers.append(pair.ticker_a)
-            tickers.append(pair.ticker_b)
-        return tickers
+        """Collect market tickers that have resting orders or recent fills.
+
+        Only these tickers need trade data (CPM tracking). At 1000+ pairs,
+        fetching trades for all tickers would exhaust the connection pool.
+        Uses the cached orders list — no extra API calls needed.
+        """
+        tickers = {o.ticker for o in self._orders_cache}
+        return list(tickers)
 
     def _notify(self, message: str, severity: str = "information", *, toast: bool = False) -> None:
         """Emit a notification to the UI if callback is set.

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import uuid
 from typing import Any
 
@@ -24,7 +25,12 @@ class KalshiRESTClient:
     def __init__(self, auth: KalshiAuth, config: KalshiConfig) -> None:
         self._auth = auth
         self._base_url = config.rest_base_url
-        self._http = httpx.AsyncClient(timeout=httpx.Timeout(15.0))
+        self._http = httpx.AsyncClient(
+            timeout=httpx.Timeout(15.0),
+            limits=httpx.Limits(max_connections=200, max_keepalive_connections=50),
+        )
+        # Global concurrency limiter — prevents pool exhaustion at 1000+ tickers
+        self._sem = asyncio.Semaphore(20)
 
     async def close(self) -> None:
         await self._http.aclose()
@@ -41,13 +47,14 @@ class KalshiRESTClient:
         url = f"{self._base_url}{path}"
         headers = self._auth.headers(method, f"/trade-api/v2{path}")
 
-        response = await self._http.request(
-            method=method,
-            url=url,
-            headers=headers,
-            params=params,
-            json=json,
-        )
+        async with self._sem:
+            response = await self._http.request(
+                method=method,
+                url=url,
+                headers=headers,
+                params=params,
+                json=json,
+            )
 
         logger.debug(
             "kalshi_api_response",

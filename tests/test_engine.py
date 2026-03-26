@@ -87,14 +87,14 @@ class TestScaffold:
         engine = _make_engine()
         assert engine._active_market_tickers() == []
 
-    def test_active_market_tickers_with_pairs(self):
+    def test_active_market_tickers_no_positions(self):
+        """Pairs without fills or resting orders return no tickers (saves API calls)."""
         books = OrderBookManager()
         scanner = ArbitrageScanner(books)
         scanner.add_pair("EVT-1", "TK-A", "TK-B")
         engine = _make_engine(scanner=scanner)
         tickers = engine._active_market_tickers()
-        assert "TK-A" in tickers
-        assert "TK-B" in tickers
+        assert tickers == []  # No positions = no trade fetches needed
 
     def test_notify_calls_callback(self):
         engine = _make_engine()
@@ -286,6 +286,9 @@ class TestPolling:
         from datetime import datetime
 
         from talos.models.market import Trade
+
+        # Prime orders cache so _active_market_tickers includes TK-A
+        engine._orders_cache = [_make_order("TK-A", order_id="ord-a", remaining_count=5)]
 
         recent = datetime.now(UTC).isoformat()
         trades = [
