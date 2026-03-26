@@ -582,7 +582,7 @@ class TalosApp(App):
             tracked = len(self._engine.game_manager.active_games)
             with_positions = sum(
                 1 for s in summaries
-                if s.leg_a.filled + s.leg_b.filled > 0
+                if s.leg_a.filled_count + s.leg_b.filled_count > 0
             )
             panel.update_tracked_counts(tracked, with_positions)
         tracker = self._engine.tracker if self._engine else None
