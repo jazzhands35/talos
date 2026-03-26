@@ -1758,6 +1758,11 @@ class TradingEngine:
         side_a = pair.side_a
         side_b = pair.side_b
 
+        # Guard: never send a 0-price order (no orderbook data)
+        if bid.no_a <= 0 or bid.no_b <= 0:
+            logger.warning("place_bids_zero_price", ticker_a=bid.ticker_a, no_a=bid.no_a, no_b=bid.no_b)
+            return
+
         try:
             order_a = await self._rest.create_order(
                 ticker=bid.ticker_a,
