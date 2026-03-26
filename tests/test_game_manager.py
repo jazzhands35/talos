@@ -668,6 +668,7 @@ def _make_nonsports_event(
     *,
     market_count: int = 1,
     status: str = "active",
+    volume_24h: int = 100,
 ) -> Event:
     """Helper to create non-sports events for scan tests."""
     markets = [
@@ -677,6 +678,7 @@ def _make_nonsports_event(
             title=f"Market {i}",
             status=status,
             close_time=close_time,
+            volume_24h=volume_24h,
         )
         for i in range(market_count)
     ]

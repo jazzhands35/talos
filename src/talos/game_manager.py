@@ -658,6 +658,8 @@ class GameManager:
                     active_mkts = [m for m in event.markets if m.status == "active"]
                     if len(active_mkts) != 2:
                         continue
+                    if all((m.volume_24h or 0) == 0 for m in active_mkts):
+                        continue
                     sports_events.append(event)
 
         # --- Non-sports path (new) ---
@@ -685,6 +687,8 @@ class GameManager:
                     continue
                 active_mkts = [m for m in event.markets if m.status == "active"]
                 if len(active_mkts) == 0:
+                    continue
+                if all((m.volume_24h or 0) == 0 for m in active_mkts):
                     continue
                 if not _has_market_closing_within(event, self._nonsports_max_days):
                     continue
