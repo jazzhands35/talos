@@ -1856,7 +1856,7 @@ class TradingEngine:
                     ticker_b=bid.ticker_b,
                 )
 
-    async def add_games(self, urls: list[str], source: str = "scan") -> None:
+    async def add_games(self, urls: list[str], source: str = "scan") -> list[ArbPair]:
         """Add games by URL."""
         try:
             pairs = await self._game_manager.add_games(urls)
@@ -1901,7 +1901,7 @@ class TradingEngine:
                         if gs and gs.scheduled_start
                         else None,
                     )
-            self._notify(f"Added {len(urls)} game(s)", toast=True)
+            return pairs
         except Exception as e:
             from talos.game_manager import MarketPickerNeeded
 
@@ -1909,6 +1909,7 @@ class TradingEngine:
                 raise  # Propagate to UI for market picker
             self._notify(f"Error: {e}", "error", toast=True)
             logger.exception("add_games_error")
+            return []
 
     async def add_market_pairs(
         self, event: object, markets: list[object],
