@@ -18,7 +18,12 @@ Argo is a single-file Windows executable that packages the Talos trading engine 
 - Auto-updates or crash reporting
 - Non-sports category scanning
 - External API integrations (ESPN, OddsEngine, PandaScore)
-- Custom icon/branding beyond the name (reuses Talos icon for now)
+
+## Branding
+
+- **Name:** Argo
+- **Icon:** `icons/argo/navigation/iter_02 - Copy.svg` — astrolabe design (stone rings, amber accents, crimson throne marker). Convert to `.ico` for PyInstaller build.
+- **Theme:** Inherits Talos Catppuccin Mocha (stone/marble aesthetic)
 
 ## Market Structure
 
@@ -353,7 +358,7 @@ pyz = PYZ(a.pure)
 exe = EXE(
     pyz, a.scripts, a.binaries, a.datas,
     name='Argo',
-    icon='icon.ico',
+    icon='icons/argo/argo.ico',
     console=True,       # Textual needs a real console
     onefile=True,
 )
