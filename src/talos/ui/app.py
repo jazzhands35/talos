@@ -579,6 +579,12 @@ class TalosApp(App):
                 s.leg_a.total_fill_cost + s.leg_b.total_fill_cost for s in summaries
             )
             panel.update_portfolio_summary(total_locked, total_exposure, total_invested)
+            tracked = len(self._engine.game_manager.active_games)
+            with_positions = sum(
+                1 for s in summaries
+                if s.leg_a.filled + s.leg_b.filled > 0
+            )
+            panel.update_tracked_counts(tracked, with_positions)
         tracker = self._engine.tracker if self._engine else None
         table.refresh_from_scanner(self._scanner, tracker)
         self._update_freshness()

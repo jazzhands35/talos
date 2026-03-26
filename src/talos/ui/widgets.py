@@ -691,6 +691,8 @@ class PortfolioPanel(Static):
         self._invested_today: int = 0
         self._invested_yesterday: int = 0
         self._invested_7d: int = 0
+        self._tracked: int = 0
+        self._with_positions: int = 0
 
     def on_mount(self) -> None:
         self.border_title = "Portfolio"
@@ -704,11 +706,13 @@ class PortfolioPanel(Static):
         today = _fmt_pnl_with_roi(self._pnl_today, self._invested_today)
         yesterday = _fmt_pnl_with_roi(self._pnl_yesterday, self._invested_yesterday)
         last_7d = _fmt_pnl_with_roi(self._pnl_7d, self._invested_7d)
+        tracked = f"{self._with_positions}/{self._tracked}"
         return (
             f"Cash:      {cash}\n"
             f"Locked In: {locked}\n"
             f"Exposure:  {exposure}\n"
             f"Invested:  {invested}\n"
+            f"Tracked:   {tracked}\n"
             f"───────────────────\n"
             f"Today:     {today}\n"
             f"Yesterday: {yesterday}\n"
@@ -729,6 +733,11 @@ class PortfolioPanel(Static):
         self._locked = locked
         self._exposure = exposure
         self._invested = invested
+        self.refresh()
+
+    def update_tracked_counts(self, tracked: int, with_positions: int) -> None:
+        self._tracked = tracked
+        self._with_positions = with_positions
         self.refresh()
 
     def update_pnl(
