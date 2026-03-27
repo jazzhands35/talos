@@ -6,6 +6,7 @@ Thin UI shell — all trading logic lives in TradingEngine.
 from __future__ import annotations
 
 import time
+from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from typing import cast
 
@@ -89,6 +90,7 @@ class TalosApp(App):
         self._auto_accept_logger: AutoAcceptLogger | None = None
         self._rate_limit_until: datetime | None = None
         self._scan_mode: str = "sports"
+        self.on_scan_mode_change: Callable[[str], None] | None = None
 
     def compose(self) -> ComposeResult:
         yield Header()
@@ -109,7 +111,6 @@ class TalosApp(App):
 
     def on_mount(self) -> None:
         """Start polling timers and wire engine callbacks."""
-        self.sub_title = "[SPORTS]"
         if self._scanner is not None:
             self.set_interval(2.0, self.refresh_opportunities)
         if self._engine is not None:
@@ -133,7 +134,6 @@ class TalosApp(App):
             self._start_feed()
             self._start_watchdog()
             self._poll_balance()  # show cash immediately
-            self._poll_settlements()  # fetch settlement P&L immediately
 
     # ── Engine callbacks ──────────────────────────────────────────
 
@@ -156,16 +156,17 @@ class TalosApp(App):
             banner.add_class("visible")
         else:
             banner.remove_class("visible")
-        # Sub_title: WS warning takes priority, then auto-accept, then clear
+        # Sub_title: scan mode prefix + status (WS warning > auto-accept > empty)
+        mode_tag = "SPORTS" if self._scan_mode == "sports" else "NON-SPORTS"
         if ws_dead:
-            self.sub_title = "!!! WEBSOCKET DISCONNECTED — PRICES ARE STALE !!!"
+            self.sub_title = f"[{mode_tag}] !!! WEBSOCKET DISCONNECTED — PRICES ARE STALE !!!"
         elif self._auto_accept.active:
             self.sub_title = (
-                f"AUTO-ACCEPT {self._auto_accept.remaining_str()} remaining "
+                f"[{mode_tag}] AUTO-ACCEPT {self._auto_accept.remaining_str()} remaining "
                 f"({self._auto_accept.accepted_count} accepted)"
             )
         else:
-            self.sub_title = ""
+            self.sub_title = f"[{mode_tag}]"
 
         # Refresh the proposal panel if it's visible
         try:
@@ -433,7 +434,7 @@ class TalosApp(App):
             return
         try:
             settlements = await self._engine._rest.get_settlements(limit=200)
-            from talos.settlement_tracker import aggregate_settlements, reconcile_event
+            from talos.settlement_tracker import reconcile_event
 
             # Populate cache if available
             cache = getattr(self._engine, "_settlement_cache", None)
@@ -448,22 +449,6 @@ class TalosApp(App):
                     subtitles=self._engine.game_manager.subtitles,
                 )
 
-            # Aggregate from cache (complete history) — REST limit=200
-            # returns a sliding window that drops older settlements as new
-            # ones arrive, causing yesterday/7d totals to fluctuate.
-            if cache is not None:
-                agg = aggregate_settlements(cache.all_settlements())
-            else:
-                agg = aggregate_settlements([s.model_dump() for s in settlements])
-            panel = self.query_one(PortfolioPanel)
-            panel.update_pnl(
-                today=agg["today_pnl"],
-                yesterday=agg["yesterday_pnl"],
-                last_7d=agg["week_pnl"],
-                invested_today=agg["today_invested"],
-                invested_yesterday=agg["yesterday_invested"],
-                invested_7d=agg["week_invested"],
-            )
             # Reconciliation: check for discrepancies
             summaries_by_event = {s.event_ticker: s for s in self._engine.position_summaries}
             for s in settlements:
@@ -578,18 +563,40 @@ class TalosApp(App):
             # Push portfolio summaries
             panel = self.query_one(PortfolioPanel)
             summaries = self._engine.position_summaries
-            total_locked = sum(s.locked_profit_cents for s in summaries)
-            total_exposure = sum(s.exposure_cents for s in summaries)
-            total_invested = sum(
-                s.leg_a.total_fill_cost + s.leg_b.total_fill_cost for s in summaries
+            total_matched_units = 0
+            total_partial_events = 0
+            total_locked = 0
+            total_exposure = 0
+            with_positions = 0
+            bidding = 0
+
+            for s in summaries:
+                filled = s.leg_a.filled_count + s.leg_b.filled_count
+                resting = s.leg_a.resting_count + s.leg_b.resting_count
+                matched = s.matched_pairs
+
+                total_matched_units += matched // s.unit_size if s.unit_size > 0 else 0
+                total_locked += s.locked_profit_cents
+                total_exposure += s.exposure_cents
+
+                if filled > 0:
+                    with_positions += 1
+                    if not (
+                        matched > 0
+                        and matched % s.unit_size == 0
+                        and s.leg_a.filled_count == s.leg_b.filled_count
+                    ):
+                        total_partial_events += 1
+                elif resting > 0:
+                    bidding += 1
+
+            total_events = len(self._scanner.pairs) if self._scanner else 0
+            unentered = total_events - with_positions - bidding
+
+            panel.update_account(
+                total_matched_units, total_partial_events, total_locked, total_exposure
             )
-            panel.update_portfolio_summary(total_locked, total_exposure, total_invested)
-            tracked = len(self._engine.game_manager.active_games)
-            with_positions = sum(
-                1 for s in summaries
-                if s.leg_a.filled_count + s.leg_b.filled_count > 0
-            )
-            panel.update_tracked_counts(tracked, with_positions)
+            panel.update_coverage(total_events, with_positions, bidding, unentered)
         tracker = self._engine.tracker if self._engine else None
         table.refresh_from_scanner(self._scanner, tracker)
         self._update_freshness()
@@ -912,19 +919,21 @@ class TalosApp(App):
     def action_edit_blacklist(self) -> None:
         if self._engine is None:
             return
-        from talos.ui.screens import BlacklistScreen
 
         current = self._engine.game_manager.ticker_blacklist
         self._show_blacklist_editor(current)
 
+    def set_scan_mode(self, mode: str) -> None:
+        """Set scan mode (subtitle updated by _refresh_status loop)."""
+        self._scan_mode = mode
+
     def action_toggle_scan_mode(self) -> None:
         """Toggle between sports and non-sports scan mode."""
-        if self._scan_mode == "sports":
-            self._scan_mode = "nonsports"
-        else:
-            self._scan_mode = "sports"
-        mode_label = "SPORTS" if self._scan_mode == "sports" else "NON-SPORTS"
-        self.sub_title = f"[{mode_label}]"
+        new_mode = "nonsports" if self._scan_mode == "sports" else "sports"
+        self.set_scan_mode(new_mode)
+        if self.on_scan_mode_change:
+            self.on_scan_mode_change(new_mode)
+        mode_label = "SPORTS" if new_mode == "sports" else "NON-SPORTS"
         self.notify(f"Scan mode: {mode_label}")
 
     @work(thread=False)

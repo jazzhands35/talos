@@ -220,18 +220,22 @@ def _fmt_status(status: str) -> RichText:
 
 
 def _fmt_freshness(age_seconds: float | None) -> RichText:
-    """Format freshness dot based on seconds since last WS update.
+    """Format freshness dot based on age of orderbook information.
 
     Uses markup-style spans so the dot color survives cursor highlight.
 
-    Thresholds are calibrated to the 120s recovery cycle — quiet markets
-    with valid snapshots shouldn't show red just because nobody's trading.
+    The stale-book recovery cycle resubscribes every ~120s, triggering
+    a fresh snapshot that confirms the book state. Thresholds reflect
+    information age, not trading activity:
+    - Green: confirmed within the last recovery cycle (~150s)
+    - Yellow: missed one recovery cycle (150-360s) — possibly stale
+    - Red: missed multiple cycles (>360s) — likely disconnected
     """
     if age_seconds is None:
         return RichText("○", style="dim", justify="center")
-    if age_seconds < 30.0:
+    if age_seconds < 150.0:
         color = GREEN
-    elif age_seconds < 120.0:
+    elif age_seconds < 360.0:
         color = YELLOW
     else:
         color = RED
@@ -269,9 +273,9 @@ class OpportunitiesTable(DataTable):
         6: "no_a",  # Price (col 6)
         7: "vol_a",  # Vol (col 7)
         12: "fee_edge",  # Edge (col 12)
-        13: "status",  # Status (col 13)
-        14: "locked",  # Locked profit (col 14)
-        15: "exposure",  # Exposure (col 15)
+        14: "status",  # Status (col 14)
+        15: "locked",  # Locked profit (col 15)
+        16: "exposure",  # Exposure (col 16)
     }
 
     def __init__(self, **kwargs: Any) -> None:
@@ -334,9 +338,10 @@ class OpportunitiesTable(DataTable):
         self.add_column(RichText("CPM", justify=r), width=8)  # 10: Contracts/min
         self.add_column(RichText("ETA", justify=r), width=7)  # 11: Est. time to fill
         self.add_column(RichText("Edge", justify=r), width=6)  # 12: Fee-adjusted edge
-        self.add_column("Status", width=16)  # 13: Event status
-        self.add_column(RichText("Locked", justify=r), width=10)  # 14: Locked profit
-        self.add_column(RichText("Expos", justify=r), width=10)  # 15: Exposure
+        self.add_column(RichText("Eval", justify=r), width=5)  # 13: Seconds since last evaluation
+        self.add_column("Status", width=16)  # 14: Event status
+        self.add_column(RichText("Locked", justify=r), width=10)  # 15: Locked profit
+        self.add_column(RichText("Expos", justify=r), width=10)  # 16: Exposure
 
     def _get_row_style(self, row_index: int, base_style: RichStyle) -> RichStyle:  # type: ignore[override]
         """Pair striping: alternate background per event pair (every 2 rows)."""
@@ -359,7 +364,11 @@ class OpportunitiesTable(DataTable):
     ) -> Any:
         """Vertical column dividers + overline separator between event pairs."""
         fixed, scrollable = super()._render_line_in_row(
-            row_key, line_no, base_style, cursor_location, hover_location,
+            row_key,
+            line_no,
+            base_style,
+            cursor_location,
+            hover_location,
         )
         col_count = len(self.ordered_columns)
         if col_count < 2:
@@ -441,9 +450,7 @@ class OpportunitiesTable(DataTable):
                 return gs.scheduled_start.timestamp()
             if opp.close_time:
                 try:
-                    return datetime.fromisoformat(
-                        opp.close_time.replace("Z", "+00:00")
-                    ).timestamp()
+                    return datetime.fromisoformat(opp.close_time.replace("Z", "+00:00")).timestamp()
                 except (ValueError, TypeError):
                     pass
             return 0.0
@@ -660,6 +667,21 @@ class OpportunitiesTable(DataTable):
             if tracker.is_at_top(opp.ticker_b, side_b) is False:
                 q_b = RichText(f"!! {q_b}", style=YELLOW, justify="right")
 
+        # Eval age: seconds since scanner last evaluated this pair
+        eval_str: str | RichText = DIM_DASH
+        if opp.timestamp:
+            try:
+                ts = datetime.fromisoformat(opp.timestamp)
+                age = (datetime.now(UTC) - ts).total_seconds()
+                if age < 60:
+                    eval_str = RichText(f"{int(age)}s", justify="right")
+                elif age < 3600:
+                    eval_str = RichText(f"{int(age // 60)}m", style="yellow", justify="right")
+                else:
+                    eval_str = RichText(f"{int(age // 3600)}h", style="red", justify="right")
+            except (ValueError, TypeError):
+                pass
+
         # Row 1: team A + shared event-level info
         row1 = (
             dot_a,
@@ -675,6 +697,7 @@ class OpportunitiesTable(DataTable):
             cpm_a,
             eta_a,
             edge_str,
+            eval_str,
             status,
             locked_str,
             exposure_str,
@@ -698,29 +721,27 @@ class OpportunitiesTable(DataTable):
             "",
             "",
             "",
+            "",
         )
 
         return row1, row2
 
 
 class PortfolioPanel(Static):
-    """Portfolio summary: cash, locked, exposure, invested, historical P&L."""
+    """Portfolio summary: account state and event coverage."""
 
     def __init__(self, **kwargs: Any) -> None:
         super().__init__("", **kwargs)
         self._cash: int = 0
         self._portfolio: int = 0
+        self._matched: int = 0
+        self._partial: int = 0
         self._locked: float = 0.0
         self._exposure: int = 0
-        self._invested: int = 0
-        self._pnl_today: int = 0
-        self._pnl_yesterday: int = 0
-        self._pnl_7d: int = 0
-        self._invested_today: int = 0
-        self._invested_yesterday: int = 0
-        self._invested_7d: int = 0
-        self._tracked: int = 0
+        self._events: int = 0
         self._with_positions: int = 0
+        self._bidding: int = 0
+        self._unentered: int = 0
 
     def on_mount(self) -> None:
         self.border_title = "Portfolio"
@@ -730,21 +751,17 @@ class PortfolioPanel(Static):
         cash = f"${self._cash / 100:,.2f}"
         locked = f"${self._locked / 100:,.2f}"
         exposure = f"${self._exposure / 100:,.2f}"
-        invested = f"${self._invested / 100:,.2f}"
-        today = _fmt_pnl_with_roi(self._pnl_today, self._invested_today)
-        yesterday = _fmt_pnl_with_roi(self._pnl_yesterday, self._invested_yesterday)
-        last_7d = _fmt_pnl_with_roi(self._pnl_7d, self._invested_7d)
-        tracked = f"{self._with_positions}/{self._tracked}"
         return (
-            f"Cash:      {cash}\n"
-            f"Locked In: {locked}\n"
-            f"Exposure:  {exposure}\n"
-            f"Invested:  {invested}\n"
-            f"Tracked:   {tracked}\n"
+            f"Cash:       {cash}\n"
+            f"Matched:    {self._matched} units\n"
+            f"Partial:    {self._partial} events\n"
+            f"Locked In:  {locked}\n"
+            f"Exposure:   {exposure}\n"
             f"───────────────────\n"
-            f"Today:     {today}\n"
-            f"Yesterday: {yesterday}\n"
-            f"Last 7d:   {last_7d}"
+            f"Events:       {self._events}\n"
+            f"w/ Positions: {self._with_positions}\n"
+            f"Bidding:      {self._bidding}\n"
+            f"Unentered:    {self._unentered}"
         )
 
     def update_balance(self, balance_cents: int, portfolio_cents: int) -> None:
@@ -752,37 +769,30 @@ class PortfolioPanel(Static):
         self._portfolio = portfolio_cents
         self.refresh()
 
-    def update_portfolio_summary(
+    def update_account(
         self,
+        matched: int,
+        partial: int,
         locked: float,
         exposure: int,
-        invested: int,
     ) -> None:
+        self._matched = matched
+        self._partial = partial
         self._locked = locked
         self._exposure = exposure
-        self._invested = invested
         self.refresh()
 
-    def update_tracked_counts(self, tracked: int, with_positions: int) -> None:
-        self._tracked = tracked
-        self._with_positions = with_positions
-        self.refresh()
-
-    def update_pnl(
+    def update_coverage(
         self,
-        today: int,
-        yesterday: int,
-        last_7d: int,
-        invested_today: int = 0,
-        invested_yesterday: int = 0,
-        invested_7d: int = 0,
+        events: int,
+        with_positions: int,
+        bidding: int,
+        unentered: int,
     ) -> None:
-        self._pnl_today = today
-        self._pnl_yesterday = yesterday
-        self._pnl_7d = last_7d
-        self._invested_today = invested_today
-        self._invested_yesterday = invested_yesterday
-        self._invested_7d = invested_7d
+        self._events = events
+        self._with_positions = with_positions
+        self._bidding = bidding
+        self._unentered = unentered
         self.refresh()
 
 
