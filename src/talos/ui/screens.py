@@ -263,9 +263,9 @@ class AutoAcceptScreen(ModalScreen[float | None]):
             except ValueError:
                 self.query_one("#modal-error", Label).update("Enter a valid number")
                 return
-            if hours <= 0 or hours > 24:
+            if hours <= 0 or hours > 168:
                 self.query_one("#modal-error", Label).update(
-                    "Duration must be greater than 0 and at most 24 hours"
+                    "Duration must be greater than 0 and at most 168 hours"
                 )
                 return
             self.dismiss(hours)

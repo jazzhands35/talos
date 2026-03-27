@@ -126,7 +126,7 @@ class TalosApp(App):
                 table = self.query_one(OpportunitiesTable)
                 table.set_resolver(self._engine.game_status_resolver)
             # Auto-accept on by default (24h), press F to toggle off
-            self._start_auto_accept(24.0)
+            self._start_auto_accept(168.0)
             self._start_feed()
             self._start_watchdog()
             self._poll_balance()  # show cash immediately
