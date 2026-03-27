@@ -623,7 +623,7 @@ class GameManager:
                     if m.volume_24h is not None:
                         self._volumes_24h[m.ticker] = m.volume_24h
 
-    async def scan_events(self) -> list[Event]:
+    async def scan_events(self, scan_mode: str = "sports") -> list[Event]:
         """Discover all open arb-eligible events not already monitored."""
         active_tickers = {p.event_ticker for p in self.active_games}
         active_kalshi_tickers = {
@@ -636,7 +636,7 @@ class GameManager:
 
         # --- Sports path (unchanged) ---
         sports_events: list[Event] = []
-        if self._sports_enabled:
+        if self._sports_enabled and scan_mode in ("sports", "both"):
             async def fetch_series(series: str) -> list[Event]:
                 async with sem:
                     try:
@@ -666,7 +666,7 @@ class GameManager:
 
         # --- Non-sports path (new) ---
         nonsports_events: list[Event] = []
-        if self._nonsports_categories:
+        if self._nonsports_categories and scan_mode in ("nonsports", "both"):
             min_close_ts = int(datetime.now(UTC).timestamp())
             try:
                 raw_events = await self._rest.get_all_events(

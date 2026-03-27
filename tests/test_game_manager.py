@@ -732,7 +732,7 @@ class TestNonSportsScan:
             _make_nonsports_event("E1", "KXBTC", "Crypto", close),
             _make_nonsports_event("E2", "KXWX", "Climate and Weather", close),
         ]
-        events = await manager.scan_events()
+        events = await manager.scan_events(scan_mode="nonsports")
         tickers = [e.event_ticker for e in events]
         assert "E1" in tickers
         assert "E2" not in tickers
@@ -746,7 +746,7 @@ class TestNonSportsScan:
             _make_nonsports_event("E1", "KXBTC", "Crypto", within),
             _make_nonsports_event("E2", "KXBTC2", "Crypto", beyond),
         ]
-        events = await manager.scan_events()
+        events = await manager.scan_events(scan_mode="nonsports")
         tickers = [e.event_ticker for e in events]
         assert "E1" in tickers
         assert "E2" not in tickers
@@ -758,7 +758,7 @@ class TestNonSportsScan:
         mock_rest.get_all_events.return_value = [
             _make_nonsports_event("E1", "KXNHLGAME", "Crypto", close),
         ]
-        events = await manager.scan_events()
+        events = await manager.scan_events(scan_mode="nonsports")
         assert len(events) == 0
 
     async def test_excludes_no_active_markets(
@@ -768,7 +768,7 @@ class TestNonSportsScan:
         mock_rest.get_all_events.return_value = [
             _make_nonsports_event("E1", "KXBTC", "Crypto", close, status="closed"),
         ]
-        events = await manager.scan_events()
+        events = await manager.scan_events(scan_mode="nonsports")
         assert len(events) == 0
 
     async def test_excludes_null_close_time(
@@ -777,7 +777,7 @@ class TestNonSportsScan:
         mock_rest.get_all_events.return_value = [
             _make_nonsports_event("E1", "KXBTC", "Crypto", None),
         ]
-        events = await manager.scan_events()
+        events = await manager.scan_events(scan_mode="nonsports")
         assert len(events) == 0
 
     async def test_excludes_already_monitored(
@@ -788,7 +788,7 @@ class TestNonSportsScan:
         mock_rest.get_all_events.return_value = [ev]
         mock_rest.get_event.return_value = ev
         await manager.add_game("E1")
-        events = await manager.scan_events()
+        events = await manager.scan_events(scan_mode="nonsports")
         assert len(events) == 0
 
     async def test_empty_categories_disables_scan(
@@ -867,7 +867,7 @@ class TestTickerBlacklist:
             _make_nonsports_event("E1", "KXSURV", "Crypto", close),
             _make_nonsports_event("E2", "KXOTHER", "Crypto", close),
         ]
-        events = await manager.scan_events()
+        events = await manager.scan_events(scan_mode="nonsports")
         tickers = [e.event_ticker for e in events]
         assert "E1" not in tickers
         assert "E2" in tickers

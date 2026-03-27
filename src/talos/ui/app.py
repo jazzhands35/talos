@@ -70,6 +70,7 @@ class TalosApp(App):
         ("l", "copy_activity_log", "Copy Log"),
         ("b", "blacklist_ticker", "Blacklist"),
         ("B", "edit_blacklist", "Edit Blacklist"),
+        ("m", "toggle_scan_mode", "Mode"),
         ("q", "quit", "Quit"),
     ]
 
@@ -87,6 +88,7 @@ class TalosApp(App):
         self._poll_in_progress = False
         self._auto_accept_logger: AutoAcceptLogger | None = None
         self._rate_limit_until: datetime | None = None
+        self._scan_mode: str = "sports"
 
     def compose(self) -> ComposeResult:
         yield Header()
@@ -107,6 +109,7 @@ class TalosApp(App):
 
     def on_mount(self) -> None:
         """Start polling timers and wire engine callbacks."""
+        self.sub_title = "[SPORTS]"
         if self._scanner is not None:
             self.set_interval(2.0, self.refresh_opportunities)
         if self._engine is not None:
@@ -650,7 +653,9 @@ class TalosApp(App):
 
         _scan_t0 = _scan_time.monotonic()
         try:
-            events = await self._engine.game_manager.scan_events()
+            events = await self._engine.game_manager.scan_events(
+                scan_mode=self._scan_mode,
+            )
         except Exception as e:
             self.notify(f"Scan failed: {e}", severity="error")
             return
@@ -911,6 +916,16 @@ class TalosApp(App):
 
         current = self._engine.game_manager.ticker_blacklist
         self._show_blacklist_editor(current)
+
+    def action_toggle_scan_mode(self) -> None:
+        """Toggle between sports and non-sports scan mode."""
+        if self._scan_mode == "sports":
+            self._scan_mode = "nonsports"
+        else:
+            self._scan_mode = "sports"
+        mode_label = "SPORTS" if self._scan_mode == "sports" else "NON-SPORTS"
+        self.sub_title = f"[{mode_label}]"
+        self.notify(f"Scan mode: {mode_label}")
 
     @work(thread=False)
     async def _show_blacklist_editor(self, current: list[str]) -> None:
