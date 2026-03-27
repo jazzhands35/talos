@@ -32,5 +32,6 @@ class EventPositionSummary(BaseModel):
     unmatched_a: int
     unmatched_b: int
     exposure_cents: int
+    unit_size: int = 10
     status: str = ""
     kalshi_pnl: int | None = None

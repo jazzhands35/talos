@@ -230,9 +230,7 @@ class PositionLedger:
 
     # ── State mutations ─────────────────────────────────────────────
 
-    def record_fill(
-        self, side: Side, count: int, price: int, *, fees: int = 0
-    ) -> None:
+    def record_fill(self, side: Side, count: int, price: int, *, fees: int = 0) -> None:
         """Record a fill. Called when polling detects new fills."""
         s = self._sides[side]
         s.filled_count += count
@@ -307,6 +305,54 @@ class PositionLedger:
         """Clear state after both sides complete. Ready for next pair."""
         self._sides[Side.A].reset()
         self._sides[Side.B].reset()
+
+    # ── Persistence ────────────────────────────────────────────────
+
+    def to_save_dict(self) -> dict[str, int]:
+        """Export fill state for persistence across restarts.
+
+        Only saves filled counts/costs/fees — resting orders are recovered
+        from the orders API on next startup.
+        """
+        a = self._sides[Side.A]
+        b = self._sides[Side.B]
+        return {
+            "filled_a": a.filled_count,
+            "cost_a": a.filled_total_cost,
+            "fees_a": a.filled_fees,
+            "filled_b": b.filled_count,
+            "cost_b": b.filled_total_cost,
+            "fees_b": b.filled_fees,
+        }
+
+    def seed_from_saved(self, data: dict[str, int] | None) -> None:
+        """Seed fill state from persisted data.
+
+        Sets a floor for fills — sync_from_orders and sync_from_positions
+        will only increase from here, never decrease (monotonic fill rule).
+        This prevents ledger amnesia for same-ticker pairs where
+        sync_from_positions is unavailable and archived orders are
+        invisible to sync_from_orders.
+        """
+        if not data:
+            return
+        a = self._sides[Side.A]
+        b = self._sides[Side.B]
+        for side, prefix in [(a, "a"), (b, "b")]:
+            saved_fills = data.get(f"filled_{prefix}", 0)
+            saved_cost = data.get(f"cost_{prefix}", 0)
+            saved_fees = data.get(f"fees_{prefix}", 0)
+            if saved_fills > side.filled_count:
+                logger.info(
+                    "ledger_seeded_from_saved",
+                    event_ticker=self.event_ticker,
+                    side=prefix.upper(),
+                    saved_fills=saved_fills,
+                    current_fills=side.filled_count,
+                )
+                side.filled_count = saved_fills
+                side.filled_total_cost = max(side.filled_total_cost, saved_cost)
+                side.filled_fees = max(side.filled_fees, saved_fees)
 
     def sync_from_orders(self, orders: list, ticker_a: str, ticker_b: str) -> None:
         """Reconcile ledger against polled order state from Kalshi.
@@ -640,6 +686,7 @@ def compute_display_positions(
                 unmatched_a=unmatched_a,
                 unmatched_b=unmatched_b,
                 exposure_cents=exposure,
+                unit_size=ledger.unit_size,
             )
         )
 
