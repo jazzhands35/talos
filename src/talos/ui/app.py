@@ -319,7 +319,9 @@ class TalosApp(App):
         import sys
         import time
 
-        log_path = "talos_freeze.log"
+        from talos.persistence import get_data_dir
+
+        log_path = str(get_data_dir() / "talos_freeze.log")
         while True:
             t0 = time.monotonic()
             await asyncio.sleep(0.5)
@@ -732,9 +734,9 @@ class TalosApp(App):
         event_ticker = _event_ticker_from_row_key(str(cell_key.row_key.value))
         if not event_ticker:
             return
-        from pathlib import Path
+        from talos.persistence import get_data_dir
 
-        base = Path(__file__).resolve().parents[3]
+        base = get_data_dir()
         db_path = base / "talos_data.db"
         log_path = base / "suggestions.log"
         self.push_screen(EventReviewScreen(event_ticker, self._engine, db_path, log_path))
@@ -1010,11 +1012,11 @@ class TalosApp(App):
         if self._engine is None:
             return
 
-        from pathlib import Path
+        from talos.persistence import get_data_dir
 
         self._auto_accept.start(hours=hours)
 
-        log_dir = Path(__file__).resolve().parents[3] / "auto_accept_sessions"
+        log_dir = get_data_dir() / "auto_accept_sessions"
         aa_logger = AutoAcceptLogger(log_dir)
         self._auto_accept_logger = aa_logger
 
