@@ -8,8 +8,10 @@ from pathlib import Path
 
 
 def _load_dotenv() -> None:
-    """Load .env file from project root if it exists."""
-    env_file = Path(__file__).resolve().parents[2] / ".env"
+    """Load .env file from data directory if it exists."""
+    from talos.persistence import get_data_dir
+
+    env_file = get_data_dir() / ".env"
     if not env_file.is_file():
         return
     for line in env_file.read_text().splitlines():
@@ -23,22 +25,46 @@ def _load_dotenv() -> None:
             os.environ[key] = value
 
 
+def _run_first_time_setup() -> None:
+    """Launch the first-run setup screen to collect credentials."""
+    from talos.ui.first_run import FirstRunApp
+
+    app = FirstRunApp()
+    app.run()
+
+
 def main() -> None:
     """Launch the Talos dashboard."""
+    # Frozen mode (PyInstaller): set data dir to exe's directory
+    if getattr(sys, "frozen", False):
+        from talos.persistence import set_data_dir
+
+        set_data_dir(Path(sys.executable).parent)
+
     _load_dotenv()
+
+    # Production-only guard for frozen builds
+    if getattr(sys, "frozen", False) and os.environ.get("KALSHI_ENV") != "production":
+        os.environ["KALSHI_ENV"] = "production"
 
     try:
         from talos.config import KalshiConfig
 
         config = KalshiConfig.from_env()
-    except ValueError as e:
-        print(f"Configuration error: {e}")
-        print()
-        print("Create a .env file in the project root (see .env.example):")
-        print("  KALSHI_KEY_ID=your-key-id")
-        print("  KALSHI_PRIVATE_KEY_PATH=/path/to/private-key.pem")
-        print("  KALSHI_ENV=demo")
-        sys.exit(1)
+    except ValueError:
+        # No .env yet — launch first-run setup if frozen, else error out
+        if getattr(sys, "frozen", False):
+            _run_first_time_setup()
+            # Reload .env and retry — exit if still broken
+            _load_dotenv()
+            try:
+                config = KalshiConfig.from_env()
+            except ValueError:
+                print("Setup did not complete — exiting.")
+                sys.exit(1)
+        else:
+            print("Configuration error — create a .env file (see .env.example)")
+            sys.exit(1)
 
     from talos.auth import KalshiAuth
     from talos.automation_config import AutomationConfig
@@ -77,7 +103,7 @@ def main() -> None:
     scanner = ArbitrageScanner(books)
     tracker = TopOfMarketTracker(books)
     settings = load_settings()
-    unit_size = int(settings.get("unit_size", 10))  # type: ignore[arg-type]
+    unit_size = int(settings.get("unit_size", 5))  # type: ignore[arg-type]
     adjuster = BidAdjuster(books, [], unit_size=unit_size)
     portfolio_feed = PortfolioFeed(ws_client=ws)
     ticker_feed = TickerFeed(ws_client=ws)
@@ -95,7 +121,9 @@ def main() -> None:
         ticker_blacklist=ticker_blacklist,  # type: ignore[arg-type]
     )
     game_status_resolver = GameStatusResolver()
-    db_dir = Path(__file__).resolve().parents[2]
+    from talos.persistence import get_data_dir
+
+    db_dir = get_data_dir()
     data_collector = DataCollector(db_dir / "talos_data.db")
     settlement_cache = SettlementCache(db_dir / "talos_data.db")
 
@@ -178,7 +206,7 @@ def main() -> None:
     engine.on_blacklist_change = _persist_blacklist
 
     # Wire suggestion audit log
-    log_path = Path(__file__).resolve().parents[2] / "suggestions.log"
+    log_path = get_data_dir() / "suggestions.log"
     suggestion_log = SuggestionLog(log_path)
     engine.proposal_queue.on_lifecycle = suggestion_log.log
 
