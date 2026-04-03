@@ -1,69 +1,114 @@
-"""Tests for auto-accept state management."""
+"""Tests for ExecutionMode state machine."""
+
+from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
 
-from talos.auto_accept import AutoAcceptState
+from talos.auto_accept import ExecutionMode, Mode
 
 
-def test_initial_state_inactive():
-    state = AutoAcceptState()
-    assert state.active is False
-    assert state.started_at is None
-    assert state.duration is None
-    assert state.accepted_count == 0
+def test_default_is_automatic():
+    em = ExecutionMode()
+    assert em.mode is Mode.AUTOMATIC
+    assert em.is_automatic is True
+    assert em.auto_stop_at is None
+    assert em.accepted_count == 0
 
 
-def test_start_sets_active():
-    state = AutoAcceptState()
-    state.start(hours=2.0)
-    assert state.active is True
-    assert state.started_at is not None
-    assert state.duration == timedelta(hours=2)
-    assert state.accepted_count == 0
+def test_enter_automatic_indefinite():
+    em = ExecutionMode()
+    em.enter_manual()  # start from manual
+    em.enter_automatic()
+    assert em.mode is Mode.AUTOMATIC
+    assert em.auto_stop_at is None
+    assert em.accepted_count == 0
+    assert em.started_at is not None
 
 
-def test_stop_clears_active():
-    state = AutoAcceptState()
-    state.start(hours=1.0)
-    state.stop()
-    assert state.active is False
+def test_enter_automatic_with_timer():
+    em = ExecutionMode()
+    em.enter_automatic(hours=2.0)
+    assert em.mode is Mode.AUTOMATIC
+    assert em.auto_stop_at is not None
+    expected = em.started_at + timedelta(hours=2)
+    assert abs((em.auto_stop_at - expected).total_seconds()) < 1
+
+
+def test_enter_automatic_resets_accepted_count():
+    em = ExecutionMode()
+    em.accepted_count = 42
+    em.enter_automatic()
+    assert em.accepted_count == 0
+
+
+def test_enter_manual():
+    em = ExecutionMode()
+    em.enter_automatic(hours=1.0)
+    em.enter_manual()
+    assert em.mode is Mode.MANUAL
+    assert em.auto_stop_at is None
+
+
+def test_is_expired_false_when_indefinite():
+    em = ExecutionMode()
+    em.enter_automatic()  # indefinite
+    assert em.is_expired() is False
 
 
 def test_is_expired_false_within_duration():
-    state = AutoAcceptState()
-    state.start(hours=2.0)
-    assert state.is_expired() is False
+    em = ExecutionMode()
+    em.enter_automatic(hours=2.0)
+    assert em.is_expired() is False
 
 
 def test_is_expired_true_after_duration():
-    state = AutoAcceptState()
-    state.start(hours=1.0)
-    state.started_at = datetime.now(UTC) - timedelta(hours=1, minutes=1)
-    assert state.is_expired() is True
+    em = ExecutionMode()
+    em.enter_automatic(hours=1.0)
+    em.auto_stop_at = datetime.now(UTC) - timedelta(minutes=1)
+    assert em.is_expired() is True
 
 
-def test_remaining_seconds():
-    state = AutoAcceptState()
-    state.start(hours=1.0)
-    remaining = state.remaining_seconds()
-    assert 3590 < remaining <= 3600
+def test_is_expired_false_in_manual_mode():
+    em = ExecutionMode()
+    em.enter_manual()
+    assert em.is_expired() is False
 
 
-def test_remaining_seconds_inactive_returns_zero():
-    state = AutoAcceptState()
-    assert state.remaining_seconds() == 0.0
+def test_remaining_str_with_timer():
+    em = ExecutionMode()
+    em.enter_automatic(hours=1.0)
+    remaining = em.remaining_str()
+    assert ":" in remaining
 
 
-def test_elapsed_str_format():
-    state = AutoAcceptState()
-    state.start(hours=1.0)
-    state.started_at = datetime.now(UTC) - timedelta(minutes=35)
-    elapsed = state.elapsed_str()
+def test_remaining_str_indefinite_returns_empty():
+    em = ExecutionMode()
+    em.enter_automatic()  # indefinite
+    assert em.remaining_str() == ""
+
+
+def test_remaining_str_manual_returns_empty():
+    em = ExecutionMode()
+    em.enter_manual()
+    assert em.remaining_str() == ""
+
+
+def test_elapsed_str():
+    em = ExecutionMode()
+    em.enter_automatic()
+    em.started_at = datetime.now(UTC) - timedelta(minutes=35)
+    elapsed = em.elapsed_str()
     assert elapsed.startswith("0:35:")
 
 
-def test_remaining_str_format():
-    state = AutoAcceptState()
-    state.start(hours=1.0)
-    remaining = state.remaining_str()
-    assert ":" in remaining
+def test_remaining_seconds_indefinite_returns_zero():
+    em = ExecutionMode()
+    em.enter_automatic()  # indefinite
+    assert em.remaining_seconds() == 0.0
+
+
+def test_remaining_seconds_with_timer():
+    em = ExecutionMode()
+    em.enter_automatic(hours=1.0)
+    remaining = em.remaining_seconds()
+    assert 3590 < remaining <= 3600
