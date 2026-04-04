@@ -18,7 +18,7 @@ from textual.notifications import SeverityLevel
 from textual.widgets import DataTable, Footer, Header, Static
 from textual.widgets._data_table import CellDoesNotExist
 
-from talos.auto_accept import AutoAcceptState
+from talos.auto_accept import ExecutionMode
 from talos.auto_accept_log import AutoAcceptLogger
 from talos.engine import TradingEngine
 from talos.errors import KalshiRateLimitError
@@ -37,7 +37,13 @@ from talos.ui.screens import (
     UnitSizeScreen,
 )
 from talos.ui.theme import APP_CSS
-from talos.ui.widgets import ActivityLog, OpportunitiesTable, OrderLog, PortfolioPanel
+from talos.ui.widgets import (
+    ActivityLog,
+    OpportunitiesTable,
+    OrderLog,
+    PerformancePanel,
+    PortfolioPanel,
+)
 
 logger = structlog.get_logger()
 
@@ -85,7 +91,7 @@ class TalosApp(App):
         self._engine = engine
         # Test mode: scanner-only for table tests without a full engine
         self._scanner = scanner or (engine.scanner if engine else None)
-        self._auto_accept = AutoAcceptState()
+        self._execution_mode = ExecutionMode()
         self._poll_in_progress = False
         self._auto_accept_logger: AutoAcceptLogger | None = None
         self._rate_limit_until: datetime | None = None
@@ -105,6 +111,7 @@ class TalosApp(App):
             yield panel
         with Horizontal(id="bottom-panels"):
             yield PortfolioPanel(id="account-panel")
+            yield PerformancePanel(id="performance-panel")
             yield ActivityLog(id="activity-log")
             yield OrderLog(id="order-log")
         yield Footer()
@@ -121,19 +128,34 @@ class TalosApp(App):
             self.set_interval(1.0, self._refresh_proposals)
             self.set_interval(1.0, self._auto_accept_tick)
             self.set_interval(3600.0, self._refresh_game_status)
-            self.set_interval(300.0, self._refresh_volumes)
+            self.set_interval(3600.0, self._refresh_volumes)  # hourly — volumes change slowly
             self.set_interval(10.0, self._log_market_snapshots)
             self.set_interval(300.0, self._poll_settlements)  # every 5 minutes
+            # Seed performance panel from existing cache immediately
+            rows = self._engine.performance_settlement_rows()
+            if rows:
+                from talos.settlement_tracker import aggregate_settlements
+
+                agg = aggregate_settlements(rows)
+                self.query_one(PerformancePanel).update_performance(agg)
+            # Fire first settlement poll after 30s (don't wait 5 min)
+            self.set_timer(30.0, self._poll_settlements)
             self._engine.on_notification = self._on_engine_notification
             self._engine.tracker.on_change = self._engine.on_top_of_market_change
             if self._engine.game_status_resolver is not None:
                 table = self.query_one(OpportunitiesTable)
                 table.set_resolver(self._engine.game_status_resolver)
-            # Auto-accept on by default (24h), press F to toggle off
-            self._start_auto_accept(168.0)
+            # Boot into configured execution mode (startup defaults from settings.json)
+            startup_mode = getattr(self._engine, '_startup_execution_mode', 'automatic')
+            startup_hours = getattr(self._engine, '_startup_auto_stop_hours', None)
+            if startup_mode == 'automatic':
+                self._enter_automatic_mode(hours=startup_hours)
+            else:
+                self._execution_mode.enter_manual()
             self._start_feed()
             self._start_watchdog()
             self._poll_balance()  # show cash immediately
+            self._refresh_volumes()  # populate 24h volume on startup
 
     # ── Engine callbacks ──────────────────────────────────────────
 
@@ -148,27 +170,34 @@ class TalosApp(App):
             self.notify(message, severity=cast(SeverityLevel, severity), markup=False)
 
     def _refresh_proposals(self) -> None:
-        """Update subtitle, WS disconnect banner, and proposal panel."""
-        # WS disconnect: show red banner and title bar warning
+        """Update subtitle with structured status bar and refresh proposal panel."""
         banner = self.query_one("#ws-disconnect-banner", Static)
         ws_dead = self._engine is not None and not self._engine.ws_connected
         if ws_dead:
             banner.add_class("visible")
         else:
             banner.remove_class("visible")
-        # Sub_title: scan mode prefix + status (WS warning > auto-accept > empty)
-        mode_tag = "SPORTS" if self._scan_mode == "sports" else "NON-SPORTS"
-        if ws_dead:
-            self.sub_title = f"[{mode_tag}] !!! WEBSOCKET DISCONNECTED — PRICES ARE STALE !!!"
-        elif self._auto_accept.active:
-            self.sub_title = (
-                f"[{mode_tag}] AUTO-ACCEPT {self._auto_accept.remaining_str()} remaining "
-                f"({self._auto_accept.accepted_count} accepted)"
-            )
-        else:
-            self.sub_title = f"[{mode_tag}]"
 
-        # Refresh the proposal panel if it's visible
+        # Structured status bar: SCAN_MODE | MODE: X | DATA: X | count
+        mode_tag = "SPORTS" if self._scan_mode == "sports" else "NON-SPORTS"
+        parts: list[str] = [mode_tag]
+
+        if self._execution_mode.is_automatic:
+            mode_str = "MODE: AUTO"
+            remaining = self._execution_mode.remaining_str()
+            if remaining:
+                mode_str += f" {remaining} left"
+            parts.append(mode_str)
+        else:
+            parts.append("MODE: MANUAL")
+
+        parts.append("DATA: STALE" if self._is_data_stale() else "DATA: LIVE")
+
+        if self._execution_mode.is_automatic:
+            parts.append(f"{self._execution_mode.accepted_count} accepted")
+
+        self.sub_title = " | ".join(parts)
+
         try:
             panel = self.query_one("#proposal-panel", ProposalPanel)
             if panel.display:
@@ -176,14 +205,23 @@ class TalosApp(App):
         except Exception:
             pass
 
+    def _is_data_stale(self) -> bool:
+        """True if orderbook data is not fresh. 60s threshold — warns before
+        the 120s recovery threshold in orderbook.py kicks in."""
+        if self._engine is None:
+            return True
+        if not self._engine.ws_connected:
+            return True
+        return self._engine.seconds_since_last_book_update() > 60.0
+
     @work(thread=False)
     async def _auto_accept_tick(self) -> None:
         """Each second: if auto-accept is active, approve the oldest pending proposal."""
-        if not self._auto_accept.active or self._engine is None:
+        if not self._execution_mode.is_automatic or self._engine is None:
             return
 
-        if self._auto_accept.is_expired():
-            self._stop_auto_accept()
+        if self._execution_mode.is_expired():
+            self._end_automatic_session()
             return
 
         # Rate limit backoff — skip ticks until cooldown expires
@@ -208,9 +246,9 @@ class TalosApp(App):
         snapshot = self._capture_state_snapshot()
         try:
             await self._engine.approve_proposal(proposal.key)
-            self._auto_accept.accepted_count += 1
+            self._execution_mode.accepted_count += 1
             if self._auto_accept_logger:
-                self._auto_accept_logger.log_accepted(proposal, snapshot, self._auto_accept)
+                self._auto_accept_logger.log_accepted(proposal, snapshot, self._execution_mode)
         except KalshiRateLimitError as e:
             backoff = max(e.retry_after or 2.0, 2.0)
             self._rate_limit_until = datetime.now(UTC) + timedelta(seconds=backoff)
@@ -218,7 +256,7 @@ class TalosApp(App):
         except Exception as e:
             logger.exception("auto_accept_error", proposal_key=str(proposal.key))
             if self._auto_accept_logger:
-                self._auto_accept_logger.log_error(proposal, str(e), snapshot, self._auto_accept)
+                self._auto_accept_logger.log_error(proposal, str(e), snapshot, self._execution_mode)
 
     def _capture_state_snapshot(self) -> dict[str, object]:
         """Capture full trading state for JSONL logging."""
@@ -423,7 +461,7 @@ class TalosApp(App):
             return
         await self._engine.refresh_trades()
         # CPM data changed — recompute positions so ETA columns update
-        self._engine._recompute_positions()
+        self._engine.recompute_positions()
         table = self.query_one(OpportunitiesTable)
         table.update_positions(self._engine.position_summaries)
         table._all_dirty = True
@@ -433,21 +471,16 @@ class TalosApp(App):
         if self._engine is None:
             return
         try:
-            settlements = await self._engine._rest.get_settlements(limit=200)
+            settlements = await self._engine.get_all_settlements()
             from talos.settlement_tracker import reconcile_event
 
             # Populate cache if available
-            cache = getattr(self._engine, "_settlement_cache", None)
-            if cache is not None:
+            if self._engine.has_settlement_cache:
                 est_map = {
                     s.event_ticker: int(s.locked_profit_cents)
                     for s in self._engine.position_summaries
                 }
-                cache.upsert_batch(
-                    settlements,
-                    est_pnl_map=est_map,
-                    subtitles=self._engine.game_manager.subtitles,
-                )
+                self._engine.cache_settlements(settlements, est_pnl_map=est_map)
 
             # Reconciliation: check for discrepancies
             summaries_by_event = {s.event_ticker: s for s in self._engine.position_summaries}
@@ -465,6 +498,13 @@ class TalosApp(App):
                         f"diff=${disc['difference'] / 100:.2f}",
                         severity="warning",
                     )
+            # Update performance panel from cached settlements
+            if self._engine.has_settlement_cache:
+                from talos.settlement_tracker import aggregate_settlements
+
+                all_rows = self._engine.performance_settlement_rows()
+                agg = aggregate_settlements(all_rows)
+                self.query_one(PerformancePanel).update_performance(agg)
         except Exception:
             pass  # Non-critical — don't crash for P&L display
 
@@ -474,10 +514,7 @@ class TalosApp(App):
         Collects snapshot data on the main thread (reads engine state),
         then writes to SQLite in a worker thread to avoid blocking the UI.
         """
-        if self._engine is None or not hasattr(self._engine, "_data_collector"):
-            return
-        dc = self._engine._data_collector
-        if dc is None:
+        if self._engine is None:
             return
         scanner = self._engine.scanner
         snapshots = []
@@ -514,12 +551,12 @@ class TalosApp(App):
                 }
             )
         if snapshots:
-            dc.log_market_snapshots(snapshots)
+            self._engine.log_market_snapshots(snapshots)
 
     @work(thread=False)
     async def _refresh_volumes(self) -> None:
         if self._engine is not None:
-            await self._engine.game_manager.refresh_volumes()
+            await self._engine.refresh_volumes()
 
     @work(thread=False)
     async def _refresh_game_status(self) -> None:
@@ -535,16 +572,7 @@ class TalosApp(App):
         if self._engine is None:
             return
         table = self.query_one(OpportunitiesTable)
-        now = time.time()
-        ages: dict[str, float | None] = {}
-        book_manager = self._engine._feed.book_manager
-        for ticker in book_manager.tickers:
-            book = book_manager.get_book(ticker)
-            if book is None or book.last_update <= 0.0:
-                ages[ticker] = None
-            else:
-                ages[ticker] = now - book.last_update
-        table.update_freshness(ages)
+        table.update_freshness(self._engine.orderbook_ages(now=time.time()))
 
     def refresh_opportunities(self) -> None:
         """Update the opportunities table from scanner state.
@@ -655,69 +683,66 @@ class TalosApp(App):
     async def _run_scan(self) -> None:
         if self._engine is None:
             return
-        self.notify("Scanning for events...")
+        mode_label = "non-sports" if self._scan_mode == "nonsports" else "sports"
+        self.notify(f"Scanning {mode_label} events...", timeout=15)
         import time as _scan_time
 
         _scan_t0 = _scan_time.monotonic()
         try:
-            events = await self._engine.game_manager.scan_events(
-                scan_mode=self._scan_mode,
-            )
+            events = await self._engine.scan_events(scan_mode=self._scan_mode)
         except Exception as e:
             self.notify(f"Scan failed: {e}", severity="error")
             return
         _duration = round((_scan_time.monotonic() - _scan_t0) * 1000)
         if not events:
-            self.notify("No new events found", severity="information")
+            self.notify(f"No {mode_label} events found ({_duration}ms)")
             return
 
-        self.notify(f"Found {len(events)} events")
+        self.notify(f"Found {len(events)} {mode_label} events")
         selected = await self.push_screen_wait(ScanScreen(events))
         selected_tickers = set(selected) if selected else set()
 
         # Log scan to data collector
-        dc = getattr(self._engine, "_data_collector", None)
-        if dc is not None:
-            from talos.game_manager import DEFAULT_NONSPORTS_CATEGORIES, SCAN_SERIES
+        from talos.game_manager import DEFAULT_NONSPORTS_CATEGORIES, SCAN_SERIES
 
-            scan_events = []
-            for ev in events:
-                prefix = ev.series_ticker or ev.event_ticker.split("-")[0]
-                from talos.ui.widgets import _CATEGORY_SHORT, _SPORT_LEAGUE
+        scan_events = []
+        for ev in events:
+            prefix = ev.series_ticker or ev.event_ticker.split("-")[0]
+            from talos.ui.widgets import _CATEGORY_SHORT, _SPORT_LEAGUE
 
-                sport_league = _SPORT_LEAGUE.get(prefix)
-                if sport_league:
-                    sport, league = sport_league
-                else:
-                    sport = _CATEGORY_SHORT.get(ev.category, ev.category[:4])
-                    league = prefix.removeprefix("KX")[:5]
-                active_mkts = [m for m in ev.markets if m.status == "active"]
-                scan_events.append(
-                    {
-                        "event_ticker": ev.event_ticker,
-                        "series_ticker": ev.series_ticker,
-                        "sport": sport,
-                        "league": league,
-                        "title": ev.title,
-                        "sub_title": ev.sub_title,
-                        "volume_a": active_mkts[0].volume_24h or 0 if len(active_mkts) > 0 else 0,
-                        "volume_b": active_mkts[1].volume_24h or 0 if len(active_mkts) > 1 else 0,
-                        "no_bid_a": active_mkts[0].no_bid or 0 if len(active_mkts) > 0 else 0,
-                        "no_ask_a": active_mkts[0].no_ask or 0 if len(active_mkts) > 0 else 0,
-                        "no_bid_b": active_mkts[1].no_bid or 0 if len(active_mkts) > 1 else 0,
-                        "no_ask_b": active_mkts[1].no_ask or 0 if len(active_mkts) > 1 else 0,
-                        "edge": 0.0,
-                        "selected": 1 if ev.event_ticker in selected_tickers else 0,
-                    }
-                )
-            dc.log_scan(
-                events_found=len(events),
-                events_eligible=len(events),
-                events_selected=len(selected_tickers),
-                series_scanned=len(SCAN_SERIES) + (1 if DEFAULT_NONSPORTS_CATEGORIES else 0),
-                duration_ms=_duration,
-                events=scan_events,
+            sport_league = _SPORT_LEAGUE.get(prefix)
+            if sport_league:
+                sport, league = sport_league
+            else:
+                sport = _CATEGORY_SHORT.get(ev.category, ev.category[:4])
+                league = prefix.removeprefix("KX")[:5]
+            active_mkts = [m for m in ev.markets if m.status == "active"]
+            scan_events.append(
+                {
+                    "event_ticker": ev.event_ticker,
+                    "series_ticker": ev.series_ticker,
+                    "sport": sport,
+                    "league": league,
+                    "title": ev.title,
+                    "sub_title": ev.sub_title,
+                    "volume_a": active_mkts[0].volume_24h or 0 if len(active_mkts) > 0 else 0,
+                    "volume_b": active_mkts[1].volume_24h or 0 if len(active_mkts) > 1 else 0,
+                    "no_bid_a": active_mkts[0].no_bid or 0 if len(active_mkts) > 0 else 0,
+                    "no_ask_a": active_mkts[0].no_ask or 0 if len(active_mkts) > 0 else 0,
+                    "no_bid_b": active_mkts[1].no_bid or 0 if len(active_mkts) > 1 else 0,
+                    "no_ask_b": active_mkts[1].no_ask or 0 if len(active_mkts) > 1 else 0,
+                    "edge": 0.0,
+                    "selected": 1 if ev.event_ticker in selected_tickers else 0,
+                }
             )
+        self._engine.log_scan(
+            events_found=len(events),
+            events_eligible=len(events),
+            events_selected=len(selected_tickers),
+            series_scanned=len(SCAN_SERIES) + (1 if DEFAULT_NONSPORTS_CATEGORIES else 0),
+            duration_ms=_duration,
+            events=scan_events,
+        )
 
         if selected and self._engine is not None:
             pairs = await self._engine.add_games(selected)
@@ -767,17 +792,7 @@ class TalosApp(App):
         # For YES/NO pairs, use the real Kalshi event ticker for the URL
         url_ticker = event_ticker
         if self._engine:
-            pair = (
-                self._engine.scanner._find_pair(event_ticker)
-                if hasattr(self._engine.scanner, "_find_pair")
-                else None
-            )
-            if pair is None:
-                # Try scanner pairs directly
-                for p in self._engine.scanner.pairs:
-                    if p.event_ticker == event_ticker:
-                        pair = p
-                        break
+            pair = self._engine.find_pair(event_ticker)
             if pair and pair.api_event_ticker != event_ticker:
                 url_ticker = pair.api_event_ticker
         series = url_ticker.split("-")[0].lower()
@@ -792,10 +807,9 @@ class TalosApp(App):
     async def _open_settlement_history(self) -> None:
         if self._engine is None:
             return
-        cache = getattr(self._engine, "_settlement_cache", None)
-        if cache is not None:
+        if self._engine.has_settlement_cache:
             try:
-                new_settlements = await self._engine._rest.get_settlements(limit=200)
+                new_settlements = await self._engine.get_settlements(limit=200)
             except Exception as e:
                 self.notify(f"Failed to fetch settlements: {e}", severity="error")
                 new_settlements = []
@@ -805,13 +819,9 @@ class TalosApp(App):
                     s.event_ticker: int(s.locked_profit_cents)
                     for s in self._engine.position_summaries
                 }
-                cache.upsert_batch(
-                    new_settlements,
-                    est_pnl_map=est_map,
-                    subtitles=self._engine.game_manager.subtitles,
-                )
+                self._engine.cache_settlements(new_settlements, est_pnl_map=est_map)
             # Read everything from cache
-            cached = cache.settlements_as_models()
+            cached = self._engine.cached_settlement_models()
             settlements = [s for s, _, _ in cached]
             est_pnl_map: dict[str, int] = {}
             subtitles: dict[str, str] = {}
@@ -823,7 +833,7 @@ class TalosApp(App):
         else:
             # No cache — fetch directly
             try:
-                settlements = await self._engine._rest.get_settlements(limit=200)
+                settlements = await self._engine.get_settlements(limit=200)
             except Exception as e:
                 self.notify(f"Failed to fetch settlements: {e}", severity="error")
                 return
@@ -897,11 +907,8 @@ class TalosApp(App):
                 row_key, _ = table.coordinate_to_cell_key(table.cursor_coordinate)
                 event_ticker = _event_ticker_from_row_key(str(row_key.value))
                 # Blacklist by series prefix (blocks entire series)
-                pair = self._engine.game_manager._games.get(event_ticker)
-                if pair and pair.series_ticker:
-                    entry = pair.series_ticker
-                else:
-                    entry = event_ticker.split("-")[0]
+                series = self._engine.get_series_for_event(event_ticker)
+                entry = series if series else event_ticker.split("-")[0]
                 self._blacklist_ticker(entry)
             except CellDoesNotExist:
                 logger.debug("blacklist_no_selection")
@@ -943,12 +950,7 @@ class TalosApp(App):
         result = await self.push_screen_wait(BlacklistScreen(current))
         if result is None or self._engine is None:
             return
-        # Replace the full blacklist
-        gm = self._engine.game_manager
-        gm._ticker_blacklist = list(result)
-        removed = await gm.remove_blacklisted_games()
-        if self._engine.on_blacklist_change is not None:
-            self._engine.on_blacklist_change(gm.ticker_blacklist)
+        removed = await self._engine.replace_blacklist(result)
         msg = f"Blacklist updated — {len(result)} entries"
         if removed:
             msg += f", removed {len(removed)} game(s)"
@@ -1020,8 +1022,8 @@ class TalosApp(App):
     def action_toggle_auto_accept(self) -> None:
         if self._engine is None:
             return
-        if self._auto_accept.active:
-            self._stop_auto_accept()
+        if self._execution_mode.is_automatic:
+            self._end_automatic_session()
         else:
             self._open_auto_accept()
 
@@ -1029,16 +1031,16 @@ class TalosApp(App):
     async def _open_auto_accept(self) -> None:
         hours = await self.push_screen_wait(AutoAcceptScreen())
         if hours is not None and self._engine is not None:
-            self._start_auto_accept(hours)
+            self._enter_automatic_mode(hours=hours if hours > 0 else None)
 
-    def _start_auto_accept(self, hours: float) -> None:
-        """Activate auto-accept for the given duration."""
+    def _enter_automatic_mode(self, hours: float | None = None) -> None:
+        """Enter automatic execution mode. hours=None means indefinite."""
         if self._engine is None:
             return
 
         from talos.persistence import get_data_dir
 
-        self._auto_accept.start(hours=hours)
+        self._execution_mode.enter_automatic(hours=hours)
 
         log_dir = get_data_dir() / "auto_accept_sessions"
         aa_logger = AutoAcceptLogger(log_dir)
@@ -1050,19 +1052,16 @@ class TalosApp(App):
             "stability_seconds": cfg.stability_seconds,
             "unit_size": self._engine.unit_size,
         }
-        aa_logger.log_session_start(self._auto_accept, config)
+        aa_logger.log_session_start(self._execution_mode, config)
 
-        self.notify(
-            f"Auto-accept ON — {hours:.1f}h",
-            severity="warning",
-            markup=False,
-        )
-        logger.info("auto_accept_started", hours=hours)
+        label = "Automatic mode ON" + (f" — {hours:.1f}h" if hours else " — indefinite")
+        self.notify(label, severity="warning", markup=False)
+        logger.info("execution_mode_automatic", hours=hours)
 
-    def _stop_auto_accept(self) -> None:
-        """Deactivate auto-accept and log session end."""
-        count = self._auto_accept.accepted_count
-        elapsed = self._auto_accept.elapsed_str()
+    def _end_automatic_session(self) -> None:
+        """End automatic session: log final state, switch to manual."""
+        count = self._execution_mode.accepted_count
+        elapsed = self._execution_mode.elapsed_str()
 
         if self._auto_accept_logger and self._engine:
             final_positions: dict[str, object] = {}
@@ -1072,17 +1071,17 @@ class TalosApp(App):
                     "leg_a_filled": s.leg_a.filled_count,
                     "leg_b_filled": s.leg_b.filled_count,
                 }
-            self._auto_accept_logger.log_session_end(self._auto_accept, final_positions)
+            self._auto_accept_logger.log_session_end(self._execution_mode, final_positions)
 
-        self._auto_accept.stop()
+        self._execution_mode.enter_manual()
         self._auto_accept_logger = None
 
         self.notify(
-            f"Auto-accept OFF — {count} accepted in {elapsed}",
+            f"Manual mode — {count} accepted in {elapsed}",
             severity="information",
             markup=False,
         )
-        logger.info("auto_accept_stopped", accepted_count=count, elapsed=elapsed)
+        logger.info("execution_mode_manual", accepted_count=count, elapsed=elapsed)
 
     def action_toggle_exit_only(self) -> None:
         """Toggle exit-only mode on the highlighted event."""
@@ -1105,7 +1104,7 @@ class TalosApp(App):
         if self._engine is not None:
             is_on = self._engine.toggle_exit_only(event_ticker)
             if is_on:
-                await self._engine._enforce_exit_only(event_ticker)
+                await self._engine.enforce_exit_only(event_ticker)
 
     def action_exit_all(self) -> None:
         """Put ALL monitored games into exit-only mode."""

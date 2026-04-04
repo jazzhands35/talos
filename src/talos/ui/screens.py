@@ -232,7 +232,7 @@ class BidScreen(ModalScreen[BidConfirmation | None]):
 
 
 class AutoAcceptScreen(ModalScreen[float | None]):
-    """Modal for entering auto-accept duration in hours."""
+    """Modal for entering automatic mode duration in hours."""
 
     BINDINGS = [("escape", "cancel", "Cancel")]
 
@@ -241,12 +241,13 @@ class AutoAcceptScreen(ModalScreen[float | None]):
 
     def compose(self) -> ComposeResult:
         with Vertical(id="modal-dialog"):
-            yield Label("Auto-Accept Mode", classes="modal-title")
-            yield Label("How many hours to auto-accept proposals?")
+            yield Label("Automatic Mode", classes="modal-title")
+            yield Label("Hours until auto-stop (blank = indefinite):")
             yield Input(
-                value="2.0",
+                value="",
+                placeholder="indefinite",
                 id="hours-input",
-                type="number",
+                type="text",
             )
             yield Label("", id="modal-error", classes="modal-error")
             with Vertical(id="modal-buttons"):
@@ -258,14 +259,19 @@ class AutoAcceptScreen(ModalScreen[float | None]):
             self.dismiss(None)
         elif event.button.id == "start-btn":
             hours_input = self.query_one("#hours-input", Input)
-            try:
-                hours = float(hours_input.value)
-            except ValueError:
-                self.query_one("#modal-error", Label).update("Enter a valid number")
+            raw = hours_input.value.strip()
+            if not raw:
+                # Blank = indefinite → dismiss with 0.0
+                self.dismiss(0.0)
                 return
-            if hours <= 0 or hours > 168:
+            try:
+                hours = float(raw)
+            except ValueError:
+                self.query_one("#modal-error", Label).update("Enter a valid number or leave blank")
+                return
+            if hours < 0:
                 self.query_one("#modal-error", Label).update(
-                    "Duration must be greater than 0 and at most 168 hours"
+                    "Duration must be positive (or blank for indefinite)"
                 )
                 return
             self.dismiss(hours)
@@ -482,7 +488,10 @@ class SettlementHistoryScreen(ModalScreen[None]):
     }
     """
 
-    BINDINGS = [("escape", "cancel", "Cancel")]
+    BINDINGS = [
+        ("escape", "cancel", "Cancel"),
+        ("o", "open_kalshi", "Open on Kalshi"),
+    ]
 
     def __init__(
         self,
@@ -545,11 +554,14 @@ class SettlementHistoryScreen(ModalScreen[None]):
             day_events.sort(key=lambda e: e[2], reverse=True)
 
             # Compute day total P&L (revenue - cost - fees)
+            # Same-ticker pairs: Kalshi nets YES+NO → revenue=0; add
+            # back min(yes,no)*100 for the implicit settlement payout.
             day_pnl = 0
             for _, legs, _ in day_events:
                 for s in legs:
+                    implicit = min(s.yes_count, s.no_count) * 100
                     cost = s.no_total_cost + s.yes_total_cost
-                    day_pnl += s.revenue - cost - s.fee_cost
+                    day_pnl += s.revenue + implicit - cost - s.fee_cost
 
             # Day separator row
             day_label = day_events[0][2].strftime("%b %d")
@@ -593,7 +605,10 @@ class SettlementHistoryScreen(ModalScreen[None]):
         leg_b = legs[1] if len(legs) > 1 else None
 
         # Event-level actual P&L (sum both legs: revenue - cost - fees)
-        total_revenue = sum(s.revenue for s in legs)
+        # Same-ticker pairs: add implicit payout for netted YES+NO pairs
+        total_revenue = sum(
+            s.revenue + min(s.yes_count, s.no_count) * 100 for s in legs
+        )
         total_cost = sum(s.no_total_cost + s.yes_total_cost for s in legs)
         total_fees = sum(s.fee_cost for s in legs)
         actual_pnl = total_revenue - total_cost - total_fees
@@ -694,6 +709,20 @@ class SettlementHistoryScreen(ModalScreen[None]):
 
     def action_cancel(self) -> None:
         self.dismiss(None)
+
+    def action_open_kalshi(self) -> None:
+        """Open the selected event on Kalshi in the default browser."""
+        import webbrowser
+
+        table = self.query_one("#settlement-table", DataTable)
+        if table.cursor_row is None:
+            return
+        # Row keys are "evt_ticker:a", "evt_ticker:b", or "day:YYYY-MM-DD"
+        key_str = str(table.ordered_rows[table.cursor_row].key.value)
+        if key_str.startswith("day:"):
+            return
+        evt_ticker = key_str.rsplit(":", 1)[0]
+        webbrowser.open(f"https://kalshi.com/markets/{evt_ticker}")
 
 
 class _PickerTable(DataTable):
