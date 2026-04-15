@@ -403,6 +403,11 @@ class PositionLedger:
             "filled_b": b.filled_count,
             "cost_b": b.filled_total_cost,
             "fees_b": b.filled_fees,
+            # Closed-bucket keys use longer, self-documenting names
+            # (closed_count_* / closed_total_cost_* / closed_fees_*) rather
+            # than mirroring the terse filled_a/cost_a/fees_a convention.
+            # Intentional: see docs/superpowers/specs/2026-04-15-open-unit-
+            # avg-scoping-design.md §6 and Task 7's strict validator.
             "closed_count_a": a.closed_count,
             "closed_total_cost_a": a.closed_total_cost,
             "closed_fees_a": a.closed_fees,
