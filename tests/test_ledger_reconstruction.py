@@ -16,6 +16,46 @@ from talos.position_ledger import PositionLedger, Side
 _SaveDict = dict[str, int | str | None]
 
 
+class TestRegime5cColdStart:
+    """No save file at all — empty ledger, reconcile-on-fill handles it.
+
+    5c is the trivial regime: seed_from_saved(None) or seed_from_saved({})
+    early-returns; subsequent record_fill / sync_from_orders calls invoke
+    _reconcile_closed per the invariant from Task 3.
+    """
+
+    def test_seed_from_saved_none_early_returns(self):
+        ledger = PositionLedger("EVT-X", unit_size=5)
+        ledger.seed_from_saved(None)
+        assert ledger._sides[Side.A].filled_count == 0
+        assert ledger._sides[Side.A].closed_count == 0
+        assert ledger._sides[Side.B].filled_count == 0
+        assert ledger._sides[Side.B].closed_count == 0
+
+    def test_seed_from_saved_empty_dict_early_returns(self):
+        ledger = PositionLedger("EVT-X", unit_size=5)
+        empty: _SaveDict = {}
+        ledger.seed_from_saved(empty)
+        assert ledger._sides[Side.A].filled_count == 0
+        assert ledger._sides[Side.A].closed_count == 0
+        assert ledger._sides[Side.B].filled_count == 0
+        assert ledger._sides[Side.B].closed_count == 0
+
+    def test_cold_start_then_fills_reconcile_normally(self):
+        """Empty ledger + subsequent fills trigger reconcile via record_fill."""
+        ledger = PositionLedger("EVT-X", unit_size=5)
+        ledger.seed_from_saved(None)
+        ledger.record_fill(Side.A, 5, 80)
+        ledger.record_fill(Side.B, 5, 20)
+        assert ledger._sides[Side.A].closed_count == 5
+        assert ledger._sides[Side.B].closed_count == 5
+
+
+# Note: tests below deliberately overlap with TestSavedDictSchema in
+# tests/test_position_ledger.py. That file tests seed_from_saved as a method;
+# this file tests the four regimes end-to-end as described in spec section 5.
+# Do not dedupe naively — keeping both layers separates "does the method
+# work?" from "does the regime produce the right end-state?"
 class TestRegime5aNormalRestart:
     """Persisted closed_* restored verbatim; no re-derivation from blend."""
 
