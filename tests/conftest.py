@@ -31,6 +31,8 @@ def caplog(caplog):  # type: ignore[override]
         wrapper_class=structlog.stdlib.BoundLogger,
         cache_logger_on_first_use=False,
     )
-    with caplog.at_level(logging.DEBUG):
-        yield caplog
-    structlog.reset_defaults()
+    try:
+        with caplog.at_level(logging.DEBUG):
+            yield caplog
+    finally:
+        structlog.reset_defaults()

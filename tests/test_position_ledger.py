@@ -963,13 +963,14 @@ class TestReconcileClosed:
         b.filled_total_cost = 205  # avg 20.5
         ledger._reconcile_closed()
         # min(5,10)//5 = 1 unit. Close 5 each.
-        # A: 5 close with pro-rata of open avg (full flush: 410)
-        # B: 5 close with pro-rata of open avg (half flush: round(205*5/10) = 103 or 102)
+        # A: 5 close = full flush of open (410)
+        # B: 5 close = pro-rata of open avg. round(205*5/10) = round(102.5).
+        # Python 3 uses banker's rounding (round-half-to-even) → 102.
         assert a.closed_count == 5
         assert a.closed_total_cost == 410
         assert b.closed_count == 5
-        assert b.closed_total_cost in (102, 103)  # banker's rounding tolerance
-        # After close, open B has 5 contracts at ~20.4c (pro-rata preserves blend)
+        assert b.closed_total_cost == 102
+        # After close, open B has 5 contracts: (205 - 102) / 5 = 20.6c avg.
         assert ledger.open_count(Side.A) == 0
         assert ledger.open_count(Side.B) == 5
 
