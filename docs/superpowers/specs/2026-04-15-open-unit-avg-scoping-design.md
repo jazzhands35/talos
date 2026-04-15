@@ -185,7 +185,9 @@ On the first boot after the schema change lands, existing save files have `fille
 
 New event, no persisted state. `seed_from_saved` is either not called or called with `None` — initial state is all zeros. `sync_from_orders` and `sync_from_positions` then populate `filled_*` from Kalshi. `_reconcile_closed()` at the end of each sync path flushes whatever balanced portion exists against the blend, same as 5b.
 
-This also carries the blend approximation for the initial reconciliation, and has the same justification: Kalshi gives us lifetime totals only — no fill-level history we could use for FIFO. Once in-memory fill-by-fill events start flowing via WS, subsequent reconciliations are FIFO-accurate.
+This carries the blend approximation for the initial reconciliation because Kalshi gives us lifetime totals only — no fill-level history we could use to reconstruct a fill-ordered match.
+
+**Pro-rata vs FIFO in subsequent live fills.** Once in-memory fill-by-fill events start flowing via WS, each fill triggers its own reconcile. In the common case where fills arrive sequentially on one side and then the other (A fills 5, B fills 5, close fires), both sides' open buckets are homogeneous at the moment of close, and pro-rata produces the same result as FIFO. **But pro-rata and FIFO diverge when fills on the two sides interleave at varying prices** — e.g., if B fills 5 @ 18, then A fills 2 @ 82, then B fills 5 @ 23, then A fills 3 @ 81, the close at that moment pro-rata-flushes across B's blended 10-contract bucket (avg 20.5), leaving residual open B at 20.4 instead of the FIFO-correct 23. Pro-rata is what this spec commits to; the approximation cost is bounded by how much fill prices vary within an unclosed unit on the counterparty side. If that cost ever becomes measurable, the fix is per-fill FIFO accounting, which is a separate, larger change.
 
 ### 5d. Same-ticker specifics
 
@@ -213,11 +215,47 @@ The persisted ledger schema gains three new fields per side: `closed_count_a/b`,
 
 **Serialization.** Extend `PositionLedger.to_saved_dict()` (currently at [position_ledger.py:320-343](src/talos/position_ledger.py:320)) with the six new keys. The schema is additive; downstream persistence code (`persistence.save_games_full`) doesn't need changes beyond consuming the new keys as part of the dict.
 
-**Deserialization.** Extend `seed_from_saved` ([position_ledger.py:345-370](src/talos/position_ledger.py:345)) to read the six new keys when present and assign them directly to `_SideState`. When the keys are absent (old save file), initialize to 0 and let the section-5b migration path populate them via reconciliation. Use `data.get("closed_count_a", None)` — `None` distinguishes "key missing" from "key present with value 0."
+**Deserialization — strict all-or-nothing rule.** `seed_from_saved` ([position_ledger.py:345-370](src/talos/position_ledger.py:345)) must treat the six `closed_*` keys as a single atomic group:
 
-**Log line on boot** to make the regime explicit:
-- `ledger_restored_with_closed` when all six closed keys are present → 5a normal restart
-- `ledger_migrated_missing_closed` when any closed key is absent → 5b migration; reconciliation will approximate
+- **If ALL six keys are present** (`closed_count_a/b`, `closed_total_cost_a/b`, `closed_fees_a/b`): restore verbatim. This is the 5a path.
+- **If ANY of the six keys is missing**: treat the entire group as absent. Zero all six, log `ledger_migrated_missing_closed` with the list of missing keys for diagnostics, and fall through to 5b migration via the terminal `_reconcile_closed()` call.
+
+No mixed restore. A partial save (e.g., three keys present, three missing) is a corrupted or hand-edited file; mixing verbatim restore with zero-init would produce an internally-inconsistent bucket state (e.g., `closed_count_a > 0` but `closed_total_cost_a == 0`) that later code paths would silently misinterpret. The migration fallback is safe regardless of why the keys are missing, so using it as the "anything weird → reset and recompute" escape hatch is the right call.
+
+Implementation sketch:
+
+```python
+required_closed_keys = (
+    "closed_count_a", "closed_total_cost_a", "closed_fees_a",
+    "closed_count_b", "closed_total_cost_b", "closed_fees_b",
+)
+missing = [k for k in required_closed_keys if k not in data]
+if missing:
+    # 5b migration path
+    for side in (Side.A, Side.B):
+        self._sides[side].closed_count = 0
+        self._sides[side].closed_total_cost = 0
+        self._sides[side].closed_fees = 0
+    logger.info(
+        "ledger_migrated_missing_closed",
+        event_ticker=self.event_ticker,
+        missing_keys=missing,
+    )
+else:
+    # 5a normal restart
+    for side, prefix in [(Side.A, "a"), (Side.B, "b")]:
+        s = self._sides[side]
+        s.closed_count = int(data[f"closed_count_{prefix}"])
+        s.closed_total_cost = int(data[f"closed_total_cost_{prefix}"])
+        s.closed_fees = int(data[f"closed_fees_{prefix}"])
+    logger.info("ledger_restored_with_closed", event_ticker=self.event_ticker)
+```
+
+Use `k not in data` rather than `data.get(k) is None` — a present-but-null entry is still corrupted and should trigger migration, but the simpler `in` check is what matters for the atomic-group invariant.
+
+**Log line contract:**
+- `ledger_restored_with_closed` — all six keys present, restored verbatim → 5a normal restart
+- `ledger_migrated_missing_closed` with `missing_keys=[...]` — at least one key absent → 5b migration; reconciliation will approximate
 
 **Test fixtures.** Any test fixture that includes a serialized ledger state needs to be audited: old fixtures without `closed_*` continue to exercise the 5b migration path (good — we should keep at least one such fixture to guard the migration); new fixtures should include `closed_*` to exercise 5a normal restart.
 
@@ -278,6 +316,7 @@ Split by regime. Each regime needs its own test block because the correctness cr
 - **Migration preserves lifetime avg.** Same old-style persist. Before migration `avg_filled_price(B) == 20.5`. After migration, same lifetime call still returns 20.5 (lifetime = open + closed, unchanged by the flush).
 - **Log line differs from 5a.** Assert `ledger_migrated_missing_closed` fires, not `ledger_restored_with_closed`.
 - **Post-migration save contains closed keys.** Call `to_saved_dict()` after migration; assert all six new keys are present in the output.
+- **Partial closed keys trigger migration, not mixed restore.** Construct a save with `closed_count_a` and `closed_total_cost_a` present but `closed_fees_a` and all three B keys missing. Assert: all six fields zeroed (not a mix of restored + zero), `ledger_migrated_missing_closed` fires with `missing_keys` listing exactly the four absent keys, and the terminal reconcile populates from the blend. This guards the atomic-group rule — a corrupted/hand-edited save never produces an internally-inconsistent bucket state.
 
 **5c — Cold start (no save file at all):**
 
