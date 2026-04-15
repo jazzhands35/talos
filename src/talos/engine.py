@@ -3161,7 +3161,7 @@ class TradingEngine:
             return
 
         # Re-check: profitability with fresh data
-        other_avg = ledger.avg_filled_price(side.other)
+        other_avg = ledger.open_avg_filled_price(side.other)
         if other_avg <= 0:
             self._notify(f"Queue improve skipped: no fills on other side for {name}", "warning")
             return
