@@ -308,7 +308,7 @@ Split by regime. Each regime needs its own test block because the correctness cr
 
 - **Exact restoration of open basis.** Persist state where open B has avg 23 (filled_B=10, closed_B=5, closed_total_cost_B=90, so open_cost_B = 205-90 = 115, open_count_B=5, open_avg=23). Restart. Assert `open_avg_filled_price(Side.B) == 23.0` — NOT 20.5 (the blend). This is the exact regression Codex flagged.
 - **Idempotent reconcile on restart.** Same persisted state as above. After `seed_from_saved` and the end-of-method `_reconcile_closed()`, assert `closed_count_B` is unchanged from persisted value (no spurious second close).
-- **Log line emitted.** Assert `ledger_restored_with_closed` log line fires once per side.
+- **Log line emitted.** Assert `ledger_restored_with_closed` log line fires exactly once per ledger (not once per side) when `seed_from_saved` runs with all six keys present.
 
 **5b — First-boot migration (persisted `filled_*` but no `closed_*`):**
 
