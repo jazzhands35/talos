@@ -2519,7 +2519,7 @@ class TradingEngine:
 
             # Safety gate #1: profitability (P18)
             ahead_side = behind_side.other
-            other_avg = ledger.avg_filled_price(ahead_side)
+            other_avg = ledger.open_avg_filled_price(ahead_side)
             if other_avg <= 0:
                 continue
 
