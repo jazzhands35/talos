@@ -268,6 +268,45 @@ class PositionLedger:
 
         return True, ""
 
+    # ── Open-unit reconciliation ────────────────────────────────────
+
+    def _reconcile_closed(self) -> None:
+        """Flush newly-matched pairs from the open bucket into the closed bucket.
+
+        Idempotent: safe to call multiple times. If no new units can close,
+        returns without mutation.
+
+        Must be invoked after ANY mutation that increases filled_count or
+        filled_total_cost. See the invariant in the open-unit avg scoping
+        spec (docs/superpowers/specs/2026-04-15-open-unit-avg-scoping-design.md).
+        """
+        a = self._sides[Side.A]
+        b = self._sides[Side.B]
+        open_a = a.filled_count - a.closed_count
+        open_b = b.filled_count - b.closed_count
+        matchable = min(open_a, open_b)
+        units_to_close = matchable // self.unit_size
+        if units_to_close == 0:
+            return
+        contracts = units_to_close * self.unit_size
+        for side_state in (a, b):
+            open_count = side_state.filled_count - side_state.closed_count
+            open_cost = side_state.filled_total_cost - side_state.closed_total_cost
+            open_fees = side_state.filled_fees - side_state.closed_fees
+            side_state.closed_count += contracts
+            side_state.closed_total_cost += round(open_cost * contracts / open_count)
+            side_state.closed_fees += round(open_fees * contracts / open_count)
+        logger.info(
+            "ledger_reconciled_closed",
+            event_ticker=self.event_ticker,
+            units_closed=units_to_close,
+            contracts=contracts,
+            open_a=a.filled_count - a.closed_count,
+            open_b=b.filled_count - b.closed_count,
+            avg_a=self.open_avg_filled_price(Side.A),
+            avg_b=self.open_avg_filled_price(Side.B),
+        )
+
     # ── State mutations ─────────────────────────────────────────────
 
     def record_fill(self, side: Side, count: int, price: int, *, fees: int = 0) -> None:

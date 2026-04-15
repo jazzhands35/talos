@@ -905,3 +905,101 @@ class TestClosedBucket:
         s.closed_count = 5
         s.closed_total_cost = 90
         assert ledger.avg_filled_price(Side.A) == 20.5
+
+
+class TestReconcileClosed:
+    """_reconcile_closed flushes matched pairs into the closed bucket."""
+
+    def test_noop_when_imbalanced(self):
+        from talos.position_ledger import PositionLedger, Side
+        ledger = PositionLedger("EVT-X", unit_size=5)
+        ledger._sides[Side.A].filled_count = 5
+        ledger._sides[Side.A].filled_total_cost = 410
+        ledger._sides[Side.B].filled_count = 3
+        ledger._sides[Side.B].filled_total_cost = 54
+        ledger._reconcile_closed()
+        # min(5, 3) = 3, 3 // 5 = 0 units, no close fires
+        assert ledger._sides[Side.A].closed_count == 0
+        assert ledger._sides[Side.B].closed_count == 0
+
+    def test_closes_one_balanced_unit(self):
+        from talos.position_ledger import PositionLedger, Side
+        ledger = PositionLedger("EVT-X", unit_size=5)
+        a = ledger._sides[Side.A]
+        b = ledger._sides[Side.B]
+        a.filled_count = 5
+        a.filled_total_cost = 410  # avg 82
+        b.filled_count = 5
+        b.filled_total_cost = 90   # avg 18
+        ledger._reconcile_closed()
+        assert a.closed_count == 5
+        assert a.closed_total_cost == 410
+        assert b.closed_count == 5
+        assert b.closed_total_cost == 90
+        assert ledger.open_count(Side.A) == 0
+        assert ledger.open_count(Side.B) == 0
+
+    def test_closes_multiple_balanced_units_at_once(self):
+        from talos.position_ledger import PositionLedger, Side
+        ledger = PositionLedger("EVT-X", unit_size=5)
+        a = ledger._sides[Side.A]
+        b = ledger._sides[Side.B]
+        a.filled_count = 10
+        a.filled_total_cost = 820
+        b.filled_count = 10
+        b.filled_total_cost = 180
+        ledger._reconcile_closed()
+        assert a.closed_count == 10
+        assert b.closed_count == 10
+
+    def test_imbalanced_close_flushes_min_units(self):
+        from talos.position_ledger import PositionLedger, Side
+        ledger = PositionLedger("EVT-X", unit_size=5)
+        a = ledger._sides[Side.A]
+        b = ledger._sides[Side.B]
+        a.filled_count = 5
+        a.filled_total_cost = 410  # 82
+        b.filled_count = 10
+        b.filled_total_cost = 205  # avg 20.5
+        ledger._reconcile_closed()
+        # min(5,10)//5 = 1 unit. Close 5 each.
+        # A: 5 close with pro-rata of open avg (full flush: 410)
+        # B: 5 close with pro-rata of open avg (half flush: round(205*5/10) = 103 or 102)
+        assert a.closed_count == 5
+        assert a.closed_total_cost == 410
+        assert b.closed_count == 5
+        assert b.closed_total_cost in (102, 103)  # banker's rounding tolerance
+        # After close, open B has 5 contracts at ~20.4c (pro-rata preserves blend)
+        assert ledger.open_count(Side.A) == 0
+        assert ledger.open_count(Side.B) == 5
+
+    def test_idempotent_second_call_is_noop(self):
+        from talos.position_ledger import PositionLedger, Side
+        ledger = PositionLedger("EVT-X", unit_size=5)
+        ledger._sides[Side.A].filled_count = 5
+        ledger._sides[Side.A].filled_total_cost = 400
+        ledger._sides[Side.B].filled_count = 5
+        ledger._sides[Side.B].filled_total_cost = 100
+        ledger._reconcile_closed()
+        a_closed_before = ledger._sides[Side.A].closed_count
+        b_closed_before = ledger._sides[Side.B].closed_count
+        ledger._reconcile_closed()
+        assert ledger._sides[Side.A].closed_count == a_closed_before
+        assert ledger._sides[Side.B].closed_count == b_closed_before
+
+    def test_emits_paper_trail_log(self, caplog):
+        import logging
+        from talos.position_ledger import PositionLedger, Side
+        caplog.set_level(logging.INFO)
+        ledger = PositionLedger("EVT-X", unit_size=5)
+        ledger._sides[Side.A].filled_count = 5
+        ledger._sides[Side.A].filled_total_cost = 400
+        ledger._sides[Side.B].filled_count = 5
+        ledger._sides[Side.B].filled_total_cost = 100
+        ledger._reconcile_closed()
+        # structlog records go through the standard logging module; look for the event
+        assert any(
+            "ledger_reconciled_closed" in rec.getMessage() or
+            "ledger_reconciled_closed" in str(getattr(rec, "msg", ""))
+            for rec in caplog.records
+        )
