@@ -159,37 +159,69 @@ With the invariant from section 3 in place, cold-start reconstruction is not a s
 
 **Two ledger categories to consider on startup:**
 
-**(a) Non-same-ticker ledgers** (e.g., two separate Kalshi markets for a sports arb). Startup sequence:
+### 5a. Normal restart (persisted state has `closed_*`)
 
-1. `seed_from_saved` restores persisted `filled_*` → `_reconcile_closed()` at method end → `closed_*` populated from the blended totals for whichever balanced portion matches a unit boundary.
-2. `sync_from_orders` runs next, may overwrite filled totals with fresh REST data → `_reconcile_closed()` re-runs, idempotent.
-3. `sync_from_positions` runs last, augments if positions-endpoint shows more fills than orders-endpoint knew → `_reconcile_closed()` re-runs, idempotent.
+Once the schema change from section 6 lands and the process has run at least one reconciliation and persisted afterwards, every subsequent restart is a **verbatim restore**:
 
-The first non-trivial reconciliation wins; subsequent calls are no-ops because the units are already closed.
+1. `seed_from_saved` reads `filled_*` AND `closed_*` from the save file and assigns them directly. **Do not re-derive `closed_*` from the blend when the keys are present.**
+2. `_reconcile_closed()` runs at method end — idempotent no-op in the normal case (any further units to close were already closed pre-persist; the save was taken at a quiet point).
+3. `sync_from_orders` may later update `filled_*` if Kalshi reports changes since last persist → `_reconcile_closed()` re-runs and flushes any newly-matched pairs.
+4. `sync_from_positions` (non-same-ticker only) may further augment → `_reconcile_closed()` re-runs.
 
-**(b) Same-ticker ledgers** (YES + NO on one market — the Jeff Probst event that motivated this spec). Startup sequence:
+**The invariant worth testing explicitly:** if a ledger persists state `{filled_A=10 closed_A=5 open_avg_A=82, filled_B=10 closed_B=5 open_avg_B=23}` and immediately restarts with no new fills in between, `open_avg_filled_price` on both sides must return the same values. Codex correctly flagged that re-deriving from the blend on every boot would corrupt this state (open B would come back at 20.5c instead of 23c).
 
-1. `seed_from_saved` restores persisted `filled_*` → `_reconcile_closed()` at method end → `closed_*` populated.
-2. `sync_from_orders` runs; may update filled totals → `_reconcile_closed()` re-runs.
-3. `sync_from_positions` **early-returns at [position_ledger.py:544](src/talos/position_ledger.py:544) without mutating anything** — the positions endpoint reports net YES-minus-NO for same-ticker, which is useless for pair accounting. No reconciliation needed here.
+### 5b. First-boot migration from a pre-schema save file
 
-**Without the invariant from section 3**, same-ticker ledgers would never populate `closed_*` after restart — persistence would hand them unreconciled state and no other path would fix it. This is the migration trap that Codex flagged (P1 #2). The invariant closes it: as long as every mutation path reconciles, same-ticker restart falls out for free via the `seed_from_saved` invocation.
+On the first boot after the schema change lands, existing save files have `filled_*` but no `closed_*` keys. This is a one-time migration:
 
-**Approximation caveat.** Reconstruction treats the restored blended avg as uniform across all contracts, which is wrong for a position built unit-by-unit at varying prices. Kalshi only gives us the blend — we can't do better without historical per-fill data. For positions that were well-behaved (all units at similar prices), the approximation is negligible; for positions with a wide spread across units, the residual open avg will be mis-attributed until the next unit closes cleanly. We accept this because there's no data source that would let us do better, and the alternative (defer all decisions until a fresh in-memory fill happens) would brick the system post-restart.
+1. `seed_from_saved` reads `filled_*`, sees no `closed_*` keys, initializes them to 0.
+2. `_reconcile_closed()` at method end runs against `open = filled - 0 = filled`, flushes whatever balanced portion matches a unit boundary, populates `closed_*` via pro-rata against the blend.
+3. Subsequent sync calls run and reconcile again idempotently.
+4. Next persist writes out the populated `closed_*` — from this point forward this ledger is in the 5a "normal restart" regime.
+
+**This is the only time the blend-based approximation runs.** After the first persist, `closed_*` is authoritative and never rederived.
+
+### 5c. Kalshi-only cold start (no save file at all)
+
+New event, no persisted state. `seed_from_saved` is either not called or called with `None` — initial state is all zeros. `sync_from_orders` and `sync_from_positions` then populate `filled_*` from Kalshi. `_reconcile_closed()` at the end of each sync path flushes whatever balanced portion exists against the blend, same as 5b.
+
+This also carries the blend approximation for the initial reconciliation, and has the same justification: Kalshi gives us lifetime totals only — no fill-level history we could use for FIFO. Once in-memory fill-by-fill events start flowing via WS, subsequent reconciliations are FIFO-accurate.
+
+### 5d. Same-ticker specifics
+
+Same-ticker ledgers (YES + NO on one market — the Jeff Probst event) differ only in that `sync_from_positions` early-returns at [position_ledger.py:544](src/talos/position_ledger.py:544) without mutating anything (positions endpoint reports net YES-minus-NO for same-ticker, useless for pair accounting).
+
+This means the only restart reconciliation paths for same-ticker ledgers are `seed_from_saved` (5a/5b) and `sync_from_orders`. Without the invariant from section 3 on `seed_from_saved`, same-ticker ledgers would be stuck at `closed_*` = 0 forever. With it, they restore correctly in 5a and migrate correctly in 5b.
+
+### 5e. Approximation cost and paper trail
+
+**When the blend approximation runs (5b first-boot and 5c cold-start):** reconstruction treats the lifetime blended avg as uniform across all contracts, which is wrong for a position built unit-by-unit at varying prices. Kalshi gives us only the blend — we cannot do better without historical per-fill data. For well-behaved positions (all units at similar prices), the approximation is negligible; for positions with a wide spread across units, the residual open avg will be mis-attributed until the next in-memory fill closes a clean unit. The alternative (defer all decisions until a fresh WS fill happens) would brick the system post-restart. We accept the trade-off.
+
+**When blend approximation does NOT run (5a normal restart):** state is preserved verbatim from persist — no re-derivation, no approximation.
 
 **Paper-trail log.** When `_reconcile_closed()` actually closes anything (non-idempotent path), emit:
 
 ```
-ledger_reconciled_closed event=<ticker> units_closed=N contracts=M open_a=X open_b=Y avg_a=A avg_b=B
+ledger_reconciled_closed event=<ticker> units_closed=N contracts=M open_a=X open_b=Y avg_a=A avg_b=B path=<fill|sync_orders|sync_positions|seed_from_saved>
 ```
+
+The `path` field distinguishes normal fill-time reconciliation from restart-time approximation, so logs make it obvious when a ledger crossed into 5b/5c territory.
 
 ### 6. Persistence schema
 
-The persisted ledger schema needs the three new fields per side: `closed_count_a/b`, `closed_total_cost_a/b`, `closed_fees_a/b`.
+The persisted ledger schema gains three new fields per side: `closed_count_a/b`, `closed_total_cost_a/b`, `closed_fees_a/b`.
 
-Migration from existing persisted files: on first read, `seed_from_saved` sees no `closed_*` keys and initializes them to 0. The terminal `_reconcile_closed()` call then populates them from the restored blended totals. No explicit migration script needed; it's a one-shot cold reconciliation on first boot after the change lands.
+**Serialization.** Extend `PositionLedger.to_saved_dict()` (currently at [position_ledger.py:320-343](src/talos/position_ledger.py:320)) with the six new keys. The schema is additive; downstream persistence code (`persistence.save_games_full`) doesn't need changes beyond consuming the new keys as part of the dict.
 
-During implementation, grep for the actual persistence entry point (`save_games_full` / `load_saved_games_full` in `persistence.py`) and confirm the exact key names. Add the new keys to the serialization path. If any test fixtures include serialized ledger state, update the fixtures.
+**Deserialization.** Extend `seed_from_saved` ([position_ledger.py:345-370](src/talos/position_ledger.py:345)) to read the six new keys when present and assign them directly to `_SideState`. When the keys are absent (old save file), initialize to 0 and let the section-5b migration path populate them via reconciliation. Use `data.get("closed_count_a", None)` — `None` distinguishes "key missing" from "key present with value 0."
+
+**Log line on boot** to make the regime explicit:
+- `ledger_restored_with_closed` when all six closed keys are present → 5a normal restart
+- `ledger_migrated_missing_closed` when any closed key is absent → 5b migration; reconciliation will approximate
+
+**Test fixtures.** Any test fixture that includes a serialized ledger state needs to be audited: old fixtures without `closed_*` continue to exercise the 5b migration path (good — we should keep at least one such fixture to guard the migration); new fixtures should include `closed_*` to exercise 5a normal restart.
+
+**Rollback consideration.** If this change needs to be rolled back after save files have been written with `closed_*`, the older code path will ignore the unknown keys (standard `.get()` access with defaults) and operate on `filled_*` alone — which re-introduces the original bug but doesn't corrupt the save file. A subsequent re-upgrade will resume normal operation. Forward-compatible enough for a rollback window.
 
 ### 7. Edge cases
 
@@ -230,12 +262,43 @@ These guard the section 3 invariant — any future mutation path that forgets to
 - `sync_from_positions` no-ops on same-ticker (early return) without mutating `closed_*`. Existing same-ticker ledger with reconciled state; call `sync_from_positions`; assert no change.
 - `seed_from_saved` triggers reconciliation. Empty ledger; call with saved totals representing one complete closed unit; assert `closed_*` populated from the saved blend.
 
-### Integration — `tests/test_engine.py` or new `tests/test_ledger_reconstruction.py`
+### Restart / restoration — `tests/test_ledger_reconstruction.py` (new file)
 
-- **Cold-start, non-same-ticker, balanced fills.** Persisted state: A=10, B=10 at unit_size=5. On load, reconciliation closes 10 contracts per side; open bucket empty on both sides.
-- **Cold-start, non-same-ticker, imbalanced fills.** Persisted state: A=10, B=5. On load, close 5 each; A open = 5, B open = 0.
-- **Cold-start, same-ticker, persisted-only path.** Persisted state for a same-ticker ledger with A=15, B=10. On load, `seed_from_saved` runs reconciliation (closes 10 per side); `sync_from_positions` then early-returns; final state: A open = 5, B open = 0, `closed_count` = 10 per side. **This test proves the same-ticker migration path works.**
-- `_reconcile_closed` emits the paper-trail log exactly once per non-idempotent invocation.
+Split by regime. Each regime needs its own test block because the correctness criteria differ.
+
+**5a — Normal restart (persisted `closed_*` present):**
+
+- **Exact restoration of open basis.** Persist state where open B has avg 23 (filled_B=10, closed_B=5, closed_total_cost_B=90, so open_cost_B = 205-90 = 115, open_count_B=5, open_avg=23). Restart. Assert `open_avg_filled_price(Side.B) == 23.0` — NOT 20.5 (the blend). This is the exact regression Codex flagged.
+- **Idempotent reconcile on restart.** Same persisted state as above. After `seed_from_saved` and the end-of-method `_reconcile_closed()`, assert `closed_count_B` is unchanged from persisted value (no spurious second close).
+- **Log line emitted.** Assert `ledger_restored_with_closed` log line fires once per side.
+
+**5b — First-boot migration (persisted `filled_*` but no `closed_*`):**
+
+- **Migration flushes balanced portion.** Old-style persist: `filled_A=10 cost_A=830, filled_B=10 cost_B=205`, no closed keys. On load, seed initializes `closed_*` to 0, then reconcile closes 10 per side via pro-rata. Final: `closed_A=10 closed_cost_A=830, closed_B=10 closed_cost_B=205`. Open on both sides is 0.
+- **Migration preserves lifetime avg.** Same old-style persist. Before migration `avg_filled_price(B) == 20.5`. After migration, same lifetime call still returns 20.5 (lifetime = open + closed, unchanged by the flush).
+- **Log line differs from 5a.** Assert `ledger_migrated_missing_closed` fires, not `ledger_restored_with_closed`.
+- **Post-migration save contains closed keys.** Call `to_saved_dict()` after migration; assert all six new keys are present in the output.
+
+**5c — Cold start (no save file at all):**
+
+- **Fresh ledger from Kalshi sync alone.** No persisted state. `sync_from_orders` reports filled totals for a complete unit on each side. End-of-method reconcile flushes. Final state has `closed_*` populated from the blend.
+- **`_reconcile_closed` emits paper-trail log** with `path=sync_orders` exactly once per non-idempotent invocation.
+
+**5d — Same-ticker specifics:**
+
+- **Same-ticker 5a path.** Persist a same-ticker ledger with known `closed_*`; restart. `sync_from_positions` early-returns (assert no mutation of closed_* from that call). Final state matches persist.
+- **Same-ticker 5b migration.** Old-style persist of a same-ticker ledger. Migration fires via `seed_from_saved` only (since `sync_from_positions` early-returns). Final closed_* populated correctly. **This was the gap Codex flagged in the prior review.**
+
+### Reconciliation-invariant tests — `tests/test_position_ledger.py`
+
+These guard the section 3 invariant — any future mutation path that forgets to call `_reconcile_closed()` must fail a test.
+
+- `record_fill` triggers reconciliation. Fill enough on both sides to complete a unit; assert `closed_count` increased.
+- `sync_from_orders` triggers reconciliation. Empty ledger; one call that overwrites filled totals to a complete unit on each side; assert `closed_count` populated.
+- `sync_from_positions` triggers reconciliation on non-same-ticker. Empty ledger, same setup; assert populated.
+- `sync_from_positions` no-ops on same-ticker (early return) without mutating `closed_*`. Existing same-ticker ledger with reconciled state; call `sync_from_positions`; assert no change.
+- `seed_from_saved` triggers reconciliation. Empty ledger; call with saved totals representing one complete closed unit (old-style, no closed_* keys); assert `closed_*` populated from the saved blend.
+- `seed_from_saved` does NOT re-derive when `closed_*` present. Call with all six keys; assert values restored verbatim, reconcile runs as no-op.
 
 ## Out of scope (flagged for follow-ups)
 
