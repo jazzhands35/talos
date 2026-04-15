@@ -1004,3 +1004,17 @@ class TestReconcileClosed:
             "ledger_reconciled_closed" in str(getattr(rec, "msg", ""))
             for rec in caplog.records
         )
+
+    def test_record_fill_triggers_reconcile(self):
+        from talos.position_ledger import PositionLedger, Side
+        ledger = PositionLedger("EVT-X", unit_size=5)
+        # Pre-load A with 5 fills; B at zero
+        ledger.record_fill(Side.A, 5, 80)
+        assert ledger._sides[Side.A].closed_count == 0  # not yet balanced
+        # Fill B to balance; reconcile should fire
+        ledger.record_fill(Side.B, 5, 20)
+        assert ledger._sides[Side.A].closed_count == 5
+        assert ledger._sides[Side.B].closed_count == 5
+        # After close, open_avg_filled_price is 0 on both sides
+        assert ledger.open_avg_filled_price(Side.A) == 0.0
+        assert ledger.open_avg_filled_price(Side.B) == 0.0

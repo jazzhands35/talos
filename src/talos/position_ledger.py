@@ -322,6 +322,7 @@ class PositionLedger:
             s.resting_count -= filled_from_resting
             if s.resting_count == 0:
                 s.resting_order_id = None
+        self._reconcile_closed()
 
     def record_resting(self, side: Side, order_id: str, count: int, price: int) -> None:
         """Record a new resting order. Called after order placement confirmed."""
