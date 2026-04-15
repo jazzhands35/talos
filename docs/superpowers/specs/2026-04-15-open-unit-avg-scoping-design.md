@@ -215,12 +215,14 @@ The persisted ledger schema gains three new fields per side: `closed_count_a/b`,
 
 **Serialization.** Extend `PositionLedger.to_saved_dict()` (currently at [position_ledger.py:320-343](src/talos/position_ledger.py:320)) with the six new keys. The schema is additive; downstream persistence code (`persistence.save_games_full`) doesn't need changes beyond consuming the new keys as part of the dict.
 
-**Deserialization — strict all-or-nothing rule with value validation.** `seed_from_saved` ([position_ledger.py:345-370](src/talos/position_ledger.py:345)) must treat the six `closed_*` keys as a single atomic group, AND each restored value must validate as a non-negative int:
+**Deserialization — strict all-or-nothing rule with integer-shape validation.** `seed_from_saved` ([position_ledger.py:345-370](src/talos/position_ledger.py:345)) must treat the six `closed_*` keys as a single atomic group, AND each value must already be a non-negative integer — not merely coercible to one:
 
-- **If ALL six keys are present AND every value coerces to a non-negative int**: restore verbatim. This is the 5a path.
-- **If ANY of the six keys is missing, null, or non-coercible**: treat the entire group as invalid. Zero all six, log `ledger_migrated_missing_closed` with a diagnostic list of which keys were missing and which were present-but-invalid, and fall through to 5b migration via the terminal `_reconcile_closed()` call.
+- **If ALL six keys are present AND every value is exactly a non-negative `int` (excluding `bool`)**: restore verbatim. This is the 5a path.
+- **Otherwise** — any key missing, null, wrong type (including `float`, `str`, `bool`), or negative — treat the entire group as invalid. Zero all six, log `ledger_migrated_missing_closed` with diagnostic lists separating missing keys from invalid-value keys, and fall through to 5b migration via the terminal `_reconcile_closed()` call.
 
-No mixed restore. A save with some valid values and some missing/null — whether from a partial write, a hand edit, or a bug in an older version — is corrupted; mixing verbatim restore with zero-init would produce an internally-inconsistent bucket state (e.g., `closed_count_a > 0` but `closed_total_cost_a == 0`) that later code paths would silently misinterpret. The migration fallback is safe regardless of why the keys are invalid, so using it as the "anything weird → reset and recompute" escape hatch is the right call. Startup must never hard-fail on a corrupt save; it must always recover via migration.
+No coercion. `int(1.9) == 1` succeeds silently — if a save ever carries a float due to a serialization-format change or a hand edit, coercion would truncate and restore corrupted data. Likewise `int("5") == 5` would swallow a string that should have signalled corruption. The rule "only true integer payloads restore verbatim" ensures we never silently reinterpret a malformed value as valid state.
+
+No mixed restore. A save with some valid values and some invalid — whether from a partial write, a hand edit, a format migration bug, or an old-version leftover — is corrupted; mixing verbatim restore with zero-init would produce an internally-inconsistent bucket state (e.g., `closed_count_a > 0` but `closed_total_cost_a == 0`) that later code paths would silently misinterpret. The migration fallback is safe regardless of why the keys are invalid. Startup must never hard-fail on a corrupt save; it must always recover via migration.
 
 Implementation sketch:
 
@@ -231,12 +233,11 @@ required_closed_keys = (
 )
 
 def _valid_closed_value(v: object) -> bool:
-    if v is None or isinstance(v, bool):
-        return False
-    try:
-        return int(v) >= 0
-    except (TypeError, ValueError):
-        return False
+    # Require an exact int, not merely int-coercible. Rejects None,
+    # bool (bool is a subclass of int in Python), float, str, etc.
+    # Also rejects negative values that would represent impossible
+    # ledger state.
+    return type(v) is int and v >= 0
 
 missing: list[str] = []
 invalid: list[str] = []
@@ -259,16 +260,18 @@ if missing or invalid:
         invalid_keys=invalid,
     )
 else:
-    # 5a normal restart — values validated above, int() is safe
+    # 5a normal restart — values are already int, assign directly
     for side, prefix in [(Side.A, "a"), (Side.B, "b")]:
         s = self._sides[side]
-        s.closed_count = int(data[f"closed_count_{prefix}"])
-        s.closed_total_cost = int(data[f"closed_total_cost_{prefix}"])
-        s.closed_fees = int(data[f"closed_fees_{prefix}"])
+        s.closed_count = data[f"closed_count_{prefix}"]
+        s.closed_total_cost = data[f"closed_total_cost_{prefix}"]
+        s.closed_fees = data[f"closed_fees_{prefix}"]
     logger.info("ledger_restored_with_closed", event_ticker=self.event_ticker)
 ```
 
-The `isinstance(v, bool)` check is deliberate — Python's `bool` is a subclass of `int`, so `True/False` would otherwise coerce to `1/0` silently, masking corruption. The `>= 0` check catches negative values that would represent impossible ledger state. Any future value-shape change needs to update `_valid_closed_value` correspondingly.
+Using `type(v) is int` (not `isinstance`) is deliberate — `isinstance(True, int)` is `True` because `bool` subclasses `int`, so `isinstance`-based checks accept booleans. `type(v) is int` accepts only the exact `int` type, rejecting `bool` without a separate exclusion. Future code that wants to allow additional numeric types (e.g., `numpy.int64`) must explicitly extend `_valid_closed_value` rather than getting coerced types accidentally.
+
+If the persistence format ever changes to carry closed values as something other than `int` (say, a JSON round-trip produces floats), that format change must include a corresponding update to `_valid_closed_value` AND a migration path. Tightening the validator forces that conversation instead of silently accepting the new shape.
 
 **Log line contract:**
 - `ledger_restored_with_closed` — all six keys present, restored verbatim → 5a normal restart
@@ -334,7 +337,15 @@ Split by regime. Each regime needs its own test block because the correctness cr
 - **Log line differs from 5a.** Assert `ledger_migrated_missing_closed` fires, not `ledger_restored_with_closed`.
 - **Post-migration save contains closed keys.** Call `to_saved_dict()` after migration; assert all six new keys are present in the output.
 - **Partial closed keys trigger migration, not mixed restore.** Construct a save with `closed_count_a` and `closed_total_cost_a` present but `closed_fees_a` and all three B keys missing. Assert: all six fields zeroed (not a mix of restored + zero), `ledger_migrated_missing_closed` fires with `missing_keys` listing exactly the four absent keys, and the terminal reconcile populates from the blend. This guards the atomic-group rule — a corrupted/hand-edited save never produces an internally-inconsistent bucket state.
-- **Corrupt value types trigger migration, not hard-fail.** Construct saves where all six keys are present but one or more carry corrupt payloads — `None`, `"string"`, a negative int, or a `bool`. Assert: all six fields zeroed, `ledger_migrated_missing_closed` fires with `invalid_keys` naming the bad entries (and empty `missing_keys`), startup completes without an exception, and the terminal reconcile populates from the blend. Cover each corrupt type in its own case so future changes to `_valid_closed_value` can't silently break validation.
+- **Corrupt value types trigger migration, not hard-fail.** Construct saves where all six keys are present but one or more carry corrupt payloads. Cover each corrupt type in its own case so future changes to `_valid_closed_value` can't silently break validation:
+  - `None`
+  - a non-coercible string like `"abc"`
+  - a negative int like `-5`
+  - a `bool` (`True` / `False`) — would silently coerce to `1`/`0` under any `isinstance`-based check
+  - a `float` (e.g., `5.0` or `1.9`) — would silently truncate under `int()` coercion
+  - an int-coercible string like `"5"` — would silently coerce under `int()`
+  
+  For each case, assert: all six fields zeroed, `ledger_migrated_missing_closed` fires with `invalid_keys` naming the bad entries and empty `missing_keys`, startup completes without an exception, and the terminal reconcile populates from the blend.
 
 **5c — Cold start (no save file at all):**
 
