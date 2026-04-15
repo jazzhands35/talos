@@ -428,6 +428,8 @@ class PositionLedger:
         Fills: sets a floor (monotonic — sync can only increase).
         Resting: restored directly so check_imbalances sees accurate
         state on the first cycle instead of phantom imbalances.
+        Closed: atomic-group restore with strict integer-shape validation;
+        any corruption falls back to migration via the terminal reconcile.
         The normal sync_from_orders cycle will correct any drift.
         """
         if not data:
@@ -458,6 +460,49 @@ class PositionLedger:
                 side.resting_order_id = str(saved_id)
                 side.resting_count = saved_count
                 side.resting_price = int(saved_price or 0)
+
+        # Atomic-group restore of the closed_* bucket with strict validation.
+        required_closed_keys = (
+            "closed_count_a", "closed_total_cost_a", "closed_fees_a",
+            "closed_count_b", "closed_total_cost_b", "closed_fees_b",
+        )
+
+        def _valid_closed_value(v: object) -> bool:
+            # Require exact int — reject bool (subclass of int), float, str, None, negative.
+            return type(v) is int and v >= 0
+
+        missing: list[str] = []
+        invalid: list[str] = []
+        for k in required_closed_keys:
+            if k not in data:
+                missing.append(k)
+            elif not _valid_closed_value(data[k]):
+                invalid.append(k)
+
+        if missing or invalid:
+            # Migration fallback: zero all six; terminal reconcile populates.
+            for side_state in (a, b):
+                side_state.closed_count = 0
+                side_state.closed_total_cost = 0
+                side_state.closed_fees = 0
+            logger.info(
+                "ledger_migrated_missing_closed",
+                event_ticker=self.event_ticker,
+                missing_keys=missing,
+                invalid_keys=invalid,
+            )
+            # Terminal reconcile populates closed_* from lifetime blend.
+            self._reconcile_closed()
+        else:
+            # Normal restart: restore verbatim. Values validated above.
+            for side_state, prefix in [(a, "a"), (b, "b")]:
+                side_state.closed_count = int(data[f"closed_count_{prefix}"])  # type: ignore[arg-type]
+                side_state.closed_total_cost = int(data[f"closed_total_cost_{prefix}"])  # type: ignore[arg-type]
+                side_state.closed_fees = int(data[f"closed_fees_{prefix}"])  # type: ignore[arg-type]
+            logger.info(
+                "ledger_restored_with_closed",
+                event_ticker=self.event_ticker,
+            )
 
     def sync_from_orders(self, orders: list, ticker_a: str, ticker_b: str) -> None:
         """Reconcile ledger against polled order state from Kalshi.

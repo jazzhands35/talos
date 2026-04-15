@@ -1089,3 +1089,90 @@ class TestSavedDictSchema:
         assert d["closed_count_b"] == 5
         assert d["closed_total_cost_b"] == 90
         assert d["closed_fees_b"] == 2
+
+    def test_seed_restores_closed_verbatim_when_all_six_keys_valid(self):
+        """5a normal restart: closed values restored as-is, no re-derivation."""
+        from talos.position_ledger import PositionLedger, Side
+        ledger = PositionLedger("EVT-X", unit_size=5)
+        data: dict[str, int | str | None] = {
+            "filled_a": 10, "cost_a": 820, "fees_a": 0,
+            "filled_b": 10, "cost_b": 205, "fees_b": 0,
+            "closed_count_a": 5, "closed_total_cost_a": 410, "closed_fees_a": 0,
+            "closed_count_b": 5, "closed_total_cost_b": 90, "closed_fees_b": 0,
+        }
+        ledger.seed_from_saved(data)
+        # open_avg_B must be 23.0 (115/5), NOT the blended 20.5
+        assert ledger.open_count(Side.A) == 5
+        assert ledger.open_count(Side.B) == 5
+        assert ledger.open_avg_filled_price(Side.B) == 23.0
+
+    def test_seed_logs_restored_with_closed_once(self, caplog):
+        import logging
+        from talos.position_ledger import PositionLedger
+        caplog.set_level(logging.INFO)
+        ledger = PositionLedger("EVT-X", unit_size=5)
+        data: dict[str, int | str | None] = {
+            "filled_a": 5, "cost_a": 400, "fees_a": 0,
+            "filled_b": 5, "cost_b": 100, "fees_b": 0,
+            "closed_count_a": 5, "closed_total_cost_a": 400, "closed_fees_a": 0,
+            "closed_count_b": 5, "closed_total_cost_b": 100, "closed_fees_b": 0,
+        }
+        ledger.seed_from_saved(data)
+        restored = [r for r in caplog.records if "ledger_restored_with_closed" in r.getMessage()]
+        assert len(restored) == 1
+
+    def test_seed_missing_all_closed_keys_triggers_migration(self, caplog):
+        import logging
+        from talos.position_ledger import PositionLedger, Side
+        caplog.set_level(logging.INFO)
+        ledger = PositionLedger("EVT-X", unit_size=5)
+        data: dict[str, int | str | None] = {
+            "filled_a": 10, "cost_a": 820, "fees_a": 0,
+            "filled_b": 10, "cost_b": 205, "fees_b": 0,
+        }
+        ledger.seed_from_saved(data)
+        # After migration + terminal reconcile: all closed populated via pro-rata
+        assert ledger._sides[Side.A].closed_count == 10
+        assert ledger._sides[Side.B].closed_count == 10
+        migrated = [r for r in caplog.records if "ledger_migrated_missing_closed" in r.getMessage()]
+        assert len(migrated) == 1
+
+    def test_seed_partial_closed_keys_triggers_migration(self, caplog):
+        """Atomic-group rule: any missing key zeroes all six."""
+        import logging
+        from talos.position_ledger import PositionLedger, Side
+        caplog.set_level(logging.INFO)
+        ledger = PositionLedger("EVT-X", unit_size=5)
+        data: dict[str, int | str | None] = {
+            "filled_a": 10, "cost_a": 820, "fees_a": 0,
+            "filled_b": 10, "cost_b": 205, "fees_b": 0,
+            # Only 2 of 6 closed keys present
+            "closed_count_a": 999, "closed_total_cost_a": 999,
+        }
+        ledger.seed_from_saved(data)
+        # Migration zeros and repopulates; verbatim restore would have set closed_count_a = 999
+        assert ledger._sides[Side.A].closed_count == 10  # from reconcile, not 999
+        migrated = [r for r in caplog.records if "ledger_migrated_missing_closed" in r.getMessage()]
+        assert len(migrated) == 1
+
+    def test_seed_corrupt_value_types_trigger_migration(self, caplog):
+        """Non-int values trigger migration, not hard-fail."""
+        import logging
+        from talos.position_ledger import PositionLedger, Side
+
+        for bad_value in (None, "abc", -5, True, 5.0, "5"):
+            caplog.clear()
+            caplog.set_level(logging.INFO)
+            ledger = PositionLedger("EVT-X", unit_size=5)
+            data: dict[str, int | str | float | None] = {
+                "filled_a": 10, "cost_a": 820, "fees_a": 0,
+                "filled_b": 10, "cost_b": 205, "fees_b": 0,
+                "closed_count_a": 5, "closed_total_cost_a": 410, "closed_fees_a": 0,
+                "closed_count_b": 5, "closed_total_cost_b": 90, "closed_fees_b": 0,
+            }
+            data["closed_count_a"] = bad_value  # inject corruption
+            ledger.seed_from_saved(data)  # type: ignore[arg-type]  # intentionally wide for corruption test
+            migrated = [r for r in caplog.records if "ledger_migrated_missing_closed" in r.getMessage()]
+            assert len(migrated) == 1, f"Expected migration log for bad_value={bad_value!r}"
+            # Migration zeroed and reconciled — closed_count_a != 5 (the restored-verbatim value)
+            assert ledger._sides[Side.A].closed_count == 10  # reconciled, not restored
