@@ -1018,3 +1018,53 @@ class TestReconcileClosed:
         # After close, open_avg_filled_price is 0 on both sides
         assert ledger.open_avg_filled_price(Side.A) == 0.0
         assert ledger.open_avg_filled_price(Side.B) == 0.0
+
+    def test_sync_from_orders_triggers_reconcile(self):
+        from talos.position_ledger import PositionLedger, Side
+        ledger = PositionLedger(
+            "EVT-X", unit_size=5,
+            ticker_a="TK-A", ticker_b="TK-B",
+            side_a_str="no", side_b_str="no",
+        )
+        orders = [
+            _make_order("TK-A", fill_count=5, no_price=80, maker_fill_cost=400, status="executed"),
+            _make_order("TK-B", fill_count=5, no_price=20, maker_fill_cost=100, status="executed"),
+        ]
+        ledger.sync_from_orders(orders, ticker_a="TK-A", ticker_b="TK-B")
+        assert ledger._sides[Side.A].closed_count == 5
+        assert ledger._sides[Side.B].closed_count == 5
+
+    def test_sync_from_positions_triggers_reconcile_non_same_ticker(self):
+        from talos.position_ledger import PositionLedger, Side
+        ledger = PositionLedger(
+            "EVT-X", unit_size=5,
+            ticker_a="TK-A", ticker_b="TK-B",
+            is_same_ticker=False,
+        )
+        ledger.sync_from_positions(
+            position_fills={Side.A: 5, Side.B: 5},
+            position_costs={Side.A: 400, Side.B: 100},
+        )
+        assert ledger._sides[Side.A].closed_count == 5
+        assert ledger._sides[Side.B].closed_count == 5
+
+    def test_sync_from_positions_same_ticker_early_returns_no_mutation(self):
+        from talos.position_ledger import PositionLedger, Side
+        ledger = PositionLedger(
+            "EVT-X", unit_size=5,
+            ticker_a="TK-A", ticker_b="TK-A",  # same ticker
+            is_same_ticker=True,
+        )
+        # Preload known state
+        ledger.record_fill(Side.A, 5, 80)
+        ledger.record_fill(Side.B, 5, 20)
+        # closed already populated from record_fill's reconcile
+        closed_a_before = ledger._sides[Side.A].closed_count
+        closed_b_before = ledger._sides[Side.B].closed_count
+        # sync_from_positions early-returns for same-ticker; closed unchanged
+        ledger.sync_from_positions(
+            position_fills={Side.A: 99, Side.B: 99},  # bogus values
+            position_costs={Side.A: 999, Side.B: 999},
+        )
+        assert ledger._sides[Side.A].closed_count == closed_a_before
+        assert ledger._sides[Side.B].closed_count == closed_b_before

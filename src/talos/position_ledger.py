@@ -594,6 +594,7 @@ class PositionLedger:
             self._recently_cancelled = still_stale
 
         # Two-source sync (orders + positions) keeps the ledger accurate.
+        self._reconcile_closed()
 
     def sync_from_positions(
         self,
@@ -649,6 +650,8 @@ class PositionLedger:
             if pos_fees > 0 and pos_fees > s.filled_fees:
                 s.filled_fees = pos_fees
                 s._fees_from_api = True
+
+        self._reconcile_closed()
 
     def format_position(self, side: Side) -> str:
         """Human-readable position string for proposals."""
