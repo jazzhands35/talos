@@ -382,3 +382,50 @@ class TestYesNoPairAdjuster:
         adj.remove_event("MKT-1")
         assert adj.resolve_pair("MKT-1") is None
         assert adj.resolve_event("MKT-1") is None
+
+
+class TestEvaluateJumpOpenScope:
+    """evaluate_jump uses open-unit avg for P18, not lifetime blend."""
+
+    def test_jump_follows_when_only_closed_units_exist(self):
+        """When the open unit is empty (all prior units closed), a jump
+        should be evaluated against the new price alone — not the lifetime
+        blend. This is the 'sold at 83c, should follow to 18c' scenario.
+
+        Lifetime A avg: (92+82+80+82+80)/5 = 83.2c
+        With fee_rate=0.0 and old code: 18 + 83 = 101 >= 100 → hold (bug)
+        With new code: open_count(A) == 0 → other_effective = 0 → follow_jump
+        """
+        # fee_rate=0.0 so fee_adjusted_cost(x) == x — clean integer math
+        pair = ArbPair(
+            event_ticker="EVT-X",
+            ticker_a="TK-X-A",
+            ticker_b="TK-X-B",
+            fee_rate=0.0,
+        )
+        # B best ask at 18 — that's the jump target
+        books = FakeBookManager({"TK-X-B": 18})
+        adjuster = BidAdjuster(book_manager=books, pairs=[pair], unit_size=5)
+        ledger = adjuster.get_ledger("EVT-X")
+
+        # Simulate a lifetime with 5 closed units at varying prices.
+        # Each (A, B) fill pair is balanced at unit_size=5 →
+        # _reconcile_closed fires after each fill pair and closes 1 unit.
+        for a_price, b_price in [(92, 7), (82, 18), (80, 19), (82, 23), (80, 17)]:
+            ledger.record_fill(Side.A, 5, a_price)
+            ledger.record_fill(Side.B, 5, b_price)
+
+        # All units closed — open buckets must be empty
+        assert ledger.open_count(Side.A) == 0
+        assert ledger.open_count(Side.B) == 0
+
+        # B has 5 resting @ 17, A has no resting
+        ledger.record_resting(Side.B, "oid-b", 5, 17)
+
+        # evaluate_jump for B side — book shows 18 (set in FakeBookManager above)
+        result = adjuster.evaluate_jump("TK-X-B", at_top=False)
+
+        assert result is not None, "Expected a proposal, got None"
+        assert result.action == "follow_jump", (
+            f"Expected 'follow_jump' but got '{result.action}': {result.reason}"
+        )

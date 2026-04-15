@@ -345,9 +345,9 @@ class BidAdjuster:
         # Profitability check (Principle 18)
         rate = pair.fee_rate
         other_side = adj_side.other
-        if ledger.filled_count(other_side) > 0:
+        if ledger.open_count(other_side) > 0:
             other_effective = fee_adjusted_cost(
-                int(round(ledger.avg_filled_price(other_side))), rate=rate
+                int(round(ledger.open_avg_filled_price(other_side))), rate=rate
             )
         elif ledger.resting_count(other_side) > 0:
             # Use top-of-market for other side (worst case / most conservative)
@@ -837,10 +837,10 @@ class BidAdjuster:
                 f"would exceed unit after cancel: filled_in_unit={filled_in_unit} + "
                 f"new={new_count} > {ledger.unit_size}",
             )
-        # Check profitability (reuse the gate logic without resting check)
+        # Check profitability (open-unit scoped — same as is_placement_safe P18)
         other_side = side.other
-        if ledger.filled_count(other_side) > 0:
-            other_price = ledger.filled_total_cost(other_side) / ledger.filled_count(other_side)
+        if ledger.open_count(other_side) > 0:
+            other_price = ledger.open_avg_filled_price(other_side)
         elif ledger.resting_count(other_side) > 0:
             other_price = ledger.resting_price(other_side)
         else:
