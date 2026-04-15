@@ -2,6 +2,12 @@
 
 Kalshi arbitrage trading system — manual-first with progressive automation.
 
+## Brainstorming & Planning
+
+Before starting any brainstorming or planning task, begin with a **single clarifying question** rather than creating task lists or exploring the codebase. Only create tasks or read files after the user confirms the direction.
+
+This applies whenever the request is ambiguous about scope, which file/module is the target, or what the minimal acceptable outcome is. One question up front beats a long exploration in the wrong direction.
+
 ## Tech Stack
 
 - **Language:** Python 3.12+
@@ -74,6 +80,14 @@ These skills MUST be invoked proactively — do not wait for the user to ask.
 - **src layout:** Imports are `from talos.xxx import yyy`. Never relative imports outside of a single module.
 - **Test naming:** `tests/test_{module}.py` mirrors `src/talos/{module}.py`.
 - **No secrets in code:** API keys and credentials go in `.env`, loaded via environment variables.
+
+## Code Quality
+
+When a test fails or a pre-existing issue surfaces during work, **fix it** rather than dismissing it as "not mine" or "pre-existing." Treat any failure encountered in the working path as in-scope. If the fix is genuinely out of scope, flag it explicitly and ask before punting — don't silently move on.
+
+## Build & Deploy
+
+Before rebuilding `.exe` files (Talos via `talos.spec`, and any other desktop bot), check whether the process is running and ask the user to close it first. PyInstaller silently produces a broken or partial binary when the target exe is locked by a running process.
 
 ## Trading-Specific Rules
 
