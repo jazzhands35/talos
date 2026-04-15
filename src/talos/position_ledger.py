@@ -45,6 +45,9 @@ class _SideState:
         "filled_count",
         "filled_total_cost",
         "filled_fees",
+        "closed_count",
+        "closed_total_cost",
+        "closed_fees",
         "_fees_from_api",
         "resting_order_id",
         "resting_count",
@@ -56,6 +59,9 @@ class _SideState:
         self.filled_count: int = 0
         self.filled_total_cost: int = 0
         self.filled_fees: int = 0
+        self.closed_count: int = 0
+        self.closed_total_cost: int = 0
+        self.closed_fees: int = 0
         self._fees_from_api: bool = False
         self.resting_order_id: str | None = None
         self.resting_count: int = 0
@@ -66,6 +72,9 @@ class _SideState:
         self.filled_count = 0
         self.filled_total_cost = 0
         self.filled_fees = 0
+        self.closed_count = 0
+        self.closed_total_cost = 0
+        self.closed_fees = 0
         self._fees_from_api = False
         self.resting_order_id = None
         self.resting_count = 0

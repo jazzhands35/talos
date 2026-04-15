@@ -826,3 +826,28 @@ class TestSameTickerSync:
         ]
         ledger.sync_from_orders(orders, "MKT-1", "MKT-1")
         assert ledger.resting_price(Side.A) == 42  # yes_price, not no_price
+
+
+class TestClosedBucket:
+    """closed_* fields mirror filled_* and start at zero."""
+
+    def test_new_ledger_has_zero_closed_fields(self):
+        from talos.position_ledger import PositionLedger, Side
+        ledger = PositionLedger("EVT-X", unit_size=5)
+        for side in (Side.A, Side.B):
+            s = ledger._sides[side]
+            assert s.closed_count == 0
+            assert s.closed_total_cost == 0
+            assert s.closed_fees == 0
+
+    def test_reset_zeroes_closed_fields(self):
+        from talos.position_ledger import PositionLedger, Side
+        ledger = PositionLedger("EVT-X", unit_size=5)
+        s = ledger._sides[Side.A]
+        s.closed_count = 99
+        s.closed_total_cost = 500
+        s.closed_fees = 3
+        s.reset()
+        assert s.closed_count == 0
+        assert s.closed_total_cost == 0
+        assert s.closed_fees == 0
