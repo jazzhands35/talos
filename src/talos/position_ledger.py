@@ -271,7 +271,7 @@ class PositionLedger:
 
     # ── Open-unit reconciliation ────────────────────────────────────
 
-    def _reconcile_closed(self) -> None:
+    def _reconcile_closed(self, *, path: str = "fill") -> None:
         """Flush newly-matched pairs from the open bucket into the closed bucket.
 
         Idempotent: safe to call multiple times. If no new units can close,
@@ -280,6 +280,11 @@ class PositionLedger:
         Must be invoked after ANY mutation that increases filled_count or
         filled_total_cost. See the invariant in the open-unit avg scoping
         spec (docs/superpowers/specs/2026-04-15-open-unit-avg-scoping-design.md).
+
+        ``path`` identifies the caller for the paper-trail log (fill,
+        sync_orders, sync_positions, seed_from_saved). Matters operationally
+        for distinguishing FIFO-clean reconciliation (fill) from restart-
+        time blend-approximation (seed_from_saved on a migration path).
         """
         a = self._sides[Side.A]
         b = self._sides[Side.B]
@@ -300,6 +305,7 @@ class PositionLedger:
         logger.info(
             "ledger_reconciled_closed",
             event_ticker=self.event_ticker,
+            path=path,
             units_closed=units_to_close,
             contracts=contracts,
             open_a=a.filled_count - a.closed_count,
@@ -323,7 +329,7 @@ class PositionLedger:
             s.resting_count -= filled_from_resting
             if s.resting_count == 0:
                 s.resting_order_id = None
-        self._reconcile_closed()
+        self._reconcile_closed(path="fill")
 
     def record_resting(self, side: Side, order_id: str, count: int, price: int) -> None:
         """Record a new resting order. Called after order placement confirmed."""
@@ -507,7 +513,7 @@ class PositionLedger:
         # should have been taken at a quiet point), populates from blend in
         # migration case. Required by the spec invariant: every mutation that
         # increases filled_count must reconcile.
-        self._reconcile_closed()
+        self._reconcile_closed(path="seed_from_saved")
 
     def sync_from_orders(self, orders: list, ticker_a: str, ticker_b: str) -> None:
         """Reconcile ledger against polled order state from Kalshi.
@@ -655,7 +661,7 @@ class PositionLedger:
             self._recently_cancelled = still_stale
 
         # Two-source sync (orders + positions) keeps the ledger accurate.
-        self._reconcile_closed()
+        self._reconcile_closed(path="sync_orders")
 
     def sync_from_positions(
         self,
@@ -712,7 +718,7 @@ class PositionLedger:
                 s.filled_fees = pos_fees
                 s._fees_from_api = True
 
-        self._reconcile_closed()
+        self._reconcile_closed(path="sync_positions")
 
     def format_position(self, side: Side) -> str:
         """Human-readable position string for proposals."""
