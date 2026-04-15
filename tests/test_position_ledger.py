@@ -1068,3 +1068,24 @@ class TestReconcileClosed:
         )
         assert ledger._sides[Side.A].closed_count == closed_a_before
         assert ledger._sides[Side.B].closed_count == closed_b_before
+
+
+class TestSavedDictSchema:
+    """to_save_dict includes the closed_* keys."""
+
+    def test_save_dict_includes_closed_keys(self):
+        from talos.position_ledger import PositionLedger, Side
+        ledger = PositionLedger("EVT-X", unit_size=5)
+        ledger._sides[Side.A].closed_count = 5
+        ledger._sides[Side.A].closed_total_cost = 410
+        ledger._sides[Side.A].closed_fees = 7
+        ledger._sides[Side.B].closed_count = 5
+        ledger._sides[Side.B].closed_total_cost = 90
+        ledger._sides[Side.B].closed_fees = 2
+        d = ledger.to_save_dict()
+        assert d["closed_count_a"] == 5
+        assert d["closed_total_cost_a"] == 410
+        assert d["closed_fees_a"] == 7
+        assert d["closed_count_b"] == 5
+        assert d["closed_total_cost_b"] == 90
+        assert d["closed_fees_b"] == 2
