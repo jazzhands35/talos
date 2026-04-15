@@ -990,6 +990,7 @@ class TestReconcileClosed:
 
     def test_emits_paper_trail_log(self, caplog):
         import logging
+
         from talos.position_ledger import PositionLedger, Side
         caplog.set_level(logging.INFO)
         ledger = PositionLedger("EVT-X", unit_size=5)
@@ -1111,6 +1112,7 @@ class TestSavedDictSchema:
 
     def test_seed_logs_restored_with_closed_once(self, caplog):
         import logging
+
         from talos.position_ledger import PositionLedger
         caplog.set_level(logging.INFO)
         ledger = PositionLedger("EVT-X", unit_size=5)
@@ -1126,6 +1128,7 @@ class TestSavedDictSchema:
 
     def test_seed_missing_all_closed_keys_triggers_migration(self, caplog):
         import logging
+
         from talos.position_ledger import PositionLedger, Side
         caplog.set_level(logging.INFO)
         ledger = PositionLedger("EVT-X", unit_size=5)
@@ -1143,6 +1146,7 @@ class TestSavedDictSchema:
     def test_seed_partial_closed_keys_triggers_migration(self, caplog):
         """Atomic-group rule: any missing key zeroes all six."""
         import logging
+
         from talos.position_ledger import PositionLedger, Side
         caplog.set_level(logging.INFO)
         ledger = PositionLedger("EVT-X", unit_size=5)
@@ -1161,6 +1165,7 @@ class TestSavedDictSchema:
     def test_seed_corrupt_value_types_trigger_migration(self, caplog):
         """Non-int values trigger migration, not hard-fail."""
         import logging
+
         from talos.position_ledger import PositionLedger, Side
 
         for bad_value in (None, "abc", -5, True, 5.0, "5"):
@@ -1175,7 +1180,10 @@ class TestSavedDictSchema:
             }
             data["closed_count_a"] = bad_value  # inject corruption
             ledger.seed_from_saved(data)  # type: ignore[arg-type]  # intentionally wide for corruption test
-            migrated = [r for r in caplog.records if "ledger_migrated_missing_closed" in r.getMessage()]
+            migrated = [
+                r for r in caplog.records
+                if "ledger_migrated_missing_closed" in r.getMessage()
+            ]
             assert len(migrated) == 1, f"Expected migration log for bad_value={bad_value!r}"
             # Migration zeroed and reconciled — closed_count_a != 5 (the restored-verbatim value)
             assert ledger._sides[Side.A].closed_count == 10  # reconciled, not restored

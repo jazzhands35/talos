@@ -12,7 +12,6 @@ import pytest
 
 from talos.position_ledger import PositionLedger, Side
 
-
 _SaveDict = dict[str, int | str | None]
 
 
