@@ -851,3 +851,57 @@ class TestClosedBucket:
         assert s.closed_count == 0
         assert s.closed_total_cost == 0
         assert s.closed_fees == 0
+
+    def test_open_count_equals_filled_when_closed_is_zero(self):
+        from talos.position_ledger import PositionLedger, Side
+        ledger = PositionLedger("EVT-X", unit_size=5)
+        ledger._sides[Side.A].filled_count = 7
+        assert ledger.open_count(Side.A) == 7
+
+    def test_open_count_subtracts_closed(self):
+        from talos.position_ledger import PositionLedger, Side
+        ledger = PositionLedger("EVT-X", unit_size=5)
+        s = ledger._sides[Side.A]
+        s.filled_count = 10
+        s.closed_count = 5
+        assert ledger.open_count(Side.A) == 5
+
+    def test_open_avg_filled_price_zero_when_no_open_fills(self):
+        from talos.position_ledger import PositionLedger, Side
+        ledger = PositionLedger("EVT-X", unit_size=5)
+        assert ledger.open_avg_filled_price(Side.A) == 0.0
+
+    def test_open_avg_filled_price_zero_when_everything_closed(self):
+        from talos.position_ledger import PositionLedger, Side
+        ledger = PositionLedger("EVT-X", unit_size=5)
+        s = ledger._sides[Side.A]
+        s.filled_count = 5
+        s.filled_total_cost = 400
+        s.closed_count = 5
+        s.closed_total_cost = 400
+        assert ledger.open_avg_filled_price(Side.A) == 0.0
+
+    def test_open_avg_filled_price_uses_open_bucket_only(self):
+        from talos.position_ledger import PositionLedger, Side
+        ledger = PositionLedger("EVT-X", unit_size=5)
+        s = ledger._sides[Side.A]
+        # Closed bucket: 5 contracts at avg 18c (90c total)
+        s.closed_count = 5
+        s.closed_total_cost = 90
+        # Open bucket: 5 more contracts at avg 23c (115c total)
+        # filled_* is cumulative: 10 total fills for 205c
+        s.filled_count = 10
+        s.filled_total_cost = 205
+        # Open avg = (205 - 90) / (10 - 5) = 115 / 5 = 23.0
+        assert ledger.open_avg_filled_price(Side.A) == 23.0
+
+    def test_lifetime_avg_unchanged(self):
+        """avg_filled_price must still return the lifetime blended avg."""
+        from talos.position_ledger import PositionLedger, Side
+        ledger = PositionLedger("EVT-X", unit_size=5)
+        s = ledger._sides[Side.A]
+        s.filled_count = 10
+        s.filled_total_cost = 205
+        s.closed_count = 5
+        s.closed_total_cost = 90
+        assert ledger.avg_filled_price(Side.A) == 20.5

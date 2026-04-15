@@ -159,6 +159,26 @@ class PositionLedger:
             return 0.0
         return s.filled_total_cost / s.filled_count
 
+    def open_count(self, side: Side) -> int:
+        """Count of fills still in the open (unclosed) unit on this side."""
+        s = self._sides[side]
+        return s.filled_count - s.closed_count
+
+    def open_avg_filled_price(self, side: Side) -> float:
+        """Average fill price of the currently-open unit on this side.
+
+        Returns 0.0 when the open unit has no fills (fresh position or
+        immediately after a matched-pair close). Decision-path callers
+        (P18 profitability checks) must use this, NOT avg_filled_price —
+        closed units should not influence decisions about the open unit.
+        """
+        s = self._sides[side]
+        open_count = s.filled_count - s.closed_count
+        if open_count <= 0:
+            return 0.0
+        open_cost = s.filled_total_cost - s.closed_total_cost
+        return open_cost / open_count
+
     def total_committed(self, side: Side) -> int:
         s = self._sides[side]
         return s.filled_count + s.resting_count
