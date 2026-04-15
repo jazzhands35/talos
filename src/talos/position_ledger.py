@@ -480,7 +480,7 @@ class PositionLedger:
                 invalid.append(k)
 
         if missing or invalid:
-            # Migration fallback: zero all six; terminal reconcile populates.
+            # Migration fallback: zero all six; terminal reconcile populates from blend.
             for side_state in (a, b):
                 side_state.closed_count = 0
                 side_state.closed_total_cost = 0
@@ -491,8 +491,6 @@ class PositionLedger:
                 missing_keys=missing,
                 invalid_keys=invalid,
             )
-            # Terminal reconcile populates closed_* from lifetime blend.
-            self._reconcile_closed()
         else:
             # Normal restart: restore verbatim. Values validated above.
             for side_state, prefix in [(a, "a"), (b, "b")]:
@@ -503,6 +501,12 @@ class PositionLedger:
                 "ledger_restored_with_closed",
                 event_ticker=self.event_ticker,
             )
+
+        # Terminal reconcile — idempotent no-op in normal-restart case (save
+        # should have been taken at a quiet point), populates from blend in
+        # migration case. Required by the spec invariant: every mutation that
+        # increases filled_count must reconcile.
+        self._reconcile_closed()
 
     def sync_from_orders(self, orders: list, ticker_a: str, ticker_b: str) -> None:
         """Reconcile ledger against polled order state from Kalshi.

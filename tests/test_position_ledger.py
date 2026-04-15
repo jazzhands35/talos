@@ -1094,15 +1094,18 @@ class TestSavedDictSchema:
         """5a normal restart: closed values restored as-is, no re-derivation."""
         from talos.position_ledger import PositionLedger, Side
         ledger = PositionLedger("EVT-X", unit_size=5)
+        # filled_a=5 closed_a=5 → open_A empty. filled_b=10 closed_b=5 → open_B=5 @ 23c.
+        # Post-restore state is a quiet point: min(open_A, open_B) = 0 → reconcile no-op.
         data: dict[str, int | str | None] = {
-            "filled_a": 10, "cost_a": 820, "fees_a": 0,
+            "filled_a": 5, "cost_a": 410, "fees_a": 0,
             "filled_b": 10, "cost_b": 205, "fees_b": 0,
             "closed_count_a": 5, "closed_total_cost_a": 410, "closed_fees_a": 0,
             "closed_count_b": 5, "closed_total_cost_b": 90, "closed_fees_b": 0,
         }
         ledger.seed_from_saved(data)
-        # open_avg_B must be 23.0 (115/5), NOT the blended 20.5
-        assert ledger.open_count(Side.A) == 5
+        # open_avg_B must be 23.0 (115/5), NOT the blended 20.5.
+        # This is the Codex-scenario assertion — verbatim restore preserves basis.
+        assert ledger.open_count(Side.A) == 0
         assert ledger.open_count(Side.B) == 5
         assert ledger.open_avg_filled_price(Side.B) == 23.0
 
