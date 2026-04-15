@@ -24,6 +24,22 @@ class ProposedBid(BaseModel):
     reason: str
 
 
+class ProposedQueueImprovement(BaseModel):
+    """Proposed price improvement to escape deep queue."""
+
+    event_ticker: str
+    side: Literal["A", "B"]
+    order_id: str
+    ticker: str
+    current_price: int
+    improved_price: int
+    current_queue: int
+    eta_minutes: float
+    time_remaining_minutes: float
+    other_side_avg: float
+    kalshi_side: str  # "yes" or "no" for API call
+
+
 class ProposedRebalance(BaseModel):
     """A proposed rebalance: reduce over-side resting, then catch up under-side.
 
@@ -54,14 +70,14 @@ class ProposalKey(BaseModel, frozen=True):
 
     event_ticker: str
     side: str  # "A", "B", or "" for bids (both sides)
-    kind: Literal["adjustment", "bid", "hold", "rebalance", "withdraw"]
+    kind: Literal["adjustment", "bid", "hold", "queue_improve", "rebalance", "withdraw"]
 
 
 class Proposal(BaseModel):
     """Unified envelope wrapping either an adjustment or bid proposal."""
 
     key: ProposalKey
-    kind: Literal["adjustment", "bid", "hold", "rebalance", "withdraw"]
+    kind: Literal["adjustment", "bid", "hold", "queue_improve", "rebalance", "withdraw"]
     summary: str
     detail: str
     created_at: datetime
@@ -69,4 +85,5 @@ class Proposal(BaseModel):
     stale_since: datetime | None = None
     adjustment: ProposedAdjustment | None = None
     bid: ProposedBid | None = None
+    queue_improve: ProposedQueueImprovement | None = None
     rebalance: ProposedRebalance | None = None

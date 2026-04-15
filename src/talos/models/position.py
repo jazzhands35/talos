@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from pydantic import BaseModel
 
+from talos.automation_config import DEFAULT_UNIT_SIZE
+
 
 class LegSummary(BaseModel):
     """Aggregated state of one leg (ticker) in an arb pair."""
@@ -32,6 +34,6 @@ class EventPositionSummary(BaseModel):
     unmatched_a: int
     unmatched_b: int
     exposure_cents: int
-    unit_size: int = 10
+    unit_size: int = DEFAULT_UNIT_SIZE
     status: str = ""
     kalshi_pnl: int | None = None

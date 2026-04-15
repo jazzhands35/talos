@@ -10,6 +10,22 @@ from __future__ import annotations
 MAKER_FEE_RATE = 0.0175
 
 
+def maker_fee_rate(fee_type: str, fee_multiplier: float) -> float:
+    """Derive the effective maker fee rate from series fee metadata.
+
+    Kalshi fee_type semantics:
+    - "quadratic_with_maker_fees": fee_multiplier IS the maker rate (e.g., 0.0175)
+    - "quadratic": taker-only fees; fee_multiplier is the taker rate (1.0). Makers pay 0.
+    - "fee_free" / "no_fee": no fees for anyone
+    """
+    if fee_type in ("fee_free", "no_fee"):
+        return 0.0
+    if fee_type == "quadratic_with_maker_fees":
+        return fee_multiplier
+    # "quadratic" and others: maker fee is 0
+    return 0.0
+
+
 def quadratic_fee(no_price: int, *, rate: float = MAKER_FEE_RATE) -> float:
     """Per-contract fee in cents using Kalshi's quadratic model."""
     return no_price * (100 - no_price) * rate / 100
@@ -43,6 +59,26 @@ def fee_adjusted_cost(no_price: int, *, rate: float = MAKER_FEE_RATE) -> float:
     charged at fill time.
     """
     return no_price + quadratic_fee(no_price, rate=rate)
+
+
+def max_profitable_price(other_avg_price: float, *, rate: float = MAKER_FEE_RATE) -> int:
+    """Highest integer price at which a catch-up bid is profitable.
+
+    Given the other side's average fill price, find the max price P where
+    fee_adjusted_cost(P) + fee_adjusted_cost(other) < 100.
+    Returns 0 if no profitable price exists.
+    """
+    import math
+
+    other_cost = fee_adjusted_cost(math.ceil(other_avg_price), rate=rate)
+    budget = 100 - other_cost
+    if budget <= 1:
+        return 0
+    # Scan downward from 99 — O(99) trivially fast
+    for p in range(99, 0, -1):
+        if fee_adjusted_cost(p, rate=rate) < budget:
+            return p
+    return 0
 
 
 def american_odds(no_price: int, *, rate: float = MAKER_FEE_RATE) -> float | None:

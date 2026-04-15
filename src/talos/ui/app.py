@@ -20,6 +20,7 @@ from textual.widgets._data_table import CellDoesNotExist
 
 from talos.auto_accept import ExecutionMode
 from talos.auto_accept_log import AutoAcceptLogger
+from talos.automation_config import DEFAULT_UNIT_SIZE
 from talos.engine import TradingEngine
 from talos.errors import KalshiRateLimitError
 from talos.models.proposal import ProposalKey
@@ -78,6 +79,7 @@ class TalosApp(App):
         ("b", "blacklist_ticker", "Blacklist"),
         ("B", "edit_blacklist", "Edit Blacklist"),
         ("m", "toggle_scan_mode", "Mode"),
+        ("v", "toggle_view", "View"),
         ("q", "quit", "Quit"),
     ]
 
@@ -86,11 +88,15 @@ class TalosApp(App):
         *,
         engine: TradingEngine | None = None,
         scanner: ArbitrageScanner | None = None,
+        startup_execution_mode: str = "automatic",
+        startup_auto_stop_hours: float | None = None,
     ) -> None:
         super().__init__()
         self._engine = engine
         # Test mode: scanner-only for table tests without a full engine
         self._scanner = scanner or (engine.scanner if engine else None)
+        self._startup_execution_mode = startup_execution_mode
+        self._startup_auto_stop_hours = startup_auto_stop_hours
         self._execution_mode = ExecutionMode()
         self._poll_in_progress = False
         self._auto_accept_logger: AutoAcceptLogger | None = None
@@ -146,9 +152,9 @@ class TalosApp(App):
                 table = self.query_one(OpportunitiesTable)
                 table.set_resolver(self._engine.game_status_resolver)
             # Boot into configured execution mode (startup defaults from settings.json)
-            startup_mode = getattr(self._engine, '_startup_execution_mode', 'automatic')
-            startup_hours = getattr(self._engine, '_startup_auto_stop_hours', None)
-            if startup_mode == 'automatic':
+            startup_mode = self._startup_execution_mode
+            startup_hours = self._startup_auto_stop_hours
+            if startup_mode == "automatic":
                 self._enter_automatic_mode(hours=startup_hours)
             else:
                 self._execution_mode.enter_manual()
@@ -943,6 +949,14 @@ class TalosApp(App):
         mode_label = "SPORTS" if new_mode == "sports" else "NON-SPORTS"
         self.notify(f"Scan mode: {mode_label}")
 
+    def action_toggle_view(self) -> None:
+        """Toggle between full and compact table columns."""
+        table = self.query_one(OpportunitiesTable)
+        new_compact = not table._compact
+        table.set_compact(new_compact)
+        mode_label = "compact" if new_compact else "full"
+        self.notify(f"View: {mode_label}")
+
     @work(thread=False)
     async def _show_blacklist_editor(self, current: list[str]) -> None:
         from talos.ui.screens import BlacklistScreen
@@ -998,7 +1012,7 @@ class TalosApp(App):
 
     @work(thread=False, exclusive=True, group="unit_size")
     async def _open_unit_size(self) -> None:
-        current = self._engine.unit_size if self._engine else 10
+        current = self._engine.unit_size if self._engine else DEFAULT_UNIT_SIZE
         result = await self.push_screen_wait(UnitSizeScreen(current))
         if result is not None and self._engine is not None:
             self._engine.set_unit_size(result)
@@ -1029,9 +1043,13 @@ class TalosApp(App):
 
     @work(thread=False, exclusive=True, group="auto_accept")
     async def _open_auto_accept(self) -> None:
-        hours = await self.push_screen_wait(AutoAcceptScreen())
-        if hours is not None and self._engine is not None:
-            self._enter_automatic_mode(hours=hours if hours > 0 else None)
+        result = await self.push_screen_wait(AutoAcceptScreen())
+        if self._engine is None or result is None:
+            return
+        if result == "indefinite":
+            self._enter_automatic_mode(hours=None)
+        else:
+            self._enter_automatic_mode(hours=result)
 
     def _enter_automatic_mode(self, hours: float | None = None) -> None:
         """Enter automatic execution mode. hours=None means indefinite."""

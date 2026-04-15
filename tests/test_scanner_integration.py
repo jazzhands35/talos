@@ -17,6 +17,7 @@ def _make_market(ticker: str, *, status: str = "open") -> Market:
         event_ticker="EVT-1",
         title=f"Market {ticker}",
         status=status,
+        volume_24h=100,
     )
 
 
@@ -53,6 +54,7 @@ class TestScanEvents:
     def gm(self) -> GameManager:
         rest = MagicMock()
         rest.get_events = AsyncMock(return_value=[])
+        rest.get_all_events = AsyncMock(return_value=[])
         feed = AsyncMock()
         scanner = MagicMock(spec=ArbitrageScanner)
         return GameManager(rest=rest, feed=feed, scanner=scanner)

@@ -26,7 +26,7 @@ class KalshiRESTClient:
         self._auth = auth
         self._base_url = config.rest_base_url
         self._http = httpx.AsyncClient(
-            timeout=httpx.Timeout(15.0),
+            timeout=httpx.Timeout(15.0, pool=60.0),
             limits=httpx.Limits(max_connections=200, max_keepalive_connections=50),
         )
         # Global concurrency limiter — prevents pool exhaustion at 1000+ tickers
@@ -69,13 +69,26 @@ class KalshiRESTClient:
             raise KalshiRateLimitError(retry_after=float(retry_after) if retry_after else None)
 
         if response.status_code >= 400:
-            body = response.json() if response.text else None
+            body: dict[str, Any] | str | None = None
+            if response.text:
+                try:
+                    body = response.json()
+                except (ValueError, UnicodeDecodeError):
+                    # CloudFront/nginx may return HTML or plain text on 5xx
+                    body = response.text[:500]
             raise KalshiAPIError(
                 status_code=response.status_code,
                 body=body,
             )
 
-        return response.json()
+        try:
+            return response.json()
+        except (ValueError, UnicodeDecodeError) as err:
+            # CloudFront/proxy can return HTML 200s (maintenance, redirects)
+            raise KalshiAPIError(
+                status_code=response.status_code,
+                body=response.text[:500],
+            ) from err
 
     # --- Exchange ---
 
@@ -159,7 +172,9 @@ class KalshiRESTClient:
 
     async def get_series(self, series_ticker: str) -> Series:
         data = await self._request("GET", f"/series/{series_ticker}")
-        return Series.model_validate(data["series"])
+        payload = dict(data["series"])
+        payload.setdefault("series_ticker", series_ticker)
+        return Series.model_validate(payload)
 
     async def get_fee_schedule(
         self, series_ticker: str, *, show_historical: bool = False
@@ -468,6 +483,32 @@ class KalshiRESTClient:
         data = await self._request("GET", "/portfolio/positions", params=params)
         return [Position.model_validate(p) for p in data["market_positions"]]
 
+    async def get_all_positions(
+        self,
+        *,
+        ticker: str | None = None,
+        event_ticker: str | None = None,
+        page_size: int = 200,
+    ) -> list[Position]:
+        """Fetch ALL positions by paginating through cursor-based results."""
+        all_positions: list[Position] = []
+        cursor: str | None = None
+        while True:
+            params: dict[str, Any] = {"limit": page_size}
+            if ticker:
+                params["ticker"] = ticker
+            if event_ticker:
+                params["event_ticker"] = event_ticker
+            if cursor:
+                params["cursor"] = cursor
+            data = await self._request("GET", "/portfolio/positions", params=params)
+            positions = [Position.model_validate(p) for p in data["market_positions"]]
+            all_positions.extend(positions)
+            cursor = data.get("cursor")
+            if not cursor or len(positions) < page_size:
+                break
+        return all_positions
+
     async def get_event_positions(self) -> list[EventPosition]:
         """Fetch event-level positions (events with fills or resting orders)."""
         data = await self._request("GET", "/portfolio/positions")
@@ -499,7 +540,7 @@ class KalshiRESTClient:
         limit: int = 100,
         cursor: str | None = None,
     ) -> list[Settlement]:
-        """Fetch settlement history.
+        """Fetch settlement history (single page).
 
         Settlements provide Kalshi's authoritative P&L (P7/P21).
         Note: ``revenue`` is cents int, ``fee_cost`` is dollars string in the response.
@@ -513,3 +554,23 @@ class KalshiRESTClient:
             params["cursor"] = cursor
         data = await self._request("GET", "/portfolio/settlements", params=params)
         return [Settlement.model_validate(s) for s in data["settlements"]]
+
+    async def get_all_settlements(
+        self,
+        *,
+        page_size: int = 200,
+    ) -> list[Settlement]:
+        """Fetch ALL settlements by paginating through cursor-based results."""
+        all_settlements: list[Settlement] = []
+        cursor: str | None = None
+        while True:
+            params: dict[str, Any] = {"limit": page_size}
+            if cursor:
+                params["cursor"] = cursor
+            data = await self._request("GET", "/portfolio/settlements", params=params)
+            settlements = [Settlement.model_validate(s) for s in data["settlements"]]
+            all_settlements.extend(settlements)
+            cursor = data.get("cursor")
+            if not cursor or len(settlements) < page_size:
+                break
+        return all_settlements

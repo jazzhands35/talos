@@ -52,12 +52,21 @@ class PanelTestApp(App):
 
 
 @pytest.mark.asyncio
-async def test_panel_hidden_when_empty():
+async def test_panel_clears_rows_when_empty():
+    """Panel stays visible (toggled by user) but clears dynamic rows."""
     queue = ProposalQueue()
+    queue.add(_make_proposal())
     async with PanelTestApp(queue).run_test() as pilot:
         panel = pilot.app.query_one(ProposalPanel)
         panel.refresh_proposals()
-        assert panel.display is False
+        await pilot.pause()  # Let Textual process deferred mounts
+        assert len(panel.query(".proposal-row")) == 1
+        # Remove the proposal and refresh — rows should be gone
+        queue.reject(_make_proposal().key)
+        panel.refresh_proposals()
+        await pilot.pause()  # Let Textual process deferred removals
+        await pilot.pause()  # Second pause for full DOM cleanup
+        assert len(panel.query(".proposal-row")) == 0
 
 
 @pytest.mark.asyncio

@@ -233,9 +233,9 @@ Key changes:
 
 ## 2026-03-14 — Paginate order fetching (safety-critical)
 
-**Context:** With 50+ games, `get_orders(limit=200)` silently truncated the response. Resting orders beyond the 200th were invisible to the ledger, causing false "Settled" status. The Kalshi API returns most-recent-first, so older resting orders fell off the end. 83 cancelled orders wasted slots.
+**Context:** With 50+ games, `get_orders(limit=200)` silently truncated the response. Resting orders beyond the 200th were invisible to the ledger, causing false "Balanced" status. The Kalshi API returns most-recent-first, so older resting orders fell off the end. 83 cancelled orders wasted slots.
 **Decision:** Added `get_all_orders()` which paginates via Kalshi's cursor-based API. All callers (`refresh_account`, `_verify_after_action`) switched from `get_orders(limit=200)` to `get_all_orders()`.
-**Rationale:** Principle 15 violation — position accuracy is non-negotiable. A truncated order list means the ledger doesn't reflect Kalshi's actual state. With auto-accept on, this could cause missed second-leg placements (the system thinks the event is "Settled" when it has an active resting order).
+**Rationale:** Principle 15 violation — position accuracy is non-negotiable. A truncated order list means the ledger doesn't reflect Kalshi's actual state. With auto-accept on, this could cause missed second-leg placements (the system thinks the event is "Balanced" when it has an active resting order).
 
 ## 2026-03-14 — Multi-source game status provider
 
@@ -297,13 +297,15 @@ Key changes:
 
 **Context:** Exit-only mode (30 min before game start) allows behind-side resting orders to catch up to balanced. But when the game actually starts, any remaining resting orders face an informational disadvantage — the market knows the score, our stale orders don't. Analysis of 112 events showed 17 one-sided fills (15.2%) caused -$84.72 in losses, wiping all balanced profit (+$82.49). Of those, 7 events with `game_state_at_fill` of "live" or "post" accounted for -$28.84.
 
-**Decision:** Added `_game_started_events: set[str]` as a second escalation tier above `_exit_only_events`. When `_check_exit_only` detects state "live" or "post", the event is added to both sets. In `_enforce_exit_only`, `_game_started_events` membership short-circuits the balanced/imbalanced logic — ALL resting orders on BOTH sides are cancelled, no behind-side preservation.
+**Decision:** Added `_game_started_events: set[str]` as a second escalation tier above `_exit_only_events`. When `_check_exit_only` detects state "live" or "post", the event is added to both sets. `_enforce_exit_only` cancels all resting when balanced, and uses the imbalanced path (cancel ahead side, keep/reduce behind side) when fills are unequal — regardless of `game_started` status.
 
-**Behavior difference:**
-- **Pre-game exit-only** (30 min before): Gradual wind-down. Behind-side resting preserved so position can converge to balanced.
-- **Game started** (live/post): Hard cancel ALL resting. No exceptions, every enforcement cycle.
+**Behavior (all exit-only modes, including game-started):**
+- **Balanced fills:** Cancel ALL resting on both sides. No new pairs.
+- **Imbalanced fills:** Cancel ahead-side resting. Keep behind-side resting (capped at the gap). `check_imbalances` places catch-up on behind side.
+- **Top-ups:** Blocked (new speculative exposure).
+- **New pair proposals:** Blocked.
 
-**Rationale:** Behind-side preservation makes sense pre-game (market still has time to fill). Once the game starts, the other side of the market has live score information — our resting orders are adversely selected. The state-escalation pattern keeps the implementation minimal (one `or` in the existing enforcement branch) while the `_game_started_events` set is independent of the exit-only toggle (user can't un-start a game). See [[patterns#Multi-step execution with fail-safe ordering]].
+**Revised 2026-03-21:** Originally `game_started` forced cancel-all even when imbalanced, which left behind-side gaps permanently unhedged. Catch-up is risk-reducing (closing unhedged exposure), not speculative — blocking it is worse than allowing it. The imbalanced path now always runs when fills differ, ensuring delta convergence. See [[principles#16. Delta Neutral by Construction]].
 
 ## 2026-03-18 — Scope per-action API calls to single event
 
@@ -318,3 +320,161 @@ Key changes:
 **Not changed:** `refresh_account()` at lines 644 and 703 — these are the 30-second global safety net, intentionally fetching all data. Filtering these would require N calls (one per event) instead of 1, making things worse.
 
 **Rationale:** Per-action calls only need data for one event. Filtering reduces response from hundreds of records (multi-page) to 2-4 records (single page). Rate-limit errors are categorically different from action failures — they signal "slow down," not "this broke." Swallowing them at the action layer prevents the scheduler from backing off, causing cascading failures. See [[patterns#API call scope must match call frequency]] and [[patterns#Rate limit errors propagate to the scheduler]].
+
+## 2026-03-20 — Session persistence: sync gate + positions API fees
+
+**Context:** Portland/Minnesota NBA game: Talos placed a 48¢ bid with the other side at 61¢ (109¢ combined = guaranteed loss). Root cause: Kalshi archives old filled orders from the REST API. After Talos restarts, `sync_from_orders` gets zero fills for the event. `sync_from_positions` restored fill counts and costs but NOT fees. The P18 safety gate trivially passed because the ledger was empty ("no position on other side → allow placement"). Auto-accept fired before the first `refresh_account` completed.
+
+**Decision:** Three-layer fix:
+1. **Sync gate** — `place_bids()` blocks until `_initial_sync_done = True`, set after the first `refresh_account` completes. Prevents all order placement on empty ledger state.
+2. **Positions API fees** — `GET /portfolio/positions` returns `fees_paid_dollars` per market (discovered in OpenAPI spec — was ignored due to `extra="ignore"`). Added to `Position` model and wired through `sync_from_positions`. Eliminates reliance on archived orders for fee data.
+3. **Fee estimation fallback** — When fees are still zero after sync (edge case), estimate via quadratic formula on avg fill price. Better than showing gross-only profit.
+
+**Also fixed:** `fee_cost` omitted from P&L calculation in settlement tracker, settlement history screen (3 locations). All computed `revenue - cost` without subtracting fees — overstating P&L by the full fee amount.
+
+**Also fixed:** `execute()` in `BidAdjuster` had no execution-time P18 re-check. Between proposal and approval, the other side could fill at a different price, making the amendment unprofitable.
+
+**Rationale:** Session boundaries are dangerous — any data that only lives in memory is lost. The positions API is the correct authoritative source because it never archives. See [[principles#7. Kalshi Is the Source of Truth — Always]] and [[principles#21. Authoritative Data Over Computed Data]].
+
+## 2026-03-20 — Stale position reconciliation (two-strike cleanup)
+
+**Context:** "Invested" display showed $5,040 when Kalshi showed $2,398 (and account never had $5,040). Positions from settled events remained in the scanner/ledger because lifecycle WS events (determined/settled) were missed during WS disconnects or when Talos wasn't running.
+
+**Decision:** Two-strike reconciliation in `_reconcile_stale_positions()`: each poll cycle, check `pos_map` for pairs where both tickers have zero positions but the ledger has fills. Flag on first detection, auto-remove via `remove_game()` on second consecutive detection. Zero additional API calls — piggybacks on existing `get_positions()` data.
+
+**Also fixed:** `remove_game()` wasn't calling `_adjuster.remove_event()` (ledger memory leak). `clear_games()` bypassed all cleanup (stale_candidates, exit_only_events, game_started_events, adjuster).
+
+**Rationale:** Two-strike avoids false positives from transient API failures. A single failed `get_positions()` response (rate limit, network blip) would make every pair look "settled" if we acted immediately. See [[patterns#Two-strike cleanup for eventual consistency]].
+
+## 2026-03-21 — Overcommit reduction and catch-up price fallback
+
+**Context:** Two related bugs caused widespread stuck "Waiting" positions after exit-only cleanup:
+
+1. **Overcommit with balanced committed counts:** `compute_rebalance_proposal()` returned None when `delta=0`, even when one side violated unit capacity (`filled_in_unit + resting > unit_size`). Example: Side A 20f+3r=23 committed, Side B 3f+20r=23 committed — delta=0, but Side B has `3+20=23 > unit 20`. The overcommit was detected and logged every cycle but never resolved.
+
+2. **Catch-up permanently blocked by P18 historical fills:** The P18 profitability pre-check in `compute_rebalance_proposal()` used the other side's historical average fill price (sunk cost), not the current market price. When fills were at worse prices than current market, the catch-up was blocked even though a profitable resting bid existed at a lower price. This left positions stuck in "Waiting" indefinitely.
+
+**Decision:** Two fixes:
+
+1. **`compute_overcommit_reduction()`** — New pure function in `rebalance.py`. When `compute_rebalance_proposal()` returns None (balanced), checks each side for unit capacity violation. If found, returns a reduce-only `ProposedRebalance` (decrease resting to `unit_size - filled_in_unit`). The resulting cross-side imbalance is handled by existing rebalance logic in the next cycle.
+
+2. **`max_profitable_price()` fallback** — New function in `fees.py`. When P18 blocks the snapshot catch-up price, computes the highest integer price where `fee_adjusted_cost(P) + fee_adjusted_cost(other_avg) < 100`. Uses this as a resting bid price instead of zeroing out the catch-up. If no profitable price exists (other side at extreme prices), catch-up is still skipped.
+
+**Rationale:** The rebalance system had two independent safety concerns (cross-side balance and unit capacity) funneled through one resolution gate (`delta != 0`). Orthogonal invariants need independent resolution paths. For catch-up pricing, historical fills are sunk costs — the right question is "at what price can I profitably hedge?" not "is the snapshot price profitable?" A resting bid at max profitable price provides eventual hedging without guaranteeing a loss. See [[patterns#Max-profitable-price fallback for catch-up bids]].
+
+## 2026-03-24 — Rename UI status "Settled" → "Balanced"
+
+**Context:** The Status column showed "Settled" when both sides had equal fills and no resting orders. But Kalshi uses "settled" for a completely different lifecycle state (market closed, result determined, payout distributed). Having both meanings in the same UI caused confusion.
+**Decision:** Renamed the UI status label to "Balanced". Updated `engine.py` (status computation), `event_review.py` (tooltip), `rebalance.py` (comments), and test fixtures. All references to Kalshi's actual settlement lifecycle (lifecycle_feed, settlement_tracker, models) left unchanged.
+**Rationale:** Domain terminology must be unambiguous. "Balanced" is self-describing (equal fills, nothing resting) and doesn't collide with any Kalshi API concept.
+
+## 2026-03-29 — Multi-pair ledger clobbering fix
+
+**Context:** Temperature/crypto events have many threshold markets (B70, B72.5, B75) sharing one `event_ticker`. Each pair was sync'd against the same ledger — the last pair's empty resting list zeroed the owning pair's resting state. This caused: (1) table showing wrong resting counts, (2) overcommit detection vs resolution data mismatch, (3) rebalance unable to cancel excess orders.
+
+**Decision:** Added `ticker_a`/`ticker_b` ownership to `PositionLedger` + `owns_tickers()` guard. `add_event()` skips if ledger already exists. Sync, reconciliation, and positions loops skip non-owning pairs.
+
+**Rationale:** The ledger model assumes one pair per event_ticker. Multi-market events violate this. Rather than restructuring to one-ledger-per-pair (massive refactor), guarding the sync loop preserves the existing architecture while preventing cross-pair corruption.
+
+## 2026-03-30 — Same-ticker settlement P&L: implicit revenue
+
+**Context:** Performance panel showed -$17,523 when actual P&L was +$670. Root cause: Kalshi nets YES+NO positions on same-ticker markets at settlement, reporting `revenue=0`. The formula `revenue - cost - fees` treated 3,062 profitable settlements as massive losses.
+
+**Decision:** Added `implicit_revenue = min(yes_count, no_count) * 100` to all P&L calculation sites (aggregate_settlements, settlement history day totals, event-level P&L). Each matched YES+NO pair settles at 100¢ regardless of outcome.
+
+**Rationale:** Same-ticker arb buys both YES and NO. At settlement, one wins (100¢) and one loses (0¢), but Kalshi nets them to zero. The cost is still recorded. Without implicit revenue, every same-ticker settlement looks like a total loss.
+
+## 2026-03-30 — Catch-up price: min(proposal, fresh_ask)
+
+**Context:** Massive "arb not profitable" and "post only cross" floods. The catch-up price refresh replaced the proposal's `max_profitable_price` fallback (e.g., 1¢) with the raw orderbook ask (e.g., 55¢). This caused: (1) profitability check to fail (55¢ + 99¢ = 154¢ ≥ 100), (2) perpetual retry every 30s.
+
+**Decision:** Changed to `min(proposal_price, fresh_ask)`. Never inflate above what the proposal computed as profitable. The 1¢ bid rests on the book waiting for a counterparty, rather than being blocked every cycle.
+
+**Rationale:** The proposal already ran profitability math and computed the best viable price. The fresh price refresh should only LOWER the bid to avoid crossing — never raise it above the profitable threshold.
+
+## 2026-03-31 — Volume gate for new pair entry
+
+**Context:** One-sided exposure risk on illiquid markets where the second leg may never fill.
+
+**Decision:** Added `MIN_VOLUME_24H = 50` (contracts) gate in `OpportunityProposer.evaluate()`. Uses `min(vol_a, vol_b)` — both sides need liquidity. Only blocks new entries; existing positions and catch-ups unaffected.
+
+**Rationale:** User research direction — full volume-based strategy (including exit-only timing) deferred to Minerva simulation. This is the minimal safe default: markets with <50 contracts/day are extremely unlikely to complete a pair.
+
+## 2026-04-01 — 409 market_closed → exit-only + auto-removal
+
+**Context:** Determined/settled markets stuck in Talos because: (1) WS lifecycle events missed during disconnect/restart, (2) cancel attempts on closed markets failed with 409 but were silently swallowed, (3) stale resting in ledger prevented the "no resting" cleanup path.
+
+**Decision:** Three-layer fix: (1) 409 `market_closed` on bid/adjustment → set exit-only. (2) Cancel failure with 409 → clear ledger resting state (orders don't exist anymore). (3) Exit-only cleanup: when resting=0 and unbalanced, check `close_time` (no API call) — if past, auto-remove. Close_time is reliable for non-sports.
+
+**Rationale:** The original REST `get_market` fallback was rate-limited for 18+ events per cycle. Close_time check uses data already in memory. Combined with the ledger-clearing 409 handler, determined markets now flow through: detect → exit-only → cancel attempts → ledger cleared → close_time check → removed.
+
+## 2026-04-01 — Queue-aware price improvement
+
+**Context:** Partially-filled arb pairs with the behind side stuck deep in queue (ETA exceeds time remaining before game) had no automated response. A human trader would improve by 1c to leapfrog queue while remaining profitable.
+
+**Decision:** `check_queue_stress()` runs every 30s cycle, compares ETA vs time_remaining for behind-side resting orders. Generates `ProposedQueueImprovement` proposals flowing through standard ProposalQueue. Execution uses `amend_order()` (atomic cancel+replace). Safety: profitability (P18), no spread crossing, one proposal per event. Repeat: each cycle re-evaluates, proposes next 1c increment until edge exhausted or ETA resolved.
+
+**Rationale:** Reuses the supervised-automation pattern (detect → propose → approve → execute) and the amend_order mechanism from BidAdjuster. CPM=0 (dead market) treated as infinite ETA — being first at 42c beats being 186k back at 41c.
+
+## 2026-04-03 — Use explicit signals, not absence of data
+
+**Context:** `_compute_event_status` inferred "markets closed" from empty orderbooks (no best_ask on either side). When WS feed died after 7 hours, all books were empty/stale, causing every unbalanced pair to show "Balanced" — masking real imbalances.
+
+**Decision:** Replaced the empty-book heuristic with explicit `_settled_markets` check from Kalshi's lifecycle WS feed. Only pairs where both markets have actually settled show "Settled" status.
+
+**Rationale:** Empty orderbooks are ambiguous (stale WS, low liquidity, or truly closed). Kalshi provides explicit settlement signals via the lifecycle feed — use the authoritative source, not inferred state.
+
+## 2026-04-03 — Code review fixes: five money-touching edge cases
+
+**Context:** Automated code review flagged five issues in money-touching paths. Four confirmed, one partially false-positive (rebalance fresh-sync with monotonic guard).
+
+**Fixes applied:**
+1. **Amend fill delta** (`bid_adjuster.py:546`): Fill delta during approval windows now compared against `fresh_order.fill_count` (same order, pre-amend) instead of `ledger.filled_count(side)` (aggregate). Historical fills from other orders made the delta negative. See [[patterns#Order-specific APIs need order-specific data]].
+2. **Rebalance fresh sync** (`rebalance.py:556-578`): Added `sync_from_positions` after `sync_from_orders` in the catch-up pre-placement sync. Mirrors the engine's full polling pattern. `sync_from_orders` monotonic guard (never decrease) means this is belt-and-suspenders, not critical.
+3. **Catch-up ledger update** (`rebalance.py:668-673`): Added `record_placement()` after successful catch-up `create_order()`. Without it, another imbalance pass could repropose catch-up before next poll.
+4. **Non-JSON error body** (`rest_client.py:73-78`): Wrapped `response.json()` in try/except — CloudFront/nginx HTML error pages no longer raise `JSONDecodeError`, instead route through `KalshiAPIError` for proper retry/notification handling.
+5. **Seq-gap recovery scope** (`market_feed.py:70-91`): Unmapped tickers now scoped to their subscription batch, not swept globally. Prevents churn of unrelated in-flight subscriptions.
+
+**Rationale:** All five are state-consistency fixes in money-touching paths. Principle 7 (Kalshi is source of truth) and Principle 15 (ledger accuracy) are the invariants being enforced.
+
+## 2026-04-03 — Execution mode governance
+
+**Context:** Multi-model council review identified that Talos's documented governance ("supervised — human approves everything") didn't match its actual runtime (168h auto-accept starting on mount with `_start_auto_accept(168.0)` in `app.py`). This mismatch became dangerous with `Talos.exe` distribution to other users.
+
+**Decision:** Replaced `AutoAcceptState` with `ExecutionMode` state machine. Two modes: Automatic (intended default — proposals auto-approve) and Manual (override/debug). Optional `auto_stop_at` timer on automatic mode. Startup reads from `settings.json` as boot policy (never rewritten at runtime). Status bar shows three orthogonal dimensions: scan mode, execution mode, and data health — each always visible.
+
+**Key design choices:**
+- Manual mode is "manual proposal approval" only — safety flows (rebalance, catch-up, overcommit reduction) still auto-execute in both modes
+- Data health (`DATA: LIVE`/`DATA: STALE`) driven by actual book freshness (60s threshold), not just WS connection state. Intentionally lower than the 120s orderbook recovery threshold
+- WS disconnect banner coexists with status bar (never overwrites mode display)
+- `accepted_count` is session-local, resets on every `enter_automatic()` call
+
+**Rationale:** Separates three previously conflated concerns: startup policy, current execution state, and data health. Makes the actual operating mode honest and visible. See spec at `docs/superpowers/specs/2026-04-03-execution-mode-governance.md`.
+
+## 2026-04-03 — Unit_size single source of truth
+
+**Context:** `unit_size` had four different defaults across six locations: `AutomationConfig` (10, dead field), `__main__.py` (5), `BidAdjuster` (10), `PositionLedger` (10), `first_run.py` (5), `app.py` (10). Config drift is a control problem for distributed exe.
+
+**Decision:** Created `DEFAULT_UNIT_SIZE = 5` constant in `automation_config.py`. All constructor defaults and fallback paths import from this single authority. Removed dead `unit_size` field from `AutomationConfig` (was never read by any production code). Tests pin their own explicit values.
+
+**Rationale:** One constant, one source. Factory default (5) is conservative for new users. Runtime overrides come from `settings.json` via the existing persistence path.
+
+## 2026-04-03 — Narrowed except Exception on money-touching paths
+
+**Context:** `engine.py` had 27+ `except Exception` blocks, several on money-touching and state-sync paths. These silently swallowed errors that should surface to the operator (violating Principle 20: "inaction is a decision — make it visible").
+
+**Decision:** Narrowed 5 Tier 1 sites to `(KalshiAPIError, KalshiRateLimitError, httpx.HTTPError)`. Unknown exceptions now escape instead of being silently logged. Tier 2 sites (enrichment, discovery, recovery) left as broad catches — correct resilience for non-critical paths.
+
+**Sites narrowed:** positions_sync_failed, refresh_account outermost, top-up placement, side-B placement + compensating cancel, place_bids outermost.
+
+**Side effect:** Three tests were using `RuntimeError` as mock side effects and only passed because the broad catch swallowed them. Updated to `KalshiAPIError(status_code=500, ...)` — realistic API failure types.
+
+**Rationale:** The catch set matches the actual REST boundary (`rest_client.py`): typed Kalshi errors + httpx transport errors are the operational failures at this layer. Anything else is a bug that should crash loudly.
+
+## 2026-04-03 — Non-JSON 200 success-path hardening
+
+**Context:** `rest_client.py:84` called `response.json()` unconditionally on 2xx responses. The error path (≥400) already handled non-JSON bodies gracefully, but a CloudFront HTML 200 (maintenance page, proxy redirect) would crash with an unhandled `JSONDecodeError`, halting the entire polling loop.
+
+**Decision:** Wrapped the success-path `response.json()` in `try/except (ValueError, UnicodeDecodeError)`, raising `KalshiAPIError` with the raw text. Mirrors the exact pattern already used for error bodies.
+
+**Rationale:** Preserves the typed failure path so the engine's existing `except KalshiAPIError` handlers process it — not just "don't crash" but "crash through the right channel."

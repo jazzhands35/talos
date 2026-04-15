@@ -250,3 +250,51 @@ class TestSeqGapRecovery:
         await feed._on_seq_gap(999, "orderbook_delta")
         mock_ws.unsubscribe.assert_not_called()  # type: ignore[union-attr]
         mock_ws.subscribe.assert_not_called()  # type: ignore[union-attr]
+
+    async def test_seq_gap_scoped_to_batch(
+        self, feed: MarketFeed, mock_ws: KalshiWSClient
+    ) -> None:
+        """Unmapped tickers from unrelated batches must NOT be included in recovery.
+
+        Regression: all globally unmapped tickers were swept into recovery for
+        any failed sid, causing duplicate subscribes and extra snapshots.
+        """
+        # Simulate two bulk subscriptions in different batches
+        feed._bulk_batches = [
+            {"MKT-1", "MKT-2", "MKT-3"},   # batch 1 → sid 10
+            {"MKT-X", "MKT-Y", "MKT-Z"},   # batch 2 → sid 20 (unrelated)
+        ]
+        feed._subscribed_tickers = {"MKT-1", "MKT-2", "MKT-3", "MKT-X", "MKT-Y", "MKT-Z"}
+        # Only MKT-1 has learned sid 10; MKT-2/MKT-3 are still unmapped
+        feed._ticker_to_sid["MKT-1"] = 10
+        # MKT-X learned sid 20; MKT-Y/MKT-Z are unmapped (from batch 2)
+        feed._ticker_to_sid["MKT-X"] = 20
+
+        await feed._on_seq_gap(10, "orderbook_delta")
+
+        # Should include MKT-1 (learned) + MKT-2, MKT-3 (unmapped from same batch)
+        # Should NOT include MKT-Y, MKT-Z (unmapped but from batch 2)
+        call_args = mock_ws.subscribe.call_args  # type: ignore[union-attr]
+        resubscribed = set(call_args[1]["market_tickers"])
+        assert resubscribed == {"MKT-1", "MKT-2", "MKT-3"}
+        # Unrelated batch/sid must be untouched
+        assert feed._ticker_to_sid["MKT-X"] == 20
+
+    async def test_seq_gap_fallback_all_unmapped_when_no_learned(
+        self, feed: MarketFeed, mock_ws: KalshiWSClient
+    ) -> None:
+        """When NO tickers have learned the failed sid, fall back to all unmapped.
+
+        This handles the case where the entire subscription gapped before any
+        snapshot arrived — we don't know which batch it belongs to.
+        """
+        feed._subscribed_tickers = {"MKT-A", "MKT-B"}
+        # Both are unmapped (subscribed but no data received yet)
+
+        await feed._on_seq_gap(42, "orderbook_delta")
+
+        # Fallback: no learned tickers for sid 42, so include all unmapped
+        mock_ws.unsubscribe.assert_called_once_with([42])  # type: ignore[union-attr]
+        call_args = mock_ws.subscribe.call_args  # type: ignore[union-attr]
+        resubscribed = set(call_args[1]["market_tickers"])
+        assert resubscribed == {"MKT-A", "MKT-B"}

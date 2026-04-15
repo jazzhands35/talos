@@ -1,0 +1,279 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Kalshi Start Time Checker</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: 'Consolas', 'Monaco', monospace; background: #0d1117; color: #c9d1d9; padding: 20px; }
+  h1 { color: #58a6ff; margin-bottom: 8px; font-size: 20px; }
+  .subtitle { color: #8b949e; margin-bottom: 20px; font-size: 13px; }
+  .controls { margin-bottom: 16px; display: flex; gap: 12px; align-items: center; }
+  .controls button { background: #238636; color: #fff; border: none; padding: 8px 16px; border-radius: 6px; cursor: pointer; font-family: inherit; font-size: 13px; }
+  .controls button:hover { background: #2ea043; }
+  .controls button.secondary { background: #30363d; }
+  .controls button.secondary:hover { background: #484f58; }
+  #output { background: #161b22; border: 1px solid #30363d; border-radius: 6px; padding: 12px; margin-top: 12px; display: none; white-space: pre-wrap; font-size: 12px; color: #7ee787; max-height: 300px; overflow-y: auto; }
+
+  table { border-collapse: collapse; width: 100%; margin-bottom: 24px; }
+  th { background: #161b22; color: #58a6ff; text-align: left; padding: 8px 10px; border-bottom: 2px solid #30363d; font-size: 12px; position: sticky; top: 0; }
+  td { padding: 6px 10px; border-bottom: 1px solid #21262d; font-size: 13px; }
+  tr:hover { background: #161b22; }
+  .league-header { background: #1c2128; padding: 10px 12px; margin-top: 16px; margin-bottom: 0; border-radius: 6px 6px 0 0; border: 1px solid #30363d; border-bottom: none; }
+  .league-header h2 { color: #f0883e; font-size: 15px; display: inline; }
+  .league-header .tag { background: #30363d; color: #8b949e; padding: 2px 8px; border-radius: 10px; font-size: 11px; margin-left: 8px; }
+  .league-table { border: 1px solid #30363d; border-radius: 0 0 6px 6px; overflow: hidden; margin-bottom: 20px; }
+
+  a { color: #58a6ff; text-decoration: none; }
+  a:hover { text-decoration: underline; }
+  a:visited { color: #bc8cff; }
+
+  input.time-input {
+    background: #0d1117; border: 1px solid #30363d; color: #c9d1d9;
+    padding: 4px 8px; border-radius: 4px; font-family: inherit; font-size: 13px;
+    width: 100px; text-align: center;
+  }
+  input.time-input:focus { border-color: #58a6ff; outline: none; }
+  input.time-input.filled { border-color: #238636; background: #0d1b12; }
+
+  .delta { font-size: 12px; color: #8b949e; min-width: 60px; }
+  .delta.good { color: #7ee787; }
+  .delta.warn { color: #f0883e; }
+  .delta.bad { color: #f85149; }
+
+  .est-start { color: #8b949e; }
+  .exp-exp { color: #c9d1d9; }
+</style>
+</head>
+<body>
+
+<h1>Kalshi Expected Expiration vs Actual Start Time</h1>
+<p class="subtitle">Click Kalshi links to check each event. Enter the start time shown on Kalshi. Delta auto-calculates.</p>
+
+<div class="controls">
+  <button onclick="exportData()">Copy Results to Clipboard</button>
+  <button class="secondary" onclick="clearAll()">Clear All</button>
+  <button class="secondary" onclick="toggleOutput()">Show Raw JSON</button>
+</div>
+<div id="output"></div>
+
+<div id="tables"></div>
+
+<script>
+const events = [
+  // NBA
+  { league: "NBA", mapped: true, matchup: "LAL at HOU", date: "Mar 18", expExpPT: "9:30 PM", expExpUTC: "2026-03-19T04:30:00Z", url: "https://kalshi.com/events/KXNBAGAME-26MAR18LALHOU" },
+  { league: "NBA", mapped: true, matchup: "DEN at MEM", date: "Mar 18", expExpPT: "8:30 PM", expExpUTC: "2026-03-19T03:30:00Z", url: "https://kalshi.com/events/KXNBAGAME-26MAR18DENMEM" },
+  { league: "NBA", mapped: true, matchup: "ATL at DAL", date: "Mar 18", expExpPT: "8:30 PM", expExpUTC: "2026-03-19T03:30:00Z", url: "https://kalshi.com/events/KXNBAGAME-26MAR18ATLDAL" },
+  { league: "NBA", mapped: true, matchup: "UTA at MIN", date: "Mar 18", expExpPT: "8:00 PM", expExpUTC: "2026-03-19T02:00:00Z", url: "https://kalshi.com/events/KXNBAGAME-26MAR18UTAMIN" },
+  { league: "NBA", mapped: true, matchup: "TOR at CHI", date: "Mar 18", expExpPT: "8:00 PM", expExpUTC: "2026-03-19T02:00:00Z", url: "https://kalshi.com/events/KXNBAGAME-26MAR18TORCHI" },
+  // NHL
+  { league: "NHL", mapped: true, matchup: "PHI at ANA", date: "Mar 18", expExpPT: "10:00 PM", expExpUTC: "2026-03-19T05:00:00Z", url: "https://kalshi.com/events/KXNHLGAME-26MAR18PHIANA" },
+  { league: "NHL", mapped: true, matchup: "STL at CGY", date: "Mar 18", expExpPT: "9:30 PM", expExpUTC: "2026-03-19T04:30:00Z", url: "https://kalshi.com/events/KXNHLGAME-26MAR18STLCGY" },
+  { league: "NHL", mapped: true, matchup: "DAL at COL", date: "Mar 18", expExpPT: "9:30 PM", expExpUTC: "2026-03-19T04:30:00Z", url: "https://kalshi.com/events/KXNHLGAME-26MAR18DALCOL" },
+  { league: "NHL", mapped: true, matchup: "OTT at WSH", date: "Mar 18", expExpPT: "7:30 PM", expExpUTC: "2026-03-19T02:30:00Z", url: "https://kalshi.com/events/KXNHLGAME-26MAR18OTTWSH" },
+  { league: "NHL", mapped: true, matchup: "PIT at CAR", date: "Mar 18", expExpPT: "7:00 PM", expExpUTC: "2026-03-19T02:00:00Z", url: "https://kalshi.com/events/KXNHLGAME-26MAR18PITCAR" },
+  // UFC
+  { league: "UFC", mapped: true, matchup: "Evloev vs Murphy", date: "Mar 21", expExpPT: "7:40 PM", expExpUTC: "2026-03-22T02:40:00Z", url: "https://kalshi.com/events/KXUFCFIGHT-26MAR21EVLMUR" },
+  { league: "UFC", mapped: true, matchup: "Riley vs Aswell", date: "Mar 21", expExpPT: "7:20 PM", expExpUTC: "2026-03-22T02:20:00Z", url: "https://kalshi.com/events/KXUFCFIGHT-26MAR21RILASW" },
+  { league: "UFC", mapped: true, matchup: "Page vs Patterson", date: "Mar 21", expExpPT: "7:00 PM", expExpUTC: "2026-03-22T02:00:00Z", url: "https://kalshi.com/events/KXUFCFIGHT-26MAR21PAGPAT" },
+  { league: "UFC", mapped: true, matchup: "Baraniewski vs Lane", date: "Mar 21", expExpPT: "6:40 PM", expExpUTC: "2026-03-22T01:40:00Z", url: "https://kalshi.com/events/KXUFCFIGHT-26MAR21BARLAN" },
+  { league: "UFC", mapped: true, matchup: "Dolidze vs Duncan", date: "Mar 21", expExpPT: "6:20 PM", expExpUTC: "2026-03-22T01:20:00Z", url: "https://kalshi.com/events/KXUFCFIGHT-26MAR21DOLDUN" },
+  // CBA
+  { league: "CBA", mapped: false, matchup: "NIN vs SBW", date: "Mar 19", expExpPT: "7:35 AM", expExpUTC: "2026-03-19T14:35:00Z", url: "https://kalshi.com/events/KXCBAGAME-26MAR190735NINSBW" },
+  { league: "CBA", mapped: false, matchup: "BED vs FST", date: "Mar 19", expExpPT: "7:35 AM", expExpUTC: "2026-03-19T14:35:00Z", url: "https://kalshi.com/events/KXCBAGAME-26MAR190735BEDFST" },
+  { league: "CBA", mapped: false, matchup: "ZGB vs NAN", date: "Mar 18", expExpPT: "7:35 AM", expExpUTC: "2026-03-18T14:35:00Z", url: "https://kalshi.com/events/KXCBAGAME-26MAR180735ZGBNAN" },
+  { league: "CBA", mapped: false, matchup: "SHA vs SHAD", date: "Mar 18", expExpPT: "7:35 AM", expExpUTC: "2026-03-18T14:35:00Z", url: "https://kalshi.com/events/KXCBAGAME-26MAR180735SHASHAD" },
+  { league: "CBA", mapped: false, matchup: "LEO vs TIA", date: "Mar 18", expExpPT: "7:35 AM", expExpUTC: "2026-03-18T14:35:00Z", url: "https://kalshi.com/events/KXCBAGAME-26MAR180735LEOTIA" },
+  // KBL
+  { league: "KBL", mapped: false, matchup: "WON vs SON", date: "Mar 18", expExpPT: "6:00 AM", expExpUTC: "2026-03-18T13:00:00Z", url: "https://kalshi.com/events/KXKBLGAME-26MAR180600WONSON" },
+  // Boxing
+  { league: "BOX", mapped: false, matchup: "Mayweather vs Pacquiao", date: "Sep 19", expExpPT: "10:00 PM", expExpUTC: "2026-09-20T05:00:00Z", url: "https://kalshi.com/events/KXBOXING-26SEP19FMAYMPAC" },
+  { league: "BOX", mapped: false, matchup: "Tyson vs Mayweather", date: "Apr 25", expExpPT: "10:00 PM", expExpUTC: "2026-04-26T05:00:00Z", url: "https://kalshi.com/events/KXBOXING-26APR25MTYSFMAY" },
+  { league: "BOX", mapped: false, matchup: "Fury vs Makhmudov", date: "Apr 11", expExpPT: "5:00 PM", expExpUTC: "2026-04-12T00:00:00Z", url: "https://kalshi.com/events/KXBOXING-26APR11TFURAMAK" },
+  // Cricket T20
+  { league: "T20", mapped: false, matchup: "NZ vs SA", date: "Mar 17", expExpPT: "2:15 AM", expExpUTC: "2026-03-17T09:15:00Z", url: "https://kalshi.com/events/KXT20MATCH-26MAR17SANZ" },
+  // AFL
+  { league: "AFL", mapped: false, matchup: "NMK vs WCE", date: "Mar 22", expExpPT: "3:10 AM", expExpUTC: "2026-03-22T10:10:00Z", url: "https://kalshi.com/events/KXAFLGAME-26MAR220310NMKWCE" },
+  { league: "AFL", mapped: false, matchup: "ESS vs PAP", date: "Mar 22", expExpPT: "12:15 AM", expExpUTC: "2026-03-22T07:15:00Z", url: "https://kalshi.com/events/KXAFLGAME-26MAR220015ESSPAP" },
+  { league: "AFL", mapped: false, matchup: "MEL vs FRE", date: "Mar 21", expExpPT: "4:35 AM", expExpUTC: "2026-03-21T11:35:00Z", url: "https://kalshi.com/events/KXAFLGAME-26MAR210435MELFRE" },
+  { league: "AFL", mapped: false, matchup: "SKS vs GWS", date: "Mar 21", expExpPT: "1:15 AM", expExpUTC: "2026-03-21T08:15:00Z", url: "https://kalshi.com/events/KXAFLGAME-26MAR210115SKSGWS" },
+  { league: "AFL", mapped: false, matchup: "GCS vs RIC", date: "Mar 20", expExpPT: "7:15 PM", expExpUTC: "2026-03-20T22:15:00Z", url: "https://kalshi.com/events/KXAFLGAME-26MAR202215GCSRIC" },
+  // NCAA Lacrosse
+  { league: "LAX", mapped: false, matchup: "Quinnipiac vs Providence", date: "Mar 18", expExpPT: "6:00 PM", expExpUTC: "2026-03-19T01:00:00Z", url: "https://kalshi.com/events/KXNCAAMLAXGAME-26MAR18QUIPRO" },
+  { league: "LAX", mapped: false, matchup: "Villanova vs Lehigh", date: "Mar 17", expExpPT: "7:00 PM", expExpUTC: "2026-03-18T02:00:00Z", url: "https://kalshi.com/events/KXNCAAMLAXGAME-26MAR17VILLEH" },
+  { league: "LAX", mapped: false, matchup: "Georgetown vs Loyola MD", date: "Mar 17", expExpPT: "6:00 PM", expExpUTC: "2026-03-18T01:00:00Z", url: "https://kalshi.com/events/KXNCAAMLAXGAME-26MAR17GEOLOY" },
+  { league: "LAX", mapped: false, matchup: "UMass Lowell vs Brown", date: "Mar 17", expExpPT: "4:00 PM", expExpUTC: "2026-03-18T01:00:00Z", url: "https://kalshi.com/events/KXNCAAMLAXGAME-26MAR17UMABRO" },
+  { league: "LAX", mapped: false, matchup: "Syracuse vs Denver", date: "Mar 16", expExpPT: "8:00 PM", expExpUTC: "2026-03-17T03:00:00Z", url: "https://kalshi.com/events/KXNCAAMLAXGAME-26MAR16SYRDEN" },
+  // Rugby NRL
+  { league: "NRL", mapped: false, matchup: "GCO at NQU", date: "Mar 22", expExpPT: "3:15 AM", expExpUTC: "2026-03-22T10:15:00Z", url: "https://kalshi.com/events/KXRUGBYNRLMATCH-26MAR22GCONQU" },
+  { league: "NRL", mapped: false, matchup: "SGI at PAR", date: "Mar 22", expExpPT: "1:05 AM", expExpUTC: "2026-03-22T08:05:00Z", url: "https://kalshi.com/events/KXRUGBYNRLMATCH-26MAR22SGIPAR" },
+  { league: "NRL", mapped: false, matchup: "WTG at SSY", date: "Mar 21", expExpPT: "4:35 AM", expExpUTC: "2026-03-21T11:35:00Z", url: "https://kalshi.com/events/KXRUGBYNRLMATCH-26MAR21WTGSSY" },
+  { league: "NRL", mapped: false, matchup: "DOL at CSS", date: "Mar 21", expExpPT: "2:30 AM", expExpUTC: "2026-03-21T09:30:00Z", url: "https://kalshi.com/events/KXRUGBYNRLMATCH-26MAR21DOLCSS" },
+  { league: "NRL", mapped: false, matchup: "WAR at NEW", date: "Mar 21", expExpPT: "12:00 AM", expExpUTC: "2026-03-21T07:00:00Z", url: "https://kalshi.com/events/KXRUGBYNRLMATCH-26MAR21WARNEW" },
+  // ATP Tennis
+  { league: "ATP", mapped: true, matchup: "Zhang vs Mannarino", date: "Mar 17", expExpPT: "11:00 AM", expExpUTC: "2026-03-17T18:00:00Z", url: "https://kalshi.com/events/KXATPMATCH-26MAR17ZHAMAN" },
+  { league: "ATP", mapped: true, matchup: "Tabilo vs Comesana", date: "Mar 17", expExpPT: "11:00 AM", expExpUTC: "2026-03-17T18:00:00Z", url: "https://kalshi.com/events/KXATPMATCH-26MAR17TABCOM" },
+  { league: "ATP", mapped: true, matchup: "Shapovalov vs VdZ", date: "Mar 17", expExpPT: "11:00 AM", expExpUTC: "2026-03-17T18:00:00Z", url: "https://kalshi.com/events/KXATPMATCH-26MAR17SHAVAN" },
+];
+
+function parseTimePT(str) {
+  // Parse "7:00 PM" or "12:15 AM" into minutes since midnight
+  if (!str) return null;
+  str = str.trim().toUpperCase();
+  const m = str.match(/^(\d{1,2}):(\d{2})\s*(AM|PM)$/);
+  if (!m) return null;
+  let h = parseInt(m[1]), min = parseInt(m[2]), ampm = m[3];
+  if (ampm === 'PM' && h !== 12) h += 12;
+  if (ampm === 'AM' && h === 12) h = 0;
+  return h * 60 + min;
+}
+
+function minutesToStr(mins) {
+  const h = Math.floor(Math.abs(mins) / 60);
+  const m = Math.abs(mins) % 60;
+  return `${h}h ${m}m`;
+}
+
+function computeDelta(expExpPT, actualPT) {
+  const exp = parseTimePT(expExpPT);
+  const act = parseTimePT(actualPT);
+  if (exp === null || act === null) return null;
+  return exp - act; // positive = expiration is after start (expected)
+}
+
+function updateDelta(idx) {
+  const input = document.getElementById(`time-${idx}`);
+  const deltaEl = document.getElementById(`delta-${idx}`);
+  const val = input.value.trim();
+
+  if (!val) {
+    deltaEl.textContent = '';
+    deltaEl.className = 'delta';
+    input.classList.remove('filled');
+    return;
+  }
+  input.classList.add('filled');
+
+  const d = computeDelta(events[idx].expExpPT, val);
+  if (d === null) {
+    deltaEl.textContent = 'parse err';
+    deltaEl.className = 'delta bad';
+    return;
+  }
+  const str = minutesToStr(d);
+  deltaEl.textContent = `+${str}`;
+  if (d >= 120 && d <= 240) deltaEl.className = 'delta good';      // 2-4h: expected range
+  else if (d >= 60 && d <= 360) deltaEl.className = 'delta warn';  // 1-6h: plausible
+  else deltaEl.className = 'delta bad';                              // outside range
+
+  save();
+}
+
+function save() {
+  const data = {};
+  events.forEach((e, i) => {
+    const v = document.getElementById(`time-${i}`).value.trim();
+    if (v) data[i] = v;
+  });
+  localStorage.setItem('startTimeData', JSON.stringify(data));
+}
+
+function load() {
+  try {
+    const data = JSON.parse(localStorage.getItem('startTimeData') || '{}');
+    Object.entries(data).forEach(([i, v]) => {
+      const input = document.getElementById(`time-${i}`);
+      if (input) { input.value = v; updateDelta(parseInt(i)); }
+    });
+  } catch(e) {}
+}
+
+function clearAll() {
+  if (!confirm('Clear all entered times?')) return;
+  events.forEach((_, i) => {
+    document.getElementById(`time-${i}`).value = '';
+    document.getElementById(`delta-${i}`).textContent = '';
+    document.getElementById(`delta-${i}`).className = 'delta';
+    document.getElementById(`time-${i}`).classList.remove('filled');
+  });
+  localStorage.removeItem('startTimeData');
+}
+
+function exportData() {
+  const results = [];
+  events.forEach((e, i) => {
+    const actual = document.getElementById(`time-${i}`).value.trim();
+    if (!actual) return;
+    const d = computeDelta(e.expExpPT, actual);
+    results.push({
+      league: e.league,
+      matchup: e.matchup,
+      date: e.date,
+      expected_expiration_pt: e.expExpPT,
+      actual_start_pt: actual,
+      delta_minutes: d,
+    });
+  });
+  const text = JSON.stringify(results, null, 2);
+  navigator.clipboard.writeText(text).then(() => {
+    const out = document.getElementById('output');
+    out.style.display = 'block';
+    out.textContent = `Copied ${results.length} entries!\n\n${text}`;
+  });
+}
+
+function toggleOutput() {
+  const out = document.getElementById('output');
+  out.style.display = out.style.display === 'none' ? 'block' : 'none';
+}
+
+function render() {
+  const container = document.getElementById('tables');
+  const leagues = [...new Set(events.map(e => e.league))];
+
+  leagues.forEach(league => {
+    const leagueEvents = events.map((e, i) => ({...e, idx: i})).filter(e => e.league === league);
+    const mapped = leagueEvents[0].mapped;
+
+    const header = document.createElement('div');
+    header.className = 'league-header';
+    header.innerHTML = `<h2>${league}</h2><span class="tag">${mapped ? 'has external provider' : 'UNMAPPED - needs fallback'}</span> <span class="tag">${leagueEvents.length} events</span>`;
+    container.appendChild(header);
+
+    const wrapper = document.createElement('div');
+    wrapper.className = 'league-table';
+    const table = document.createElement('table');
+    table.innerHTML = `<tr>
+      <th>Matchup</th>
+      <th>Date</th>
+      <th>Exp. Expiration (PT)</th>
+      <th>Actual Start (PT)</th>
+      <th>Delta</th>
+      <th>Kalshi</th>
+    </tr>`;
+
+    leagueEvents.forEach(e => {
+      const tr = document.createElement('tr');
+      tr.innerHTML = `
+        <td>${e.matchup}</td>
+        <td>${e.date}</td>
+        <td class="exp-exp">${e.expExpPT}</td>
+        <td><input class="time-input" id="time-${e.idx}" type="text" placeholder="0:00 AM" oninput="updateDelta(${e.idx})" onblur="updateDelta(${e.idx})"></td>
+        <td><span class="delta" id="delta-${e.idx}"></span></td>
+        <td><a href="${e.url}" target="_blank">open</a></td>
+      `;
+      table.appendChild(tr);
+    });
+
+    wrapper.appendChild(table);
+    container.appendChild(wrapper);
+  });
+
+  load();
+}
+
+render();
+</script>
+</body>
+</html>

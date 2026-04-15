@@ -87,6 +87,64 @@ class TestErrorMapping:
             await client.get_exchange_status()
         assert exc_info.value.retry_after == 5.0
 
+    async def test_html_error_body_raises_api_error_not_decode_error(
+        self, client: KalshiRESTClient
+    ) -> None:
+        """Non-JSON error responses (CloudFront HTML, nginx) must raise
+        KalshiAPIError with the body as a truncated string, not JSONDecodeError.
+
+        Regression: response.json() was called unconditionally on error bodies,
+        causing raw JSONDecodeError to bypass retry/notification logic.
+        """
+        html_body = "<html><body><h1>502 Bad Gateway</h1></body></html>"
+        mock_resp = httpx.Response(
+            status_code=502,
+            text=html_body,
+            headers={"Content-Type": "text/html"},
+        )
+        client._http = AsyncMock(spec=httpx.AsyncClient)
+        client._http.request = AsyncMock(return_value=mock_resp)
+
+        with pytest.raises(KalshiAPIError) as exc_info:
+            await client.get_exchange_status()
+        assert exc_info.value.status_code == 502
+        assert "502 Bad Gateway" in str(exc_info.value.body)
+
+    async def test_empty_error_body_raises_api_error(self, client: KalshiRESTClient) -> None:
+        """Empty error body should still raise KalshiAPIError with None body."""
+        mock_resp = httpx.Response(status_code=500, text="")
+        client._http = AsyncMock(spec=httpx.AsyncClient)
+        client._http.request = AsyncMock(return_value=mock_resp)
+
+        with pytest.raises(KalshiAPIError) as exc_info:
+            await client.get_exchange_status()
+        assert exc_info.value.status_code == 500
+        assert exc_info.value.body is None
+
+
+    async def test_html_success_body_raises_api_error(
+        self, client: KalshiRESTClient
+    ) -> None:
+        """Non-JSON 200 responses (CloudFront maintenance page, proxy redirect)
+        must raise KalshiAPIError, not an unhandled JSONDecodeError.
+
+        Regression: response.json() was called unconditionally on 2xx,
+        so a CloudFront HTML 200 crashed the entire polling loop.
+        """
+        html_body = "<html><body>Please wait...</body></html>"
+        mock_resp = httpx.Response(
+            status_code=200,
+            text=html_body,
+            headers={"Content-Type": "text/html"},
+        )
+        client._http = AsyncMock(spec=httpx.AsyncClient)
+        client._http.request = AsyncMock(return_value=mock_resp)
+
+        with pytest.raises(KalshiAPIError) as exc_info:
+            await client.get_exchange_status()
+        assert exc_info.value.status_code == 200
+        assert "Please wait" in str(exc_info.value.body)
+
 
 class TestExchangeStatus:
     async def test_get_exchange_status(self, client: KalshiRESTClient) -> None:
@@ -216,6 +274,43 @@ class TestMarketEndpoints:
 
         series = await client.get_series("KXBTC")
         assert series.series_ticker == "KXBTC"
+
+    async def test_get_series_backfills_missing_series_ticker(
+        self, client: KalshiRESTClient
+    ) -> None:
+        mock_data = {
+            "series": {
+                "title": "Miami High Temperature",
+                "category": "Climate and Weather",
+                "fee_type": "quadratic",
+            }
+        }
+        client._http = AsyncMock(spec=httpx.AsyncClient)
+        client._http.request = AsyncMock(return_value=_mock_response(200, mock_data))
+
+        series = await client.get_series("KXHIGHMIA")
+
+        assert series.series_ticker == "KXHIGHMIA"
+
+    async def test_get_series_allows_nullable_list_fields(
+        self, client: KalshiRESTClient
+    ) -> None:
+        mock_data = {
+            "series": {
+                "title": "Trump Sayings",
+                "category": "Politics",
+                "tags": None,
+                "settlement_sources": None,
+            }
+        }
+        client._http = AsyncMock(spec=httpx.AsyncClient)
+        client._http.request = AsyncMock(return_value=_mock_response(200, mock_data))
+
+        series = await client.get_series("KXTRUMPSAY")
+
+        assert series.series_ticker == "KXTRUMPSAY"
+        assert series.tags == []
+        assert series.settlement_sources == []
 
 
 class TestOrderEndpoints:
@@ -807,44 +902,67 @@ class TestOrderGroups:
 class TestGetAllEvents:
     """Tests for paginated get_all_events()."""
 
-    async def test_single_page(
-        self, client: KalshiRESTClient, mock_auth: KalshiAuth
-    ) -> None:
+    async def test_single_page(self, client: KalshiRESTClient, mock_auth: KalshiAuth) -> None:
         """Single page of results — no cursor returned."""
         client._http = AsyncMock(spec=httpx.AsyncClient)
-        client._http.request.return_value = _mock_response(200, {
-            "events": [
-                {
-                    "event_ticker": "EVT-1",
-                    "series_ticker": "SER-1",
-                    "title": "Test",
-                    "category": "Crypto",
-                    "markets": [],
-                }
-            ],
-            "cursor": "",
-        })
+        client._http.request.return_value = _mock_response(
+            200,
+            {
+                "events": [
+                    {
+                        "event_ticker": "EVT-1",
+                        "series_ticker": "SER-1",
+                        "title": "Test",
+                        "category": "Crypto",
+                        "markets": [],
+                    }
+                ],
+                "cursor": "",
+            },
+        )
         events = await client.get_all_events(status="open")
         assert len(events) == 1
         assert events[0].event_ticker == "EVT-1"
 
-    async def test_multi_page(
-        self, client: KalshiRESTClient, mock_auth: KalshiAuth
-    ) -> None:
+    async def test_multi_page(self, client: KalshiRESTClient, mock_auth: KalshiAuth) -> None:
         """Two pages of results — follows cursor."""
-        page1 = _mock_response(200, {
-            "events": [
-                {"event_ticker": "EVT-1", "series_ticker": "S", "title": "A", "category": "Crypto", "markets": []},
-                {"event_ticker": "EVT-2", "series_ticker": "S", "title": "B", "category": "Crypto", "markets": []},
-            ],
-            "cursor": "abc123",
-        })
-        page2 = _mock_response(200, {
-            "events": [
-                {"event_ticker": "EVT-3", "series_ticker": "S", "title": "C", "category": "Crypto", "markets": []},
-            ],
-            "cursor": "",
-        })
+        page1 = _mock_response(
+            200,
+            {
+                "events": [
+                    {
+                        "event_ticker": "EVT-1",
+                        "series_ticker": "S",
+                        "title": "A",
+                        "category": "Crypto",
+                        "markets": [],
+                    },
+                    {
+                        "event_ticker": "EVT-2",
+                        "series_ticker": "S",
+                        "title": "B",
+                        "category": "Crypto",
+                        "markets": [],
+                    },
+                ],
+                "cursor": "abc123",
+            },
+        )
+        page2 = _mock_response(
+            200,
+            {
+                "events": [
+                    {
+                        "event_ticker": "EVT-3",
+                        "series_ticker": "S",
+                        "title": "C",
+                        "category": "Crypto",
+                        "markets": [],
+                    },
+                ],
+                "cursor": "",
+            },
+        )
         client._http = AsyncMock(spec=httpx.AsyncClient)
         client._http.request.side_effect = [page1, page2]
         events = await client.get_all_events(status="open", page_size=2)
@@ -855,27 +973,39 @@ class TestGetAllEvents:
         self, client: KalshiRESTClient, mock_auth: KalshiAuth
     ) -> None:
         """Stops after max_pages even if cursor keeps coming."""
+
         def _page(*args: object, **kwargs: object) -> httpx.Response:
-            return _mock_response(200, {
-                "events": [
-                    {"event_ticker": "EVT", "series_ticker": "S", "title": "T", "category": "C", "markets": []},
-                ],
-                "cursor": "more",
-            })
+            return _mock_response(
+                200,
+                {
+                    "events": [
+                        {
+                            "event_ticker": "EVT",
+                            "series_ticker": "S",
+                            "title": "T",
+                            "category": "C",
+                            "markets": [],
+                        },
+                    ],
+                    "cursor": "more",
+                },
+            )
+
         client._http = AsyncMock(spec=httpx.AsyncClient)
         client._http.request.side_effect = _page
         events = await client.get_all_events(status="open", max_pages=3)
         assert len(events) == 3
         assert client._http.request.call_count == 3
 
-    async def test_empty_result(
-        self, client: KalshiRESTClient, mock_auth: KalshiAuth
-    ) -> None:
+    async def test_empty_result(self, client: KalshiRESTClient, mock_auth: KalshiAuth) -> None:
         """No events returned."""
         client._http = AsyncMock(spec=httpx.AsyncClient)
-        client._http.request.return_value = _mock_response(200, {
-            "events": [],
-            "cursor": "",
-        })
+        client._http.request.return_value = _mock_response(
+            200,
+            {
+                "events": [],
+                "cursor": "",
+            },
+        )
         events = await client.get_all_events(status="open")
         assert events == []

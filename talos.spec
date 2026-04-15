@@ -30,6 +30,8 @@ a = Analysis(
         # Talos models
         "talos.models", "talos.models.market", "talos.models.order",
         "talos.models.portfolio", "talos.models.strategy", "talos.models.ws",
+        "talos.models.adjustment", "talos.models.position",
+        "talos.models.proposal", "talos.models._converters",
         # Dependencies
         "structlog", "httpx", "httpx._transports",
         "pydantic", "pydantic._internal", "websockets",

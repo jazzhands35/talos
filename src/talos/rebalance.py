@@ -12,7 +12,7 @@ from typing import TYPE_CHECKING
 
 import structlog
 
-from talos.errors import KalshiAPIError
+from talos.errors import KalshiAPIError, KalshiRateLimitError
 from talos.fees import max_profitable_price
 from talos.models.proposal import Proposal, ProposalKey, ProposedRebalance
 from talos.position_ledger import PositionLedger, Side
@@ -21,6 +21,7 @@ if TYPE_CHECKING:
     from collections.abc import Callable
 
     from talos.bid_adjuster import BidAdjuster
+    from talos.market_feed import MarketFeed
     from talos.models.strategy import ArbPair, Opportunity
     from talos.orderbook import OrderBookManager
     from talos.rest_client import KalshiRESTClient
@@ -59,7 +60,7 @@ def compute_rebalance_proposal(
     if committed_a == 0 and committed_b == 0:
         return None
 
-    # No resting orders + fills balanced -> settled, nothing actionable
+    # No resting orders + fills balanced -> balanced, nothing actionable
     if (
         ledger.resting_count(Side.A) == 0
         and ledger.resting_count(Side.B) == 0
@@ -67,7 +68,7 @@ def compute_rebalance_proposal(
     ):
         return None
 
-    # No resting + markets closed -> settled with imbalance, nothing actionable
+    # No resting + markets closed -> balanced with imbalance, nothing actionable
     if (
         ledger.resting_count(Side.A) == 0
         and ledger.resting_count(Side.B) == 0
@@ -115,9 +116,7 @@ def compute_rebalance_proposal(
         catchup_ticker = under_ticker
         # Get current price from scanner snapshot
         if scanner_snapshot is not None:
-            catchup_price = (
-                scanner_snapshot.no_a if under == Side.A else scanner_snapshot.no_b
-            )
+            catchup_price = scanner_snapshot.no_a if under == Side.A else scanner_snapshot.no_b
         if scanner_snapshot is None or catchup_price <= 0:
             catchup_qty = 0  # Can't determine price — skip catch-up
             catchup_ticker = None
@@ -129,19 +128,20 @@ def compute_rebalance_proposal(
         # at worse prices than the current market.
         if catchup_qty > 0:
             ok, _ = ledger.is_placement_safe(
-                under, catchup_qty, catchup_price,
-                rate=pair.fee_rate, catchup=True,
+                under,
+                catchup_qty,
+                catchup_price,
+                rate=pair.fee_rate,
+                catchup=True,
             )
             if not ok:
                 # Compute the highest price that IS profitable
                 over_side_state = ledger._sides[over]
                 if over_side_state.filled_count > 0:
-                    other_avg = (
-                        over_side_state.filled_total_cost
-                        / over_side_state.filled_count
-                    )
+                    other_avg = over_side_state.filled_total_cost / over_side_state.filled_count
                     fallback = max_profitable_price(
-                        other_avg, rate=pair.fee_rate,
+                        other_avg,
+                        rate=pair.fee_rate,
                     )
                     if fallback > 0:
                         orig = catchup_price  # snapshot price before fallback
@@ -169,9 +169,7 @@ def compute_rebalance_proposal(
         if target_over_resting == 0:
             steps.append(f"Cancel {over_resting} resting on {over.value}")
         else:
-            steps.append(
-                f"Reduce {over.value} resting {over_resting} \u2192 {target_over_resting}"
-            )
+            steps.append(f"Reduce {over.value} resting {over_resting} \u2192 {target_over_resting}")
     if catchup_qty > 0:
         steps.append(f"Place {catchup_qty} @ {catchup_price}c on {under.value}")
     if not steps:
@@ -235,6 +233,7 @@ def compute_overcommit_reduction(
     ledger: PositionLedger,
     pair: ArbPair,
     display_name: str,
+    reconciled_targets: dict[str, int] | None = None,
 ) -> ProposedRebalance | None:
     """Compute resting reduction for a single-side overcommit with no cross-side imbalance.
 
@@ -242,6 +241,10 @@ def compute_overcommit_reduction(
     but one side violates unit capacity (filled_in_unit + resting > unit_size).
     Example: Side A has 20 filled + 3 resting = 23, Side B has 3 filled + 20
     resting = 23. Balanced, but B is overcommitted.
+
+    reconciled_targets: optional {side_value → allowed_resting} from the
+    reconciliation check. When provided, uses these authoritative targets
+    instead of re-deriving from ledger (which may have a stale fill_gap).
 
     Returns a reduce-only ProposedRebalance (no catch-up) for the first
     overcommitted side found. After reduction, the resulting cross-side
@@ -252,10 +255,23 @@ def compute_overcommit_reduction(
         resting = ledger.resting_count(side)
         filled_in_unit = filled % ledger.unit_size
 
-        if filled_in_unit + resting <= ledger.unit_size:
-            continue  # Not overcommitted
+        # Use reconciliation-derived target if available (authoritative —
+        # computed from auth_fills which is max of all data sources).
+        # Falls back to ledger-based fill_gap when no reconciled target.
+        if reconciled_targets and side.value in reconciled_targets:
+            allowed_resting = reconciled_targets[side.value]
+        else:
+            # Allow extra resting when it's closing a cross-side fill gap.
+            # Without this, overcommit reduction cancels catch-up resting,
+            # rebalance re-places it, overcommit re-cancels — infinite loop.
+            other = Side.B if side == Side.A else Side.A
+            fill_gap = max(0, ledger.filled_count(other) - filled)
+            allowed_resting = max(ledger.unit_size - filled_in_unit, fill_gap)
 
-        target_resting = ledger.unit_size - filled_in_unit
+        if resting <= allowed_resting:
+            continue  # Not overcommitted (within unit cap or needed for fill gap)
+
+        target_resting = allowed_resting
         order_id = ledger.resting_order_id(side)
         ticker = pair.ticker_a if side == Side.A else pair.ticker_b
 
@@ -269,7 +285,13 @@ def compute_overcommit_reduction(
             filled_in_unit=filled_in_unit,
             resting=resting,
             target_resting=target_resting,
+            from_reconciliation=bool(
+                reconciled_targets and side.value in reconciled_targets
+            ),
         )
+
+        # Resolve the Kalshi order side for the duplicate sweep
+        kalshi_side = pair.side_a if side == Side.A else pair.side_b
 
         return ProposedRebalance(
             event_ticker=event_ticker,
@@ -283,6 +305,7 @@ def compute_overcommit_reduction(
             catchup_ticker=None,
             catchup_price=0,
             catchup_qty=0,
+            reduce_side=kalshi_side,
         )
 
     return None
@@ -300,6 +323,12 @@ def compute_topup_needs(
     Pure function — no I/O.
     """
     if snapshot is None:
+        return {}
+
+    # Skip top-up when the arb is clearly unprofitable — both sides will
+    # fail (one "post only cross", the other "not profitable after fees"),
+    # wasting API calls and rate-limit budget every cycle.
+    if snapshot.fee_edge <= 0:
         return {}
 
     filled_a = ledger.filled_count(Side.A)
@@ -328,6 +357,11 @@ def compute_topup_needs(
         price = snapshot.no_a if side == Side.A else snapshot.no_b
         if price <= 0:
             continue
+        # Pre-check profitability against historical fills so we don't
+        # waste API calls on orders that is_placement_safe() will block.
+        ok, _ = ledger.is_placement_safe(side, qty, price, rate=pair.fee_rate)
+        if not ok:
+            continue
         needs[side] = (qty, price)
 
     # Guard: if only ONE side would be topped up, verify it won't create
@@ -353,12 +387,24 @@ async def execute_rebalance(
     adjuster: BidAdjuster,
     scanner: ArbitrageScanner,
     notify: Callable[[str, str], None],
+    feed: MarketFeed | None = None,
+    name: str = "",
 ) -> None:
     """Execute a two-step rebalance: reduce over-side, then catch up under-side.
 
     Step 1 (reduce) always runs before step 2 (catch-up) to maintain
     delta neutrality at every intermediate state.
+
+    name: display name with Talos ID prefix (e.g. "#551 high temp LA").
+    Prepended to all notifications so every activity log entry is traceable.
     """
+    # Prefix all notifications with the display name
+    _pfx = f"[{name}] " if name else ""
+
+    def _notify(msg: str, sev: str) -> None:
+        notify(f"{_pfx}{msg}", sev)
+
+
     # Resolve the pair to get api_event_ticker for Kalshi API calls
     pair = _find_pair(scanner, rebalance.event_ticker)
     api_event_ticker = pair.api_event_ticker if pair else rebalance.event_ticker
@@ -388,9 +434,7 @@ async def execute_rebalance(
                 try:
                     ledger = adjuster.get_ledger(rebalance.event_ticker)
                     with contextlib.suppress(ValueError):
-                        ledger.record_cancel(
-                            Side(rebalance.side), rebalance.order_id
-                        )
+                        ledger.record_cancel(Side(rebalance.side), rebalance.order_id)
                     # Register ALL cancelled IDs so sync_from_orders filters
                     # them out until Kalshi's GET confirms they're gone.
                     for oid in cancelled_ids:
@@ -399,7 +443,7 @@ async def execute_rebalance(
                 except KeyError:
                     pass  # Ledger missing — sync will fix
                 if cancelled_count > 0:
-                    notify(
+                    _notify(
                         f"Rebalance step 1: cancelled {cancelled_count}"
                         f" resting on {rebalance.side} ({rebalance.ticker})",
                         "information",
@@ -409,7 +453,7 @@ async def execute_rebalance(
                 # queue position, simpler semantics than amend).
                 fresh_order = await rest_client.get_order(rebalance.order_id)
                 if fresh_order.remaining_count <= rebalance.target_resting:
-                    notify(
+                    _notify(
                         f"Rebalance step 1: already at target"
                         f" (remaining={fresh_order.remaining_count})",
                         "information",
@@ -425,10 +469,14 @@ async def execute_rebalance(
                         rebalance.order_id,
                         reduce_to=rebalance.target_resting,
                     )
-                    # Update ledger so next cycle sees reduced count
+                    # Update ledger so next cycle sees reduced count.
+                    # Use record_placement (not record_resting) to set
+                    # _placed_at_gen — this activates the stale-sync guard
+                    # so the next sync_from_orders won't overwrite the
+                    # optimistic count with stale Kalshi data.
                     try:
                         ledger = adjuster.get_ledger(rebalance.event_ticker)
-                        ledger.record_resting(
+                        ledger.record_placement(
                             Side(rebalance.side),
                             rebalance.order_id,
                             rebalance.target_resting,
@@ -436,23 +484,37 @@ async def execute_rebalance(
                         )
                     except KeyError:
                         pass
-                    notify(
+                    _notify(
                         f"Rebalance step 1: {rebalance.side} resting"
                         f" {fresh_order.remaining_count}"
                         f" \u2192 {rebalance.target_resting}",
                         "information",
                     )
+                # Sweep for duplicate orders on the same side/ticker.
+                # The tracked order may already be at target, but extra
+                # (orphan/double-bid) orders cause a persistent overcommit.
+                await _cancel_duplicate_orders(
+                    rest_client,
+                    api_event_ticker,
+                    rebalance.ticker,
+                    rebalance.order_id,
+                    target_side=rebalance.reduce_side,
+                    notify=_notify,
+                    adjuster=adjuster,
+                    event_ticker=rebalance.event_ticker,
+                    side=Side(rebalance.side),
+                )
         except KalshiAPIError as e:
             if _is_no_op(e):
                 # Order already at desired state (fills happened between
                 # proposal and execution). Treat as success — proceed to
                 # step 2.
-                notify(
+                _notify(
                     "Rebalance step 1: already at target (no-op)",
                     "information",
                 )
             else:
-                notify(f"Rebalance FAILED (reduce): {e}", "error")
+                _notify(f"Rebalance FAILED (reduce): {e}", "error")
                 logger.exception(
                     "rebalance_reduce_error",
                     event_ticker=rebalance.event_ticker,
@@ -461,7 +523,7 @@ async def execute_rebalance(
                 )
                 return  # Don't proceed to catch-up if reduce failed
         except Exception as e:
-            notify(
+            _notify(
                 f"Rebalance FAILED (reduce): {type(e).__name__}: {e}",
                 "error",
             )
@@ -481,7 +543,7 @@ async def execute_rebalance(
         # source of truth). The proposal was computed from potentially stale
         # ledger data. Re-fetch orders and re-verify the imbalance exists.
         if pair is None:
-            notify("Catch-up BLOCKED: pair not found", "error")
+            _notify("Catch-up BLOCKED: pair not found", "error")
             return
 
         try:
@@ -489,16 +551,38 @@ async def execute_rebalance(
                 event_ticker=api_event_ticker,
             )
             ledger = adjuster.get_ledger(rebalance.event_ticker)
-            ledger.sync_from_orders(
-                orders, ticker_a=pair.ticker_a, ticker_b=pair.ticker_b
+            ledger.sync_from_orders(orders, ticker_a=pair.ticker_a, ticker_b=pair.ticker_b)
+
+            # Augment from positions API — orders API may have archived
+            # older fills that sync_from_orders can't see (P7/P15).
+            positions = await rest_client.get_all_positions(
+                event_ticker=api_event_ticker,
             )
+            pos_map = {p.ticker: p for p in positions}
+            pos_a = pos_map.get(pair.ticker_a)
+            pos_b = pos_map.get(pair.ticker_b)
+            if pos_a or pos_b:
+                ledger.sync_from_positions(
+                    {
+                        Side.A: abs(pos_a.position) if pos_a else 0,
+                        Side.B: abs(pos_b.position) if pos_b else 0,
+                    },
+                    {
+                        Side.A: pos_a.total_traded if pos_a else 0,
+                        Side.B: pos_b.total_traded if pos_b else 0,
+                    },
+                    {
+                        Side.A: pos_a.fees_paid if pos_a else 0,
+                        Side.B: pos_b.fees_paid if pos_b else 0,
+                    },
+                )
         except Exception as e:
             logger.warning(
                 "rebalance_fresh_sync_failed",
                 event_ticker=rebalance.event_ticker,
                 exc_info=True,
             )
-            notify(
+            _notify(
                 f"Catch-up BLOCKED: fresh sync failed ({type(e).__name__})",
                 "error",
             )
@@ -510,7 +594,7 @@ async def execute_rebalance(
         fresh_under_committed = ledger.total_committed(under_side)
         fresh_catchup_qty = max(0, fresh_over_filled - fresh_under_committed)
         if fresh_catchup_qty <= 0:
-            notify(
+            _notify(
                 "Catch-up skipped — fresh sync shows gap closed (balanced)",
                 "information",
             )
@@ -522,17 +606,36 @@ async def execute_rebalance(
             )
             return
 
+        # Cap catch-up price at the live best ask to avoid "post only cross"
+        # errors, but never INCREASE above the proposal price.  The proposal
+        # may have computed a max-profitable fallback (e.g. 1¢) — inflating
+        # that to the market ask (e.g. 55¢) defeats the fallback and causes
+        # perpetual "arb not profitable" blocks.
+        catchup_price = rebalance.catchup_price
+        if feed is not None and rebalance.catchup_ticker:
+            catchup_side_str = rebalance.catchup_side or "no"
+            try:
+                fresh_level = feed.book_manager.best_ask(
+                    rebalance.catchup_ticker, side=catchup_side_str
+                )
+                if fresh_level is not None:
+                    fresh_price = getattr(fresh_level, "price", 0)
+                    if isinstance(fresh_price, int) and fresh_price > 0:
+                        catchup_price = min(catchup_price, fresh_price)
+            except Exception:
+                pass  # Fall back to proposal price
+
         # Safety gate — same checks as place_bids (P16, P18).
         # catchup=True bypasses P16 unit boundary (risk-reducing, not speculative).
         ok, reason = ledger.is_placement_safe(
             under_side,
             fresh_catchup_qty,
-            rebalance.catchup_price,
+            catchup_price,
             rate=pair.fee_rate,
             catchup=True,
         )
         if not ok:
-            notify(
+            _notify(
                 f"Catch-up BLOCKED ({under_side.value}): {reason}",
                 "warning",
             )
@@ -551,18 +654,26 @@ async def execute_rebalance(
             fresh_catchup_qty,
         )
         try:
-            await rest_client.create_order(
+            created = await rest_client.create_order(
                 ticker=rebalance.catchup_ticker,
                 action="buy",
                 side=rebalance.catchup_side,
-                yes_price=rebalance.catchup_price if rebalance.catchup_side == "yes" else None,
-                no_price=rebalance.catchup_price if rebalance.catchup_side == "no" else None,
+                yes_price=catchup_price if rebalance.catchup_side == "yes" else None,
+                no_price=catchup_price if rebalance.catchup_side == "no" else None,
                 count=fresh_catchup_qty,
                 order_group_id=catchup_group,
             )
-            notify(
+            # Record in ledger immediately — prevents another imbalance pass
+            # from reproposing catch-up before the next poll picks it up.
+            ledger.record_placement(
+                under_side,
+                order_id=created.order_id,
+                count=created.remaining_count,
+                price=catchup_price,
+            )
+            _notify(
                 f"Rebalance step 2: catch-up {rebalance.catchup_ticker}"
-                f" {fresh_catchup_qty} @ {rebalance.catchup_price}c",
+                f" {fresh_catchup_qty} @ {catchup_price}c",
                 "information",
             )
             logger.info(
@@ -570,10 +681,10 @@ async def execute_rebalance(
                 event_ticker=rebalance.event_ticker,
                 ticker=rebalance.catchup_ticker,
                 qty=fresh_catchup_qty,
-                price=rebalance.catchup_price,
+                price=catchup_price,
             )
         except Exception as e:
-            notify(
+            _notify(
                 f"Catch-up FAILED: {type(e).__name__}: {e}",
                 "error",
             )
@@ -582,6 +693,15 @@ async def execute_rebalance(
                 event_ticker=rebalance.event_ticker,
                 ticker=rebalance.catchup_ticker,
             )
+            # Stale local orderbook — resubscribe for fresh snapshot
+            if (
+                feed is not None
+                and isinstance(e, KalshiAPIError)
+                and "post only cross" in str(e).lower()
+                and rebalance.catchup_ticker
+            ):
+                await feed.unsubscribe(rebalance.catchup_ticker)
+                await feed.subscribe(rebalance.catchup_ticker)
 
 
 # ── Helpers ──────────────────────────────────────────────────────────
@@ -602,24 +722,31 @@ async def _cancel_all_resting(
     """
     total_cancelled = 0
     cancelled_ids: list[str] = []
+    primary_cancelled = False
 
     # Cancel the primary order first
     try:
         await rest_client.cancel_order(primary_order_id)
         cancelled_ids.append(primary_order_id)
+        primary_cancelled = True
+    except KalshiRateLimitError:
+        raise  # Propagate — caller should retry next cycle
     except KalshiAPIError:
         pass  # Already cancelled or not found — continue to sweep
 
     # Sweep: fetch all resting orders for this event, cancel any on our ticker
+    primary_counted = False
     try:
         orders = await rest_client.get_all_orders(
-            event_ticker=event_ticker, status="resting",
+            event_ticker=event_ticker,
+            status="resting",
         )
         for order in orders:
             if order.ticker != ticker:
                 continue
             if order.order_id == primary_order_id:
                 total_cancelled += order.remaining_count
+                primary_counted = True
                 continue  # Already cancelled above
             if order.side != target_side or order.action != "buy":
                 continue
@@ -636,8 +763,12 @@ async def _cancel_all_resting(
                     order_id=order.order_id,
                     remaining=order.remaining_count,
                 )
+            except KalshiRateLimitError:
+                raise  # Propagate — don't silently skip resting orders
             except KalshiAPIError:
                 pass  # Best effort
+    except KalshiRateLimitError:
+        raise  # Propagate — caller must know cancel was incomplete
     except Exception:
         logger.warning(
             "orphan_sweep_failed",
@@ -646,7 +777,84 @@ async def _cancel_all_resting(
             exc_info=True,
         )
 
+    # If the primary was cancelled but the GET sweep didn't see it
+    # (Kalshi eventual consistency), count at least 1 contract.
+    if primary_cancelled and not primary_counted:
+        total_cancelled += 1
+
     return total_cancelled, cancelled_ids
+
+
+async def _cancel_duplicate_orders(
+    rest_client: KalshiRESTClient,
+    api_event_ticker: str,
+    ticker: str,
+    keep_order_id: str,
+    target_side: str,
+    *,
+    notify: Callable[[str, str], None],
+    adjuster: BidAdjuster,
+    event_ticker: str,
+    side: Side,
+) -> None:
+    """Cancel any resting orders on ticker EXCEPT the one we want to keep.
+
+    Handles the double-bid scenario: two separate orders exist on the same
+    side, each at qty 1 with unit_size=1.  decrease_order on the kept order
+    is a no-op, so the duplicate must be explicitly swept.
+    """
+    try:
+        orders = await rest_client.get_all_orders(
+            event_ticker=api_event_ticker,
+            status="resting",
+        )
+    except KalshiRateLimitError:
+        raise  # Propagate — caller must know sweep was incomplete
+    except Exception:
+        logger.warning(
+            "duplicate_sweep_fetch_failed",
+            event_ticker=event_ticker,
+            ticker=ticker,
+            exc_info=True,
+        )
+        return
+
+    cancelled = 0
+    for order in orders:
+        if order.ticker != ticker:
+            continue
+        if order.order_id == keep_order_id:
+            continue
+        if order.side != target_side or order.action != "buy":
+            continue
+        if order.remaining_count <= 0:
+            continue
+        try:
+            await rest_client.cancel_order(order.order_id)
+            cancelled += order.remaining_count
+            logger.info(
+                "duplicate_order_cancelled",
+                event_ticker=event_ticker,
+                ticker=ticker,
+                order_id=order.order_id,
+                remaining=order.remaining_count,
+            )
+            # Register so sync_from_orders filters it out
+            try:
+                ledger = adjuster.get_ledger(event_ticker)
+                ledger.mark_order_cancelled(order.order_id)
+            except (KeyError, ValueError):
+                pass
+        except KalshiRateLimitError:
+            raise  # Propagate — don't silently skip duplicates
+        except KalshiAPIError:
+            pass  # Best effort
+
+    if cancelled > 0:
+        notify(
+            f"Rebalance: cancelled {cancelled} duplicate on {side.value} ({ticker})",
+            "information",
+        )
 
 
 def _find_pair(scanner: ArbitrageScanner, event_ticker: str) -> ArbPair | None:

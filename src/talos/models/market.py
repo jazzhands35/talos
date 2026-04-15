@@ -94,6 +94,17 @@ class Series(BaseModel):
     frequency: str = ""
     settlement_sources: list[dict[str, Any]] = []
 
+    @model_validator(mode="before")
+    @classmethod
+    def _coerce_nullable_lists(cls, data: Any) -> Any:
+        if not isinstance(data, dict):
+            return data
+        if data.get("tags") is None:
+            data["tags"] = []
+        if data.get("settlement_sources") is None:
+            data["settlement_sources"] = []
+        return data
+
 
 class OrderBook(BaseModel):
     """Orderbook snapshot for a market.

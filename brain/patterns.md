@@ -174,7 +174,9 @@ When cancelling resting orders, cancel ALL orders on the target side — not jus
 
 **Pattern:** `_cancel_all_resting()` in `rebalance.py`: (1) cancel the primary order from the proposal, (2) fetch all resting for the event, (3) cancel any remaining NO-buys on the same ticker. Returns `(count, list_of_cancelled_ids)` so the caller can register them with `mark_order_cancelled()`.
 
-Applied in: `execute_rebalance` step 1 (target_resting=0 path). The sweep adds one extra API call (`get_all_orders(event_ticker=, status="resting")`) but eliminates the infinite cancel loop from orphaned orders.
+Applied in: `execute_rebalance` step 1 — both paths now sweep:
+- **target_resting=0:** `_cancel_all_resting()` cancels all orders on the ticker.
+- **target_resting>0:** `_cancel_duplicate_orders()` runs after `decrease_order`, cancelling any orders OTHER than the one being kept. Fixes a bug (2026-03-23) where `unit_size=1` with 2 separate orders (each qty 1) caused infinite OVERCOMMIT logs — the tracked order was already at target, but the duplicate was never touched.
 
 ## Monotonic state updates across data sources
 
@@ -284,6 +286,8 @@ Applied in: `execute_rebalance` in `rebalance.py` uses `decrease_order(reduce_to
 **Lesson:** Prefer APIs with absolute targets (`reduce_to=N`) over relative ones (`count = fill_count + desired`) when possible. When amend is required (price changes), always fetch the order's own state first — never use ledger aggregates.
 
 **Why not use aggregate:** If old orders were archived and a new one was placed, the aggregate might show 40 fills while the current order has 0. Using aggregate fills in the amend `count` makes `new_total` equal the order's existing total → `AMEND_ORDER_NO_OP`. The aggregate is correct for position display; the order's own state is correct for order-specific actions.
+
+**Corollary — fill deltas during approval windows:** When detecting fills that arrived between proposal and execution (e.g., during the amend approval window), compare the same order's fill_count at two timestamps: `old_order.fill_count - fresh_order.fill_count`. Never compare `old_order.fill_count - ledger.filled_count(side)` — the ledger aggregate includes historical fills from other orders, making the delta negative and silently dropping real fills. Fixed 2026-04-03.
 
 ## Extract as functions, not classes
 
@@ -437,3 +441,23 @@ def resolve(ticker, order_side=None):
 Applied in: `BidAdjuster._ticker_map` (was dict-of-tuples, now dict-of-lists with `resolve_pair()`), `PositionLedger.sync_from_orders` (uses `order.side` when `is_same_ticker`), `engine._reconcile_with_kalshi` (same pattern).
 
 **General principle:** Any `{key: value}` lookup where the same key can map to multiple values needs a list + disambiguation strategy. Silent overwrite is a data loss bug.
+
+## Paired order atomicity
+
+When placing two orders as a pair (leg A + leg B), failure of leg B must cancel leg A. Otherwise the surviving order is unhedged — one side exposed with no matching position.
+
+Applied in: `engine.py:place_bids()` — inner try/except around order B catches failures, cancels order A, then re-raises so the outer error handler (notification, cooldown, blacklist) still fires. If the cancel itself fails, log at ERROR level since the position is now genuinely dangerous.
+
+**General principle:** Multi-step mutations that form a logical unit need compensating actions on partial failure. The compensation must happen before the error propagates to generic handlers, since generic handlers don't know which sub-steps succeeded.
+
+## Symmetric condition deadlock
+
+When two independent evaluators apply the same symmetric condition (`this <= other`), both can satisfy it simultaneously and both defer — classic distributed deadlock.
+
+Applied in: `bid_adjuster.py:evaluate_jump()` — P19 dual-jump tiebreaker. When both sides are jumped with equal `unit_remaining`, the condition `this_remaining <= other_remaining` is true from both perspectives. Fix: asymmetric tiebreak — `Side.A` always wins when equal (`this_remaining < other_remaining or (equal and adj_side is Side.B)`).
+
+**General principle:** Any condition evaluated independently per-participant must be asymmetric to avoid deadlock. Use a deterministic tiebreaker (side ordering, alphabetical, timestamp) rather than a symmetric `<=`.
+
+## Known limitation: position_ledger "no" side filter
+
+`PositionLedger.sync_from_orders()` hardcodes `order.side != "no"` filter for cross-ticker pairs (line 350). Currently safe because all cross-ticker pairs are NO+NO arbs. If cross-ticker YES+NO or YES+YES pairs are ever added, orders on the wrong side would be silently ignored. The same-ticker branch correctly uses `side_map` for disambiguation.

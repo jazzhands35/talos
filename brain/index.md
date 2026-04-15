@@ -33,6 +33,17 @@
 - [[plans/03-api-integration/phase-13-decrease-order]]
 - [[plans/03-api-integration/phase-14-tier3-extras]]
 - [[plans/04-ml-integration/overview]]
+- [[plans/05-expiration-start-time/overview]]
+- [[plans/05-expiration-start-time/phase-1-market-model]]
+- [[plans/05-expiration-start-time/phase-2-threading]]
+- [[plans/05-expiration-start-time/phase-3-offset-lookup]]
+- [[plans/05-expiration-start-time/phase-4-resolver-fallback]]
+- [[plans/05-expiration-start-time/phase-5-display]]
+
+## Research
+- [[research/inventory-skewed-edge]]
+- [[research/trap-analysis]]
+- [[research/vpin-toxicity-filter]]
 
 ## Other
 - [[architecture]]

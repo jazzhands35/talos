@@ -61,11 +61,12 @@ Single source of truth for both UI display and bid adjustment safety gates. `com
    Bid modal uses `all_snapshots` fallback so any monitored pair is always selectable.
 5. **UI (Textual TUI)** (Layer 5) — **COMPLETE**
    Thin UI shell. `OpportunitiesTable` (prices + positions + queue), `AccountPanel` (balance display), `OrderLog` (filled/total + queue position), `ProposalPanel` (collapsible right sidebar for pending proposals with keyboard approve/reject). `AddGamesScreen` + `BidScreen` modals. `TalosApp` delegates all polling and actions to `TradingEngine`; owns only widget wiring and Textual lifecycle.
-6. **Automation** (Layer 6) — **SUPERVISED**
-   `ProposalQueue`: pure state machine holding pending proposals (adjustments + bids). Single choke point — nothing executes without operator approval. Handles add/supersede, staleness sweep with auto-expiry, approve/reject.
+6. **Automation** (Layer 6) — **AUTOMATIC**
+   `ProposalQueue`: pure state machine holding pending proposals (adjustments + bids). Single choke point for proposal approval.
    `OpportunityProposer`: pure decision logic that evaluates scanner output against edge threshold + stability filter + position gate. Emits bid proposals into ProposalQueue.
-   `AutomationConfig`: settings dataclass (edge threshold, stability seconds, cooldown, unit size, enabled flag). Off by default, explicit opt-in.
-   Graduation path: manual → assisted → **supervised** (current) → autonomous. See [[principles#2. Human in the Loop]].
+   `AutomationConfig`: settings dataclass (edge threshold, stability seconds, cooldown, enabled flag). `DEFAULT_UNIT_SIZE` constant is the single authority for unit_size defaults.
+   `ExecutionMode`: two modes — Automatic (intended default, proposals auto-approve) and Manual (override/debug, operator presses Y/N). Optional auto-stop timer on automatic. Safety flows (rebalance, catch-up, overcommit) execute in both modes. Status bar shows `MODE: AUTO|MANUAL` + `DATA: LIVE|STALE` as orthogonal always-visible dimensions.
+   Startup reads `execution_mode` and `auto_stop_hours` from `settings.json` as boot policy (never rewritten at runtime).
 
 7. **Event Scanner** (Layer 7) — **ACTIVE**
    `GameManager.scan_events()` discovers open arb-eligible events from `SPORTS_SERIES` and `NON_SPORTS_SERIES` (toggled by `sports_enabled`). Fetches concurrently with semaphore(10). `ScanScreen` modal shows results with Sport/League/Date/Volume columns. `MarketPickerScreen` for non-sports events with 2+ active markets. Press `c` to scan, Space to toggle, Enter to add selected, `a` to add all.

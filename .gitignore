@@ -31,13 +31,13 @@ Thumbs.db
 
 # User state
 games.json
-suggestions.log
 auto_accept_sessions/
 
 # Testing
 .coverage
 htmlcov/
 .pytest_cache/
+.pytest_cache_local/
 
 # Type checking
 .pyright/
@@ -48,4 +48,39 @@ htmlcov/
 
 # uv
 uv.lock
-talos_data.db
+autoresearch-results.tsv
+
+# Superpowers brainstorm artifacts
+.superpowers/
+
+# Build artifacts
+*.exe
+*.lnk
+
+# Database files
+*.db
+*.db-shm
+*.db-wal
+
+# Log files
+*.log
+
+# Debug / fix session artifacts
+debug/
+fix/
+
+# Runtime data
+settings.json
+games_full.json
+panel_debug.txt
+test_output*.txt
+all_sports_series.txt
+
+# Icon design iterations
+icons/
+icon.ico
+icon.svg
+
+# One-off scripts (not in tools/)
+tennis_scanner.py
+

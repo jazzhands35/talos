@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from textual.app import ComposeResult
 from textual.containers import Vertical
+from textual.events import Key
 from textual.message import Message
 from textual.reactive import reactive
 from textual.widgets import Static
@@ -44,6 +45,9 @@ class ProposalPanel(Vertical):
     }
     ProposalPanel .proposal-row.--rebalance {
         color: #fab387;
+    }
+    ProposalPanel .proposal-row.--queue-improve {
+        color: #94e2d5;
     }
     ProposalPanel .proposal-detail {
         color: #a6adc8;
@@ -91,9 +95,12 @@ class ProposalPanel(Vertical):
     def refresh_proposals(self) -> None:
         """Re-render from current queue state. Called by parent on timer."""
         pending = self._queue.pending()
-        self.display = len(pending) > 0
         if not pending:
             self._keys = []
+            # Remove old dynamic rows but keep the panel visible (toggled by parent)
+            for child in list(self.children):
+                if "proposal-row" in child.classes or "proposal-detail" in child.classes:
+                    child.remove()
             return
 
         self._keys = [p.key for p in pending]
@@ -123,6 +130,8 @@ class ProposalPanel(Vertical):
                 classes += " --hold"
             if proposal.kind == "rebalance":
                 classes += " --rebalance"
+            if proposal.kind == "queue_improve":
+                classes += " --queue-improve"
             row = Static(f"[{i + 1}] {proposal.summary}", classes=classes)
             detail = Static(f"    {proposal.detail}", classes="proposal-detail")
             if hint:
@@ -131,6 +140,15 @@ class ProposalPanel(Vertical):
             else:
                 self.mount(row)
                 self.mount(detail)
+
+    def on_key(self, event: Key) -> None:
+        """Handle arrow keys for selection navigation."""
+        if event.key == "up":
+            self.select_previous()
+            event.stop()
+        elif event.key == "down":
+            self.select_next()
+            event.stop()
 
     def select_previous(self) -> None:
         """Move selection up."""

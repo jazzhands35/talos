@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime
+from typing import Literal
 from zoneinfo import ZoneInfo
 
 from rich.text import Text as RichText
@@ -231,7 +232,7 @@ class BidScreen(ModalScreen[BidConfirmation | None]):
             )
 
 
-class AutoAcceptScreen(ModalScreen[float | None]):
+class AutoAcceptScreen(ModalScreen[float | Literal["indefinite"] | None]):
     """Modal for entering automatic mode duration in hours."""
 
     BINDINGS = [("escape", "cancel", "Cancel")]
@@ -261,17 +262,16 @@ class AutoAcceptScreen(ModalScreen[float | None]):
             hours_input = self.query_one("#hours-input", Input)
             raw = hours_input.value.strip()
             if not raw:
-                # Blank = indefinite → dismiss with 0.0
-                self.dismiss(0.0)
+                self.dismiss("indefinite")
                 return
             try:
                 hours = float(raw)
             except ValueError:
                 self.query_one("#modal-error", Label).update("Enter a valid number or leave blank")
                 return
-            if hours < 0:
+            if hours <= 0:
                 self.query_one("#modal-error", Label).update(
-                    "Duration must be positive (or blank for indefinite)"
+                    "Duration must be greater than 0 (or blank for indefinite)"
                 )
                 return
             self.dismiss(hours)
@@ -728,12 +728,12 @@ class SettlementHistoryScreen(ModalScreen[None]):
 class _PickerTable(DataTable):
     """DataTable subclass that forwards Space/Enter to the parent screen."""
 
-    def _on_key(self, event: Key) -> None:
+    async def _on_key(self, event: Key) -> None:
         if event.key in ("space", "shift+space", "enter"):
             # Let the parent MarketPickerScreen handle these
             event.prevent_default()
             return
-        super()._on_key(event)
+        await super()._on_key(event)
 
 
 class BlacklistScreen(ModalScreen[list[str] | None]):

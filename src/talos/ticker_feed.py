@@ -51,14 +51,15 @@ class TickerFeed:
 
         Uses skip_ticker_ack and send_initial_snapshot for efficiency.
         """
-        for ticker in tickers:
+        unique = list(dict.fromkeys(tickers))  # dedupe, preserve order
+        for ticker in unique:
             await self._ws.subscribe(
                 _TICKER_CHANNEL,
                 ticker,
                 skip_ticker_ack=True,
                 send_initial_snapshot=True,
             )
-        logger.info("ticker_feed_subscribe", tickers=tickers)
+        logger.info("ticker_feed_subscribe", count=len(unique))
 
     async def add_markets(self, tickers: list[str]) -> None:
         """Add tickers to existing subscription via update_subscription."""

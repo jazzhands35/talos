@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, NamedTuple
 from zoneinfo import ZoneInfo
 
 from rich.segment import Segment
@@ -144,9 +144,9 @@ _CATEGORY_SHORT: dict[str, str] = {
 
 
 def _fmt_vol(volume: int) -> RichText:
-    """Format 24h volume as compact number."""
+    """Format 24h volume as compact number. Shows 0 explicitly (not dash)."""
     if volume == 0:
-        return DIM_DASH
+        return RichText("0", style="dim", justify="right")
     label = f"{volume / 1000:.1f}k" if volume >= 1000 else str(volume)
     return RichText(label, justify="right")
 
@@ -254,6 +254,44 @@ def _fmt_pnl_with_roi(pnl_cents: int, invested_cents: int) -> str:
     return label
 
 
+class _ColSpec(NamedTuple):
+    """Column definition for the opportunities table."""
+
+    key: str  # unique identifier
+    label: str  # header text
+    width: int | None  # None = auto
+    justify: str  # "left", "right", "center"
+    compact: bool  # visible in compact mode?
+    sort_key: str | None = None  # for sortable columns
+
+
+# Full table layout — compact mode hides columns with compact=False.
+# Widths are tightened vs. the original to save ~14 chars total.
+_COL_SPECS: tuple[_ColSpec, ...] = (
+    _ColSpec("id", "#", 3, "right", False, "talos_id"),
+    _ColSpec("dot", "", 2, "center", False),
+    _ColSpec("team", "Team", 14, "left", True, "label"),
+    _ColSpec("sport", "Sport", 5, "left", False, "sport"),
+    _ColSpec("lg", "Lg", 5, "left", False, "league"),
+    _ColSpec("date", "Date", 5, "right", False, "date"),
+    _ColSpec("game", "Game", 8, "right", True, "state"),
+    _ColSpec("price", "Price", 5, "right", True, "no_a"),
+    _ColSpec("vol", "Vol", 6, "right", True, "vol_a"),
+    _ColSpec("pos", "Pos", 14, "right", True, "pos"),
+    _ColSpec("queue", "Queue", 6, "right", True, "queue"),
+    _ColSpec("cpm", "CPM", 7, "right", True, "cpm"),
+    _ColSpec("eta", "ETA", 5, "right", True, "eta"),
+    _ColSpec("edge", "Edge", 5, "right", True, "fee_edge"),
+    _ColSpec("eval", "Eval", 4, "right", True, "eval"),
+    _ColSpec("status", "Status", 16, "left", True, "status"),
+    _ColSpec("locked", "Locked", 8, "right", True, "locked"),
+    _ColSpec("exposure", "Expos", 8, "right", False, "exposure"),
+)
+
+_ALL_INDICES = tuple(range(len(_COL_SPECS)))
+_COMPACT_INDICES = tuple(i for i, s in enumerate(_COL_SPECS) if s.compact)
+
+
 class OpportunitiesTable(DataTable):
     """Live-updating arbitrage opportunities table with position data."""
 
@@ -263,24 +301,10 @@ class OpportunitiesTable(DataTable):
     }
     """
 
-    # Column index -> sort key extractor from (opp, positions, volumes, resolver, labels)
-    _SORT_KEYS: dict[int, str] = {
-        1: "label",  # Team name (col 1)
-        2: "sport",  # Sport (col 2)
-        3: "league",  # Lg (col 3)
-        4: "date",  # Date (col 4)
-        5: "state",  # Game (col 5)
-        6: "no_a",  # Price (col 6)
-        7: "vol_a",  # Vol (col 7)
-        12: "fee_edge",  # Edge (col 12)
-        14: "status",  # Status (col 14)
-        15: "locked",  # Locked profit (col 15)
-        16: "exposure",  # Exposure (col 16)
-    }
-
     def __init__(self, **kwargs: Any) -> None:
         super().__init__(**kwargs)
         self._positions: dict[str, EventPositionSummary] = {}
+        self._talos_ids: dict[str, int] = {}  # event_ticker -> talos_id
         self._labels: dict[str, str] = {}
         self._leg_labels: dict[str, tuple[str, str]] = {}
         self._resolver: Any = None
@@ -292,6 +316,8 @@ class OpportunitiesTable(DataTable):
         self._dirty_events: set[str] = set()  # event tickers with changes since last render
         self._all_dirty: bool = True  # first render rebuilds everything
         self._freshness: dict[str, float | None] = {}  # market_ticker -> age in seconds
+        self._compact: bool = False
+        self._vis_idx: tuple[int, ...] = _ALL_INDICES
 
     def set_resolver(self, resolver: Any) -> None:
         """Set the game status resolver for Date/Game columns."""
@@ -323,25 +349,50 @@ class OpportunitiesTable(DataTable):
     def on_mount(self) -> None:
         self.cursor_type = "row"
         self.zebra_stripes = False  # We handle pair striping ourselves
-        r = "right"
-        c = "center"
-        self.add_column(RichText("", justify=c), width=2)  # 0: Freshness dot
-        self.add_column("Team")  # 1: Team name
-        self.add_column("Sport", width=6)  # 2: Sport / series prefix
-        self.add_column("Lg", width=5)  # 3: League / submarket
-        self.add_column(RichText("Date", justify=r), width=6)  # 4: Date
-        self.add_column(RichText("Game", justify=r), width=9)  # 5: Game status
-        self.add_column(RichText("Price", justify=r), width=5)  # 6: Leg price
-        self.add_column(RichText("24h Vol", justify=r), width=7)  # 7: 24h Volume
-        self.add_column(RichText("Pos", justify=r), width=14)  # 8: Position
-        self.add_column(RichText("Queue", justify=r), width=6)  # 9: Queue position
-        self.add_column(RichText("CPM", justify=r), width=8)  # 10: Contracts/min
-        self.add_column(RichText("ETA", justify=r), width=7)  # 11: Est. time to fill
-        self.add_column(RichText("Edge", justify=r), width=6)  # 12: Fee-adjusted edge
-        self.add_column(RichText("Eval", justify=r), width=5)  # 13: Seconds since last evaluation
-        self.add_column("Status", width=16)  # 14: Event status
-        self.add_column(RichText("Locked", justify=r), width=10)  # 15: Locked profit
-        self.add_column(RichText("Expos", justify=r), width=10)  # 16: Exposure
+        self._setup_columns()
+
+    # ── View mode helpers ────────────────────────────────────────────
+
+    def _setup_columns(self) -> None:
+        """Add table columns for the current view mode."""
+        for i in self._vis_idx:
+            spec = _COL_SPECS[i]
+            label: str | RichText = (
+                RichText(spec.label, justify=spec.justify)  # type: ignore[arg-type]
+                if spec.justify != "left"
+                else spec.label
+            )
+            if spec.width is not None:
+                self.add_column(label, width=spec.width)
+            else:
+                self.add_column(label)
+
+    def _build_sort_keys(self) -> dict[int, str]:
+        """Map visible column index -> sort key name."""
+        result: dict[int, str] = {}
+        for vis_idx, full_idx in enumerate(self._vis_idx):
+            sk = _COL_SPECS[full_idx].sort_key
+            if sk is not None:
+                result[vis_idx] = sk
+        return result
+
+    def _filter_row(self, full_row: tuple[Any, ...]) -> tuple[Any, ...]:
+        """Select only visible columns from a full 18-element row tuple."""
+        if not self._compact:
+            return full_row
+        return tuple(full_row[i] for i in self._vis_idx)
+
+    def set_compact(self, compact: bool) -> None:
+        """Switch between full and compact column layouts."""
+        if compact == self._compact:
+            return
+        self._compact = compact
+        self._vis_idx = _COMPACT_INDICES if compact else _ALL_INDICES
+        self._sort_col = None  # Reset sort on mode change
+        self._needs_resort = False
+        self.clear(columns=True)
+        self._setup_columns()
+        self._all_dirty = True  # Force full rebuild on next refresh
 
     def _get_row_style(self, row_index: int, base_style: RichStyle) -> RichStyle:  # type: ignore[override]
         """Pair striping: alternate background per event pair (every 2 rows)."""
@@ -418,7 +469,9 @@ class OpportunitiesTable(DataTable):
         col = self._sort_col
         if col is None:
             return opp.raw_edge  # default sort; reverse=True gives descending
-        key_name = self._SORT_KEYS.get(col)
+        key_name = self._build_sort_keys().get(col)
+        if key_name == "talos_id":
+            return self._talos_ids.get(opp.event_ticker, 0)
         if key_name == "label":
             labels = self._leg_labels.get(opp.event_ticker)
             if labels:
@@ -464,6 +517,32 @@ class OpportunitiesTable(DataTable):
         if key_name == "exposure":
             pos = self._positions.get(opp.event_ticker)
             return pos.exposure_cents if pos else 0
+        if key_name == "pos":
+            pos = self._positions.get(opp.event_ticker)
+            if pos is None:
+                return 0
+            return pos.leg_a.filled_count + pos.leg_a.resting_count
+        if key_name == "queue":
+            pos = self._positions.get(opp.event_ticker)
+            if pos and pos.leg_a.queue_position is not None:
+                return pos.leg_a.queue_position
+            return 999_999  # No queue → sort last
+        if key_name == "cpm":
+            pos = self._positions.get(opp.event_ticker)
+            return pos.leg_a.cpm if pos and pos.leg_a.cpm is not None else 0.0
+        if key_name == "eta":
+            pos = self._positions.get(opp.event_ticker)
+            if pos and pos.leg_a.eta_minutes is not None:
+                return pos.leg_a.eta_minutes
+            return 999_999.0  # No ETA → sort last
+        if key_name == "eval":
+            if opp.timestamp:
+                try:
+                    ts = datetime.fromisoformat(opp.timestamp)
+                    return (datetime.now(UTC) - ts).total_seconds()
+                except (ValueError, TypeError):
+                    pass
+            return 999_999.0
         # Unsupported column — fall back to edge
         return opp.raw_edge
 
@@ -484,6 +563,7 @@ class OpportunitiesTable(DataTable):
         if scanner is None:
             return
 
+        self._talos_ids = {p.event_ticker: p.talos_id for p in scanner.pairs}
         all_snaps = scanner.all_snapshots
         current_events = {
             str(k.value).rsplit(":", 1)[0]
@@ -549,6 +629,10 @@ class OpportunitiesTable(DataTable):
 
     def _build_row_pair(self, opp: Any, tracker: TopOfMarketTracker | None) -> tuple[tuple, tuple]:
         """Build two row tuples (row1=team_a, row2=team_b) for one event."""
+        # Talos ID
+        tid = self._talos_ids.get(opp.event_ticker, 0)
+        id_cell = RichText(str(tid), justify="right") if tid else ""
+
         # Team names
         team_a, team_b = self._leg_labels.get(opp.event_ticker, (opp.ticker_a, opp.ticker_b))
 
@@ -684,6 +768,7 @@ class OpportunitiesTable(DataTable):
 
         # Row 1: team A + shared event-level info
         row1 = (
+            id_cell,
             dot_a,
             team_a,
             sport,
@@ -705,6 +790,7 @@ class OpportunitiesTable(DataTable):
 
         # Row 2: team B only — shared columns blank
         row2 = (
+            "",
             dot_b,
             team_b,
             "",
@@ -724,7 +810,7 @@ class OpportunitiesTable(DataTable):
             "",
         )
 
-        return row1, row2
+        return self._filter_row(row1), self._filter_row(row2)
 
 
 class PortfolioPanel(Static):
@@ -753,7 +839,7 @@ class PortfolioPanel(Static):
         exposure = f"${self._exposure / 100:,.2f}"
         return (
             f"Cash:       {cash}\n"
-            f"Matched:    {self._matched} units\n"
+            f"Matched:    {self._matched} pairs\n"
             f"Partial:    {self._partial} events\n"
             f"Locked In:  {locked}\n"
             f"Exposure:   {exposure}\n"
@@ -793,6 +879,48 @@ class PortfolioPanel(Static):
         self._with_positions = with_positions
         self._bidding = bidding
         self._unentered = unentered
+        self.refresh()
+
+
+class PerformancePanel(Static):
+    """Historical performance: settled events and P&L by time window."""
+
+    def __init__(self, **kwargs: Any) -> None:
+        super().__init__("", **kwargs)
+        self._d24h_events: int = 0
+        self._d7d_events: int = 0
+        self._d30d_events: int = 0
+        self._d24h_pnl: int = 0
+        self._d7d_pnl: int = 0
+        self._d30d_pnl: int = 0
+
+    def on_mount(self) -> None:
+        self.border_title = "Performance"
+
+    def _fmt_pnl(self, cents: int) -> str:
+        if cents >= 0:
+            return f"${cents / 100:,.2f}"
+        return f"-${abs(cents) / 100:,.2f}"
+
+    def render(self) -> str:
+        h24 = self._fmt_pnl(self._d24h_pnl)
+        d7 = self._fmt_pnl(self._d7d_pnl)
+        d30 = self._fmt_pnl(self._d30d_pnl)
+        e24, e7, e30 = self._d24h_events, self._d7d_events, self._d30d_events
+        # Vertical layout: fits in ~24-char content area
+        return (
+            f"24h: {e24:>4d} settled {h24:>8s}\n"
+            f"7d:  {e7:>4d} settled {d7:>8s}\n"
+            f"30d: {e30:>4d} settled {d30:>8s}"
+        )
+
+    def update_performance(self, agg: dict[str, int]) -> None:
+        self._d24h_events = agg.get("d24h_events", 0)
+        self._d7d_events = agg.get("d7d_events", 0)
+        self._d30d_events = agg.get("d30d_events", 0)
+        self._d24h_pnl = agg.get("d24h_pnl", 0)
+        self._d7d_pnl = agg.get("d7d_pnl", 0)
+        self._d30d_pnl = agg.get("d30d_pnl", 0)
         self.refresh()
 
 

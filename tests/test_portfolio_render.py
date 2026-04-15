@@ -59,7 +59,7 @@ class TestPortfolioPanelRendering:
             panel.update_account(matched=5, partial=3, locked=1500.0, exposure=800)
             await pilot.pause()
             text = str(panel.render())
-            assert "5 units" in text
+            assert "5 pairs" in text
             assert "3 events" in text
             assert "$15.00" in text
             assert "$8.00" in text

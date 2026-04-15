@@ -2,8 +2,14 @@
 
 from __future__ import annotations
 
+from datetime import UTC, datetime, timedelta
+from types import MethodType, SimpleNamespace
+from typing import cast
+
 from rich.text import Text as RichText
 
+from talos.auto_accept_log import AutoAcceptLogger
+from talos.engine import TradingEngine
 from talos.models.position import EventPositionSummary, LegSummary
 from talos.models.strategy import Opportunity
 from talos.models.ws import OrderBookSnapshot
@@ -16,12 +22,12 @@ from talos.ui.widgets import OpportunitiesTable, OrderLog, PortfolioPanel
 class TestAppMount:
     async def test_app_mounts_without_error(self) -> None:
         app = TalosApp()
-        async with app.run_test():
+        async with app.run_test(size=(200, 50)):
             assert app.query_one("#opportunities-table") is not None
 
     async def test_app_has_header_and_footer(self) -> None:
         app = TalosApp()
-        async with app.run_test():
+        async with app.run_test(size=(200, 50)):
             from textual.widgets import Footer, Header
 
             assert len(app.query(Header)) == 1
@@ -29,7 +35,7 @@ class TestAppMount:
 
     async def test_app_has_bottom_panels(self) -> None:
         app = TalosApp()
-        async with app.run_test():
+        async with app.run_test(size=(200, 50)):
             assert app.query_one("#account-panel") is not None
             assert app.query_one("#order-log") is not None
 
@@ -52,11 +58,88 @@ def _make_scanner_with_opportunity() -> ArbitrageScanner:
     return scanner
 
 
+class _FakeProposalQueue:
+    def pending(self) -> list[object]:
+        return []
+
+
+class _FakeTracker:
+    def __init__(self) -> None:
+        self.on_change = None
+
+
+class _FakeEngine:
+    def __init__(self, *, ws_connected: bool = True, seconds_since_update: float = 0.0) -> None:
+        self.scanner = ArbitrageScanner(OrderBookManager())
+        self.tracker = _FakeTracker()
+        self.game_status_resolver = None
+        self.on_notification = None
+        self.ws_connected = ws_connected
+        self._seconds_since_update = seconds_since_update
+        self.proposal_queue = _FakeProposalQueue()
+        self.automation_config = SimpleNamespace(
+            edge_threshold_cents=1.0,
+            stability_seconds=5.0,
+        )
+        self.unit_size = 5
+        self.balance = 0
+        self.portfolio_value = 0
+        self.position_summaries: list[EventPositionSummary] = []
+        self.order_data: list[dict[str, object]] = []
+
+    def performance_settlement_rows(self) -> list[dict[str, object]]:
+        return []
+
+    def seconds_since_last_book_update(self) -> float:
+        return self._seconds_since_update
+
+    async def start_feed(self) -> None:
+        return
+
+    async def refresh_balance(self) -> None:
+        return
+
+    async def refresh_account(self) -> None:
+        return
+
+    async def refresh_queue_positions(self) -> None:
+        return
+
+    async def refresh_trades(self) -> None:
+        return
+
+    def recompute_positions(self) -> None:
+        return
+
+    async def get_all_settlements(self) -> list[object]:
+        return []
+
+    @property
+    def has_settlement_cache(self) -> bool:
+        return False
+
+    async def refresh_volumes(self) -> None:
+        return
+
+    async def refresh_game_status(self) -> None:
+        return
+
+    def on_top_of_market_change(self, ticker: str) -> None:
+        return
+
+
+def _disable_startup_workers(app: TalosApp) -> None:
+    app._start_feed = MethodType(lambda self: None, app)
+    app._start_watchdog = MethodType(lambda self: None, app)
+    app._poll_balance = MethodType(lambda self: None, app)
+    app._refresh_volumes = MethodType(lambda self: None, app)
+
+
 class TestOpportunitiesTable:
     async def test_table_shows_opportunity_row(self) -> None:
         scanner = _make_scanner_with_opportunity()
         app = TalosApp(scanner=scanner)
-        async with app.run_test() as pilot:
+        async with app.run_test(size=(200, 50)) as pilot:
             table = app.query_one(OpportunitiesTable)
             app.refresh_opportunities()
             await pilot.pause()
@@ -65,44 +148,44 @@ class TestOpportunitiesTable:
     async def test_table_formats_prices_as_cents(self) -> None:
         scanner = _make_scanner_with_opportunity()
         app = TalosApp(scanner=scanner)
-        async with app.run_test() as pilot:
+        async with app.run_test(size=(200, 50)) as pilot:
             app.refresh_opportunities()
             await pilot.pause()
             table = app.query_one(OpportunitiesTable)
             # Row 0 = team A, Row 1 = team B (two-row layout)
             row_a = table.get_row_at(0)
             row_b = table.get_row_at(1)
-            # Col 5 = Price per leg
-            assert "38¢" in str(row_a[5])
-            assert "55¢" in str(row_b[5])
-            # Col 11 = Edge (on row A only)
-            assert "6.2" in str(row_a[11])
+            # Col 7 = Price per leg (after ID column)
+            assert "38¢" in str(row_a[7])
+            assert "55¢" in str(row_b[7])
+            # Col 13 = Edge (on row A only)
+            assert "6.2" in str(row_a[13])
 
     async def test_short_event_label_displayed(self) -> None:
         """Table should show team names from leg_labels."""
         scanner = _make_scanner_with_opportunity()
         app = TalosApp(scanner=scanner)
-        async with app.run_test() as pilot:
+        async with app.run_test(size=(200, 50)) as pilot:
             table = app.query_one(OpportunitiesTable)
             table.update_leg_labels({"EVT-STANMIA": ("Stanford", "Miami")})
             app.refresh_opportunities()
             await pilot.pause()
             row_a = table.get_row_at(0)
             row_b = table.get_row_at(1)
-            assert str(row_a[1]) == "Stanford"  # col 1 = Team name
-            assert str(row_b[1]) == "Miami"
+            assert str(row_a[2]) == "Stanford"  # col 2 = Team name (after ID)
+            assert str(row_b[2]) == "Miami"
 
     async def test_missing_label_falls_back_to_ticker(self) -> None:
         """Without leg_labels, market tickers display as fallback."""
         scanner = _make_scanner_with_opportunity()
         app = TalosApp(scanner=scanner)
-        async with app.run_test() as pilot:
+        async with app.run_test(size=(200, 50)) as pilot:
             table = app.query_one(OpportunitiesTable)
             # No leg_labels set
             app.refresh_opportunities()
             await pilot.pause()
             row_a = table.get_row_at(0)
-            assert str(row_a[1]) == "GAME-STAN"  # falls back to ticker_a
+            assert str(row_a[2]) == "GAME-STAN"  # falls back to ticker_a
 
     async def test_table_shows_negative_edge_pairs(self) -> None:
         mgr = OrderBookManager()
@@ -120,7 +203,7 @@ class TestOpportunitiesTable:
         scanner.scan("GAME-A")
 
         app = TalosApp(scanner=scanner)
-        async with app.run_test() as pilot:
+        async with app.run_test(size=(200, 50)) as pilot:
             app.refresh_opportunities()
             await pilot.pause()
             table = app.query_one(OpportunitiesTable)
@@ -136,13 +219,13 @@ class TestOpportunitiesTable:
             await pilot.pause()
             assert table.row_count == 2  # still visible (2 rows)
             row_a = table.get_row_at(0)
-            assert "-" in str(row_a[11])  # Edge col 11 shows negative
+            assert "-" in str(row_a[13])  # Edge col 13 shows negative
 
 
 class TestPortfolioPanel:
     async def test_renders_balance(self) -> None:
         app = TalosApp()
-        async with app.run_test() as pilot:
+        async with app.run_test(size=(200, 50)) as pilot:
             panel = app.query_one(PortfolioPanel)
             panel.update_balance(balance_cents=125000, portfolio_cents=210050)
             await pilot.pause()
@@ -155,7 +238,7 @@ class TestTablePositions:
     async def test_table_shows_position_data(self) -> None:
         scanner = _make_scanner_with_opportunity()
         app = TalosApp(scanner=scanner)
-        async with app.run_test() as pilot:
+        async with app.run_test(size=(200, 50)) as pilot:
             table = app.query_one(OpportunitiesTable)
             table.update_positions(
                 [
@@ -196,29 +279,29 @@ class TestTablePositions:
             # Two-row layout: row 0 = team A, row 1 = team B
             row_a = table.get_row_at(0)
             row_b = table.get_row_at(1)
-            # Col 7 = Pos, Col 8 = Queue, Col 9 = CPM, Col 10 = ETA
-            assert "3/5 31.4" in str(row_a[7])  # Pos-A with fee-adjusted avg
-            assert "3/5 67.4" in str(row_b[7])  # Pos-B with fee-adjusted avg
-            assert "8" in str(row_a[8])  # Queue-A
-            assert "15" in str(row_b[8])  # Queue-B
-            assert "12.5" in str(row_a[9])  # CPM-A
-            assert "6.00*" in str(row_b[9])  # CPM-B (partial)
-            assert "1m" in str(row_a[10])  # ETA-A
-            assert "2m*" in str(row_b[10])  # ETA-B (partial)
-            # Col 13 = Locked profit
-            assert "0.02" in str(row_a[13])  # Locked (2.38 cents ≈ $0.02)
+            # Col 9 = Pos, Col 10 = Queue, Col 11 = CPM, Col 12 = ETA (shifted +1 for ID col)
+            assert "3/5 31.4" in str(row_a[9])  # Pos-A with fee-adjusted avg
+            assert "3/5 67.4" in str(row_b[9])  # Pos-B with fee-adjusted avg
+            assert "8" in str(row_a[10])  # Queue-A
+            assert "15" in str(row_b[10])  # Queue-B
+            assert "12.5" in str(row_a[11])  # CPM-A
+            assert "6.00*" in str(row_b[11])  # CPM-B (partial)
+            assert "1m" in str(row_a[12])  # ETA-A
+            assert "2m*" in str(row_b[12])  # ETA-B (partial)
+            # Col 16 = Locked profit
+            assert "0.02" in str(row_a[16])  # Locked (2.38 cents ≈ $0.02)
 
     async def test_table_shows_odds_without_positions(self) -> None:
         scanner = _make_scanner_with_opportunity()
         app = TalosApp(scanner=scanner)
-        async with app.run_test() as pilot:
+        async with app.run_test(size=(200, 50)) as pilot:
             app.refresh_opportunities()
             await pilot.pause()
             table = app.query_one(OpportunitiesTable)
             row_a = table.get_row_at(0)
             row_b = table.get_row_at(1)
-            assert str(row_a[7]) == "—"  # Pos col shows dim dash (no positions)
-            assert str(row_b[7]) == "—"
+            assert str(row_a[9]) == "—"  # Pos col shows dim dash (no positions)
+            assert str(row_b[9]) == "—"
 
 
 class TestRichTextCells:
@@ -226,13 +309,13 @@ class TestRichTextCells:
         """Em-dash placeholders should be dim Rich Text, not plain strings."""
         scanner = _make_scanner_with_opportunity()
         app = TalosApp(scanner=scanner)
-        async with app.run_test() as pilot:
+        async with app.run_test(size=(200, 50)) as pilot:
             app.refresh_opportunities()
             await pilot.pause()
             table = app.query_one(OpportunitiesTable)
             row_a = table.get_row_at(0)
-            # Pos (col 7) should be a dim Rich Text em-dash (no positions loaded)
-            pos = row_a[7]
+            # Pos (col 8) should be a dim Rich Text em-dash (no positions loaded)
+            pos = row_a[9]
             assert isinstance(pos, RichText)
             assert str(pos) == "—"
 
@@ -240,13 +323,13 @@ class TestRichTextCells:
         """Numeric columns should be right-justified Rich Text."""
         scanner = _make_scanner_with_opportunity()
         app = TalosApp(scanner=scanner)
-        async with app.run_test() as pilot:
+        async with app.run_test(size=(200, 50)) as pilot:
             app.refresh_opportunities()
             await pilot.pause()
             table = app.query_one(OpportunitiesTable)
             row_a = table.get_row_at(0)
-            # Price (col 5) should be right-aligned
-            no_a = row_a[5]
+            # Price (col 6) should be right-aligned
+            no_a = row_a[7]
             assert isinstance(no_a, RichText)
             assert no_a.justify == "right"
             assert "38¢" in str(no_a)
@@ -255,12 +338,12 @@ class TestRichTextCells:
         """Positive edge should be green Rich Text."""
         scanner = _make_scanner_with_opportunity()
         app = TalosApp(scanner=scanner)
-        async with app.run_test() as pilot:
+        async with app.run_test(size=(200, 50)) as pilot:
             app.refresh_opportunities()
             await pilot.pause()
             table = app.query_one(OpportunitiesTable)
             row_a = table.get_row_at(0)
-            edge = row_a[11]  # Edge column (col 11)
+            edge = row_a[13]  # Edge column (col 13)
             assert isinstance(edge, RichText)
             # Scanner has positive edge (NO-A=38, NO-B=55, fee_edge≈6.2)
             assert edge.style is not None
@@ -298,12 +381,12 @@ class TestRichTextCells:
         assert tracker.is_at_top("GAME-STAN") is False
 
         app = TalosApp(scanner=scanner)
-        async with app.run_test() as pilot:
+        async with app.run_test(size=(200, 50)) as pilot:
             table = app.query_one(OpportunitiesTable)
             table.refresh_from_scanner(scanner, tracker)
             await pilot.pause()
             row_a = table.get_row_at(0)
-            q_a = row_a[8]  # Queue column (col 8) on row A
+            q_a = row_a[10]  # Queue column (col 10) on row A
             assert isinstance(q_a, RichText)
             assert "!!" in str(q_a)
 
@@ -313,7 +396,7 @@ class TestRichTextCells:
 
         scanner = _make_scanner_with_opportunity()
         app = TalosApp(scanner=scanner)
-        async with app.run_test() as pilot:
+        async with app.run_test(size=(200, 50)) as pilot:
             table = app.query_one(OpportunitiesTable)
             table.update_positions(
                 [
@@ -346,8 +429,8 @@ class TestRichTextCells:
             # Two-row layout: row 0 = team A, row 1 = team B
             row_a = table.get_row_at(0)
             row_b = table.get_row_at(1)
-            pos_a = row_a[7]  # Pos column (col 7) on row A
-            pos_b = row_b[7]  # Pos column (col 7) on row B
+            pos_a = row_a[9]  # Pos column (col 9) on row A
+            pos_b = row_b[9]  # Pos column (col 9) on row B
             # Behind side (A) should show yellow styling
             assert isinstance(pos_a, RichText)
             assert isinstance(pos_b, RichText)
@@ -387,7 +470,7 @@ class TestRichTextCells:
 class TestOrderLog:
     async def test_renders_orders(self) -> None:
         app = TalosApp()
-        async with app.run_test() as pilot:
+        async with app.run_test(size=(200, 50)) as pilot:
             log = app.query_one(OrderLog)
             log.update_orders(
                 [
@@ -425,7 +508,7 @@ class TestOrderLog:
 
     async def test_empty_orders(self) -> None:
         app = TalosApp()
-        async with app.run_test() as pilot:
+        async with app.run_test(size=(200, 50)) as pilot:
             log = app.query_one(OrderLog)
             log.update_orders([])
             await pilot.pause()
@@ -438,7 +521,7 @@ class TestAddGamesModal:
         from talos.ui.screens import AddGamesScreen
 
         app = TalosApp()
-        async with app.run_test() as pilot:
+        async with app.run_test(size=(200, 50)) as pilot:
             await pilot.press("a")
             await pilot.pause()
             assert isinstance(app.screen, AddGamesScreen)
@@ -447,7 +530,7 @@ class TestAddGamesModal:
         from talos.ui.screens import AddGamesScreen
 
         app = TalosApp()
-        async with app.run_test() as pilot:
+        async with app.run_test(size=(200, 50)) as pilot:
             await pilot.press("a")
             await pilot.pause()
             assert isinstance(app.screen, AddGamesScreen)
@@ -474,7 +557,7 @@ class TestBidModal:
             timestamp="2026-03-04T12:00:00Z",
         )
         app = TalosApp()
-        async with app.run_test() as pilot:
+        async with app.run_test(size=(200, 50)) as pilot:
             app.push_screen(BidScreen(opp))
             await pilot.pause()
             assert isinstance(app.screen, BidScreen)
@@ -496,7 +579,7 @@ class TestBidModal:
             timestamp="2026-03-04T12:00:00Z",
         )
         app = TalosApp()
-        async with app.run_test() as pilot:
+        async with app.run_test(size=(200, 50)) as pilot:
             app.push_screen(BidScreen(opp))
             await pilot.pause()
             assert isinstance(app.screen, BidScreen)
@@ -511,6 +594,133 @@ class TestProposalPanel:
         from talos.ui.proposal_panel import ProposalPanel
 
         app = TalosApp()
-        async with app.run_test():
+        async with app.run_test(size=(200, 50)):
             panels = app.query(ProposalPanel)
             assert len(panels) == 0
+
+
+class TestExecutionModeGovernance:
+    async def test_status_bar_manual_and_stale_without_engine(self) -> None:
+        app = TalosApp()
+        app._execution_mode.enter_manual()
+        async with app.run_test(size=(200, 50)) as pilot:
+            app._refresh_proposals()
+            await pilot.pause()
+            assert app.sub_title == "SPORTS | MODE: MANUAL | DATA: STALE"
+
+    async def test_status_bar_auto_live_and_count(self) -> None:
+        engine = _FakeEngine(ws_connected=True, seconds_since_update=5.0)
+        app = TalosApp(
+            engine=cast(TradingEngine, engine),
+            startup_execution_mode="manual",
+        )
+        _disable_startup_workers(app)
+        async with app.run_test(size=(200, 50)) as pilot:
+            app._execution_mode.enter_automatic()
+            app._execution_mode.accepted_count = 12
+            app._refresh_proposals()
+            await pilot.pause()
+            assert app.sub_title == "SPORTS | MODE: AUTO | DATA: LIVE | 12 accepted"
+
+    async def test_startup_manual_mode(self) -> None:
+        engine = _FakeEngine()
+        app = TalosApp(
+            engine=cast(TradingEngine, engine),
+            startup_execution_mode="manual",
+        )
+        _disable_startup_workers(app)
+        async with app.run_test(size=(200, 50)) as pilot:
+            app._refresh_proposals()
+            await pilot.pause()
+            assert app._execution_mode.is_automatic is False
+            assert app.sub_title == "SPORTS | MODE: MANUAL | DATA: LIVE"
+
+    async def test_startup_timed_automatic_mode(self) -> None:
+        engine = _FakeEngine()
+        app = TalosApp(
+            engine=cast(TradingEngine, engine),
+            startup_execution_mode="automatic",
+            startup_auto_stop_hours=2.0,
+        )
+        _disable_startup_workers(app)
+
+        called: list[float | None] = []
+
+        def _fake_enter_automatic_mode(self: TalosApp, hours: float | None = None) -> None:
+            called.append(hours)
+            self._execution_mode.enter_automatic(hours=hours)
+
+        app._enter_automatic_mode = MethodType(_fake_enter_automatic_mode, app)
+
+        async with app.run_test(size=(200, 50)) as pilot:
+            app._refresh_proposals()
+            await pilot.pause()
+            assert called == [2.0]
+            assert app._execution_mode.is_automatic is True
+            assert app._execution_mode.auto_stop_at is not None
+
+    def test_toggle_auto_accept_manual_opens_modal(self) -> None:
+        app = TalosApp(
+            engine=cast(TradingEngine, _FakeEngine()),
+            startup_execution_mode="manual",
+        )
+        called: list[bool] = []
+        app._open_auto_accept = MethodType(lambda self: called.append(True), app)
+        app._execution_mode.enter_manual()
+
+        app.action_toggle_auto_accept()
+
+        assert called == [True]
+
+    def test_toggle_auto_accept_automatic_ends_session(self) -> None:
+        app = TalosApp(engine=cast(TradingEngine, _FakeEngine()))
+        called: list[bool] = []
+        app._end_automatic_session = MethodType(lambda self: called.append(True), app)
+        app._execution_mode.enter_automatic()
+
+        app.action_toggle_auto_accept()
+
+        assert called == [True]
+
+    def test_end_automatic_session_switches_to_manual_and_clears_logger(self) -> None:
+        from talos.auto_accept import ExecutionMode
+
+        app = TalosApp(engine=cast(TradingEngine, _FakeEngine()))
+        app._execution_mode.enter_automatic()
+        app._execution_mode.accepted_count = 3
+        app._execution_mode.started_at = datetime.now(UTC) - timedelta(minutes=2)
+
+        session_ended: list[tuple[ExecutionMode, dict[str, object]]] = []
+
+        class _Logger:
+            def log_session_end(
+                self,
+                state: ExecutionMode,
+                final_positions: dict[str, object],
+            ) -> None:
+                session_ended.append((state, final_positions))
+
+        app._auto_accept_logger = cast(AutoAcceptLogger, _Logger())
+
+        app._end_automatic_session()
+
+        assert len(session_ended) == 1
+        assert app._execution_mode.is_automatic is False
+        assert app._auto_accept_logger is None
+
+    async def test_auto_accept_modal_rejects_zero_duration(self) -> None:
+        from textual.widgets import Button, Input, Label
+
+        from talos.ui.screens import AutoAcceptScreen
+
+        app = TalosApp()
+        async with app.run_test(size=(200, 50)) as pilot:
+            screen = AutoAcceptScreen()
+            app.push_screen(screen)
+            await pilot.pause()
+            screen.query_one("#hours-input", Input).value = "0"
+            start = screen.query_one("#start-btn", Button)
+            screen.on_button_pressed(Button.Pressed(start))
+            await pilot.pause()
+            error = screen.query_one("#modal-error", Label)
+            assert "greater than 0" in str(error.render())

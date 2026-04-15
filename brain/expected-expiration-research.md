@@ -41,15 +41,9 @@ Kalshi appears to use an approximate default time for CBA, not actual per-game s
 
 `Fury vs Makhmudov` has `expected_expiration_time = 2026-04-12T00:00:00Z` (midnight UTC exactly). This is almost certainly a placeholder — fight is a month away. Other boxing events show 5h offset. May update closer to event date, but our re-check confirmed Kalshi doesn't update dynamically.
 
-## Implementation Plan
+## Implementation
 
-1. Parse `expected_expiration_time` into `Market` model
-2. Thread through to `ArbPair` (or compute at game-add time)
-3. In `GameStatusResolver` or `_check_exit_only`: for events with no external provider match, derive `scheduled_start = expected_expiration - offset`
-4. Offset lookup: 3h default, 5h for UFC/Boxing series prefixes
-5. Use as fallback for both:
-   - **Date/Game column display** — show estimated start instead of dashes
-   - **Exit-only trigger** — `_check_exit_only` can use estimated start for `approaching_start` logic
+Completed as [[plans/05-expiration-start-time/overview]] (2026-03-17). Key modules: `game_status.py` (offset table + `estimate_start_time()` + `_expiration_fallback()`), `engine.py` (backfill + wiring), `widgets.py` (`~` prefix display).
 
 ## Raw Data
 

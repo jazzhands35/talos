@@ -8,6 +8,7 @@ from pydantic import BaseModel
 class ArbPair(BaseModel):
     """Two mutually exclusive markets within a game event."""
 
+    talos_id: int = 0  # Internal short ID for display/tracking
     event_ticker: str
     ticker_a: str
     ticker_b: str

@@ -1,6 +1,17 @@
 from __future__ import annotations
 
-from talos.automation_config import AutomationConfig
+from talos.automation_config import DEFAULT_UNIT_SIZE, AutomationConfig
+
+
+class TestDefaultUnitSize:
+    def test_default_unit_size_is_five(self) -> None:
+        assert DEFAULT_UNIT_SIZE == 5
+
+    def test_unit_size_not_on_automation_config(self) -> None:
+        """unit_size was removed from AutomationConfig — it lives in
+        DEFAULT_UNIT_SIZE and settings.json, not in proposal config."""
+        cfg = AutomationConfig()
+        assert not hasattr(cfg, "unit_size")
 
 
 class TestAutomationConfigDefaults:
@@ -20,10 +31,6 @@ class TestAutomationConfigDefaults:
         cfg = AutomationConfig()
         assert cfg.rejection_cooldown_seconds == 30.0
 
-    def test_unit_size(self) -> None:
-        cfg = AutomationConfig()
-        assert cfg.unit_size == 10
-
     def test_enabled_on_by_default(self) -> None:
         cfg = AutomationConfig()
         assert cfg.enabled is True
@@ -36,14 +43,12 @@ class TestAutomationConfigCustom:
             stability_seconds=10.0,
             staleness_grace_seconds=8.0,
             rejection_cooldown_seconds=60.0,
-            unit_size=25,
             enabled=True,
         )
         assert cfg.edge_threshold_cents == 3.0
         assert cfg.stability_seconds == 10.0
         assert cfg.staleness_grace_seconds == 8.0
         assert cfg.rejection_cooldown_seconds == 60.0
-        assert cfg.unit_size == 25
         assert cfg.enabled is True
 
     def test_partial_override(self) -> None:
@@ -54,4 +59,3 @@ class TestAutomationConfigCustom:
         assert cfg.stability_seconds == 5.0
         assert cfg.staleness_grace_seconds == 5.0
         assert cfg.rejection_cooldown_seconds == 30.0
-        assert cfg.unit_size == 10

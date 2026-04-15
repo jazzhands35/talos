@@ -10,6 +10,8 @@ from __future__ import annotations
 
 import structlog
 
+from talos.automation_config import DEFAULT_UNIT_SIZE
+from talos.data_collector import DataCollector
 from talos.errors import KalshiAPIError
 from talos.fees import MAKER_FEE_RATE, fee_adjusted_cost
 from talos.models.adjustment import ProposedAdjustment
@@ -31,10 +33,12 @@ class BidAdjuster:
         self,
         book_manager: OrderBookManager,
         pairs: list[ArbPair],
-        unit_size: int = 10,
+        unit_size: int = DEFAULT_UNIT_SIZE,
+        data_collector: DataCollector | None = None,
     ) -> None:
         self._books = book_manager
         self._unit_size = unit_size
+        self._data_collector = data_collector
 
         # Ticker → list of (pair, side) — list handles same-ticker pairs
         self._ticker_map: dict[str, list[tuple[ArbPair, Side]]] = {}
@@ -45,8 +49,10 @@ class BidAdjuster:
         self._ledgers: dict[str, PositionLedger] = {}
         for pair in pairs:
             self._ledgers[pair.event_ticker] = PositionLedger(
-                event_ticker=pair.event_ticker, unit_size=unit_size,
-                side_a_str=pair.side_a, side_b_str=pair.side_b,
+                event_ticker=pair.event_ticker,
+                unit_size=unit_size,
+                side_a_str=pair.side_a,
+                side_b_str=pair.side_b,
                 is_same_ticker=pair.is_same_ticker,
             )
 
@@ -60,6 +66,11 @@ class BidAdjuster:
     def ledgers(self) -> dict[str, PositionLedger]:
         """Read-only access to all per-event ledgers."""
         return self._ledgers
+
+    @property
+    def unit_size(self) -> int:
+        """Current unit size used for new and existing ledgers."""
+        return self._unit_size
 
     def get_ledger(self, event_ticker: str) -> PositionLedger:
         """Get the position ledger for an event."""
@@ -77,7 +88,9 @@ class BidAdjuster:
         self._ticker_map.setdefault(pair.ticker_b, []).append((pair, Side.B))
 
     def resolve_pair(
-        self, ticker: str, order_side: str | None = None,
+        self,
+        ticker: str,
+        order_side: str | None = None,
     ) -> tuple[ArbPair, Side] | None:
         """Resolve a ticker to (pair, side). Disambiguates same-ticker pairs by order_side."""
         entries = self._ticker_map.get(ticker)
@@ -94,12 +107,23 @@ class BidAdjuster:
         return entries[0]  # fallback
 
     def add_event(self, pair: ArbPair) -> None:
-        """Register a new event pair."""
+        """Register a new event pair.
+
+        If a ledger already exists for this event_ticker (multi-market event
+        with a different pair), skip creation to avoid clobbering the
+        existing ledger's state.
+        """
         self._register_pair(pair)
+        if pair.event_ticker in self._ledgers:
+            return  # Preserve existing ledger for this event
         self._ledgers[pair.event_ticker] = PositionLedger(
-            event_ticker=pair.event_ticker, unit_size=self._unit_size,
-            side_a_str=pair.side_a, side_b_str=pair.side_b,
+            event_ticker=pair.event_ticker,
+            unit_size=self._unit_size,
+            side_a_str=pair.side_a,
+            side_b_str=pair.side_b,
             is_same_ticker=pair.is_same_ticker,
+            ticker_a=pair.ticker_a,
+            ticker_b=pair.ticker_b,
         )
 
     def remove_event(self, event_ticker: str) -> None:
@@ -120,12 +144,49 @@ class BidAdjuster:
 
     # ── Decision logic (synchronous, testable) ──────────────────────
 
+    def _log_decision(
+        self,
+        *,
+        event_ticker: str,
+        ticker: str,
+        adj_side: Side | None,
+        trigger: str,
+        outcome: str,
+        reason: str,
+        book_top: int | None = None,
+        resting_price: int | None = None,
+        resting_count: int | None = None,
+        new_price: int | None = None,
+        effective_this: float | None = None,
+        effective_other: float | None = None,
+        exit_only: bool | None = None,
+    ) -> None:
+        """No-op if no data_collector was injected."""
+        if self._data_collector is None:
+            return
+        self._data_collector.log_decision(
+            event_ticker=event_ticker,
+            ticker=ticker,
+            side=adj_side.value if adj_side is not None else "",
+            trigger=trigger,
+            outcome=outcome,
+            reason=reason,
+            book_top=book_top,
+            resting_price=resting_price,
+            resting_count=resting_count,
+            new_price=new_price,
+            effective_this=effective_this,
+            effective_other=effective_other,
+            exit_only=exit_only,
+        )
+
     def evaluate_jump(
         self,
         ticker: str,
         at_top: bool,
         exit_only: bool = False,
         side: str = "no",
+        trigger: str = "ws_top_change",
     ) -> ProposedAdjustment | None:
         """Evaluate a jump event and return a proposal if appropriate.
 
@@ -137,9 +198,21 @@ class BidAdjuster:
 
         ``side`` is the order side ("yes" or "no") used to disambiguate
         same-ticker YES/NO pairs.
+
+        ``trigger`` labels the origin of the call for the replay timeline
+        (e.g. "ws_top_change", "reevaluate_jumps", "side_complete").
         """
         result = self.resolve_pair(ticker, order_side=side)
         if result is None:
+            self._log_decision(
+                event_ticker="",
+                ticker=ticker,
+                adj_side=None,
+                trigger=trigger,
+                outcome="skip_resolve_fail",
+                reason="ticker not registered in adjuster",
+                exit_only=exit_only,
+            )
             return None
 
         pair, adj_side = result
@@ -149,12 +222,27 @@ class BidAdjuster:
             # Clear any deferred for this side
             deferred = self._deferred.get(pair.event_ticker, set())
             deferred.discard(adj_side)
+            self._log_decision(
+                event_ticker=pair.event_ticker,
+                ticker=ticker,
+                adj_side=adj_side,
+                trigger=trigger,
+                outcome="skip_at_top",
+                reason="back at top of book",
+                exit_only=exit_only,
+            )
             return None
 
         ledger = self._ledgers[pair.event_ticker]
 
         # Determine the order side string for this adj_side
         pair_side = pair.side_a if adj_side == Side.A else pair.side_b
+        book_top_price = None
+        best_probe = self._books.best_ask(ticker, side=pair_side)
+        if best_probe is not None:
+            book_top_price = best_probe.price
+        cur_resting_price = ledger.resting_price(adj_side)
+        cur_resting_count = ledger.resting_count(adj_side)
 
         # Exit-only gate: block adjustments on the ahead side
         if exit_only:
@@ -162,24 +250,85 @@ class BidAdjuster:
             filled_b = ledger.filled_count(Side.B)
             if filled_a == filled_b:
                 # Balanced — block all adjustments
+                self._log_decision(
+                    event_ticker=pair.event_ticker,
+                    ticker=ticker,
+                    adj_side=adj_side,
+                    trigger=trigger,
+                    outcome="skip_exit_only_balanced",
+                    reason=f"exit-only, balanced ({filled_a}=={filled_b})",
+                    book_top=book_top_price,
+                    resting_price=cur_resting_price,
+                    resting_count=cur_resting_count,
+                    exit_only=True,
+                )
                 return None
             ahead = Side.A if filled_a > filled_b else Side.B
             if adj_side is ahead:
                 # This is the ahead side — don't adjust
+                self._log_decision(
+                    event_ticker=pair.event_ticker,
+                    ticker=ticker,
+                    adj_side=adj_side,
+                    trigger=trigger,
+                    outcome="skip_exit_only_ahead",
+                    reason=f"exit-only, this side ahead ({filled_a} vs {filled_b})",
+                    book_top=book_top_price,
+                    resting_price=cur_resting_price,
+                    resting_count=cur_resting_count,
+                    exit_only=True,
+                )
                 return None
 
         # No resting order on this side — nothing to adjust
         if ledger.resting_order_id(adj_side) is None:
+            self._log_decision(
+                event_ticker=pair.event_ticker,
+                ticker=ticker,
+                adj_side=adj_side,
+                trigger=trigger,
+                outcome="skip_no_resting",
+                reason="no resting order on this side",
+                book_top=book_top_price,
+                exit_only=exit_only,
+            )
             return None
 
         # Get new top-of-market price
         best = self._books.best_ask(ticker, side=pair_side)
         if best is None:
+            self._log_decision(
+                event_ticker=pair.event_ticker,
+                ticker=ticker,
+                adj_side=adj_side,
+                trigger=trigger,
+                outcome="skip_no_book",
+                reason="no best_ask available",
+                resting_price=cur_resting_price,
+                resting_count=cur_resting_count,
+                exit_only=exit_only,
+            )
             return None
         new_price = best.price
 
         # If new price equals current resting price, no action needed
         if new_price <= ledger.resting_price(adj_side):
+            self._log_decision(
+                event_ticker=pair.event_ticker,
+                ticker=ticker,
+                adj_side=adj_side,
+                trigger=trigger,
+                outcome="skip_stale_book",
+                reason=(
+                    f"new_price {new_price} <= resting "
+                    f"{ledger.resting_price(adj_side)}"
+                ),
+                book_top=new_price,
+                resting_price=cur_resting_price,
+                resting_count=cur_resting_count,
+                new_price=new_price,
+                exit_only=exit_only,
+            )
             return None
 
         def _hold(reason: str) -> ProposedAdjustment:
@@ -221,16 +370,32 @@ class BidAdjuster:
                     new_price=new_price,
                     effective_sum=this_effective + other_effective,
                 )
+                withdraw_reason = (
+                    f"no fills — withdraw both sides, "
+                    f"following to {new_price}c not profitable "
+                    f"({this_effective:.1f}+{other_effective:.1f}"
+                    f"={this_effective + other_effective:.1f} >= 100)"
+                )
+                self._log_decision(
+                    event_ticker=pair.event_ticker,
+                    ticker=ticker,
+                    adj_side=adj_side,
+                    trigger=trigger,
+                    outcome="withdraw",
+                    reason=withdraw_reason,
+                    book_top=new_price,
+                    resting_price=cur_resting_price,
+                    resting_count=cur_resting_count,
+                    new_price=new_price,
+                    effective_this=this_effective,
+                    effective_other=other_effective,
+                    exit_only=exit_only,
+                )
                 return ProposedAdjustment(
                     event_ticker=pair.event_ticker,
                     side=adj_side.value,
                     action="withdraw",
-                    reason=(
-                        f"no fills — withdraw both sides, "
-                        f"following to {new_price}c not profitable "
-                        f"({this_effective:.1f}+{other_effective:.1f}"
-                        f"={this_effective + other_effective:.1f} >= 100)"
-                    ),
+                    reason=withdraw_reason,
                     position_before=(
                         f"A: {ledger.format_position(Side.A)} | B: {ledger.format_position(Side.B)}"
                     ),
@@ -241,12 +406,28 @@ class BidAdjuster:
                 new_price=new_price,
                 effective_sum=this_effective + other_effective,
             )
-            return _hold(
+            hold_reason = (
                 f"stay at {ledger.resting_price(adj_side)}c — "
                 f"following to {new_price}c not profitable "
                 f"({this_effective:.1f}+{other_effective:.1f}"
                 f"={this_effective + other_effective:.1f} >= 100)"
             )
+            self._log_decision(
+                event_ticker=pair.event_ticker,
+                ticker=ticker,
+                adj_side=adj_side,
+                trigger=trigger,
+                outcome="hold_unprofitable",
+                reason=hold_reason,
+                book_top=new_price,
+                resting_price=cur_resting_price,
+                resting_count=cur_resting_count,
+                new_price=new_price,
+                effective_this=this_effective,
+                effective_other=other_effective,
+                exit_only=exit_only,
+            )
+            return _hold(hold_reason)
 
         # Dual-jump tiebreaker (Principle 19)
         other_ticker = pair.ticker_a if other_side is Side.A else pair.ticker_b
@@ -260,9 +441,11 @@ class BidAdjuster:
             if other_remaining == 0:
                 other_remaining = ledger.resting_count(other_side)
 
-            if this_remaining <= other_remaining:
-                # Other side is more behind (or equal) — defer this side
-                # Equal case: deterministic tiebreak by deferring this side
+            if this_remaining < other_remaining or (
+                this_remaining == other_remaining and adj_side is Side.B
+            ):
+                # Other side is more behind, or equal with deterministic
+                # tiebreak: Side.A always wins when equal (avoids both-deferred deadlock)
                 self._deferred.setdefault(pair.event_ticker, set()).add(adj_side)
                 logger.info(
                     "jump_deferred",
@@ -270,10 +453,26 @@ class BidAdjuster:
                     side=adj_side.value,
                     reason=f"other side needs {other_remaining} vs this side {this_remaining}",
                 )
-                return _hold(
+                deferred_reason = (
                     f"deferred — other side needs {other_remaining} fills "
                     f"vs this side {this_remaining}"
                 )
+                self._log_decision(
+                    event_ticker=pair.event_ticker,
+                    ticker=ticker,
+                    adj_side=adj_side,
+                    trigger=trigger,
+                    outcome="hold_deferred",
+                    reason=deferred_reason,
+                    book_top=new_price,
+                    resting_price=cur_resting_price,
+                    resting_count=cur_resting_count,
+                    new_price=new_price,
+                    effective_this=this_effective,
+                    effective_other=other_effective,
+                    exit_only=exit_only,
+                )
+                return _hold(deferred_reason)
             else:
                 # This side is more behind — cancel other side's existing proposal
                 evt_proposals = self._proposals.get(pair.event_ticker, {})
@@ -296,11 +495,30 @@ class BidAdjuster:
 
         # Safety gate check (simulating the post-cancel state)
         test_ok, test_reason = self._check_post_cancel_safety(
-            ledger, adj_side, new_count, new_price,
+            ledger,
+            adj_side,
+            new_count,
+            new_price,
         )
         if not test_ok:
             logger.info("jump_blocked_by_safety", ticker=ticker, reason=test_reason)
-            return _hold(f"stay — safety gate: {test_reason}")
+            safety_reason = f"stay — safety gate: {test_reason}"
+            self._log_decision(
+                event_ticker=pair.event_ticker,
+                ticker=ticker,
+                adj_side=adj_side,
+                trigger=trigger,
+                outcome="hold_safety",
+                reason=safety_reason,
+                book_top=new_price,
+                resting_price=cur_resting_price,
+                resting_count=cur_resting_count,
+                new_price=new_price,
+                effective_this=this_effective,
+                effective_other=other_effective,
+                exit_only=exit_only,
+            )
+            return _hold(safety_reason)
 
         proposal = ProposedAdjustment(
             event_ticker=pair.event_ticker,
@@ -338,6 +556,22 @@ class BidAdjuster:
         # Clear deferred flag for this side
         deferred = self._deferred.get(pair.event_ticker, set())
         deferred.discard(adj_side)
+
+        self._log_decision(
+            event_ticker=pair.event_ticker,
+            ticker=ticker,
+            adj_side=adj_side,
+            trigger=trigger,
+            outcome="follow_jump",
+            reason=proposal.reason,
+            book_top=new_price,
+            resting_price=cancel_price,
+            resting_count=cancel_count,
+            new_price=new_price,
+            effective_this=this_effective,
+            effective_other=other_effective,
+            exit_only=exit_only,
+        )
 
         return proposal
 
@@ -473,8 +707,11 @@ class BidAdjuster:
         if pair_lookup is not None:
             pair, _ = pair_lookup
             ok, reason = ledger.is_placement_safe(
-                adj_side, fresh_order.remaining_count, proposal.new_price,
-                rate=pair.fee_rate, catchup=True,
+                adj_side,
+                fresh_order.remaining_count,
+                proposal.new_price,
+                rate=pair.fee_rate,
+                catchup=True,
             )
             if not ok:
                 logger.warning(
@@ -517,12 +754,13 @@ class BidAdjuster:
             **amend_kwargs,
         )
 
-        # Update fills from amend response (handles fills that arrived during approval)
-        fill_delta = old_order.fill_count - ledger.filled_count(adj_side)
+        # Update fills from amend response (handles fills that arrived during approval).
+        # Compare against fresh_order (same order, pre-amend) — NOT the ledger
+        # aggregate, which includes fills from other orders on this side.
+        fill_delta = old_order.fill_count - fresh_order.fill_count
         if fill_delta > 0:
-            # Prorate maker fees for the new fills
             old_price = old_order.no_price if pair_side == "no" else old_order.yes_price
-            fee_delta = old_order.maker_fees - ledger.filled_fees(adj_side)
+            fee_delta = old_order.maker_fees - fresh_order.maker_fees
             ledger.record_fill(
                 adj_side,
                 count=fill_delta,
@@ -569,7 +807,11 @@ class BidAdjuster:
         return MAKER_FEE_RATE
 
     def _is_jumped(
-        self, ticker: str, ledger: PositionLedger, adj_side: Side, side: str = "no",
+        self,
+        ticker: str,
+        ledger: PositionLedger,
+        adj_side: Side,
+        side: str = "no",
     ) -> bool:
         """Check if a side has been jumped (book price > resting price)."""
         if ledger.resting_order_id(adj_side) is None:

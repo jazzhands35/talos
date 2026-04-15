@@ -197,7 +197,7 @@ class TestLogMarketSnapshots:
                     "open_interest_a": 300,
                     "open_interest_b": 250,
                     "game_state": "live",
-                    "status": "Settled",
+                    "status": "Balanced",
                     "filled_a": 20,
                     "filled_b": 20,
                     "resting_a": 0,

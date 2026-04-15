@@ -2,6 +2,11 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+# Single authoritative default for unit_size across the codebase.
+# Startup reads from settings.json; this is the fallback when no setting exists.
+# All constructor defaults in BidAdjuster, PositionLedger, etc. should use this.
+DEFAULT_UNIT_SIZE: int = 5
+
 
 @dataclass
 class AutomationConfig:
@@ -12,7 +17,6 @@ class AutomationConfig:
     staleness_grace_seconds: float = 5.0
     rejection_cooldown_seconds: float = 30.0
     placement_failure_cooldown_seconds: float = 120.0
-    unit_size: int = 10
     enabled: bool = True
     exit_only_minutes: float = 30.0
-    sports_enabled: bool = False  # Temporarily block all sports markets
+    sports_enabled: bool = True

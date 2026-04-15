@@ -86,9 +86,9 @@ def test_build_two_rows_returns_pair():
 
     row1, row2 = table._build_row_pair(opp, tracker=None)
     # Row 1 should have team name "Boston Bruins"
-    assert "Boston Bruins" in str(row1[1])
+    assert "Boston Bruins" in str(row1[2])
     # Row 2 should have team name "Washington Capitals"
-    assert "Washington Capitals" in str(row2[1])
-    # Both rows have 16 cells (added Date column)
-    assert len(row1) == 16
-    assert len(row2) == 16
+    assert "Washington Capitals" in str(row2[2])
+    # Both rows have 18 cells (ID + original 17)
+    assert len(row1) == 18
+    assert len(row2) == 18

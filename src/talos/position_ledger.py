@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING
 
 import structlog
 
+from talos.automation_config import DEFAULT_UNIT_SIZE
 from talos.fees import (
     MAKER_FEE_RATE,
     fee_adjusted_cost,
@@ -83,10 +84,12 @@ class PositionLedger:
     def __init__(
         self,
         event_ticker: str,
-        unit_size: int = 10,
+        unit_size: int = DEFAULT_UNIT_SIZE,
         side_a_str: str = "no",
         side_b_str: str = "no",
         is_same_ticker: bool = False,
+        ticker_a: str = "",
+        ticker_b: str = "",
     ) -> None:
         if unit_size <= 0:
             raise ValueError(f"unit_size must be positive, got {unit_size}")
@@ -95,6 +98,8 @@ class PositionLedger:
         self._side_a_str = side_a_str
         self._side_b_str = side_b_str
         self._is_same_ticker = is_same_ticker
+        self._ticker_a = ticker_a
+        self._ticker_b = ticker_b
         self._sync_gen: int = 0
         self._sides: dict[Side, _SideState] = {
             Side.A: _SideState(),
@@ -110,6 +115,12 @@ class PositionLedger:
     def bump_sync_gen(self) -> None:
         """Increment sync generation. Call at start of each polling cycle."""
         self._sync_gen += 1
+
+    def owns_tickers(self, ticker_a: str, ticker_b: str) -> bool:
+        """Check if this ledger was created for the given tickers."""
+        if not self._ticker_a:
+            return True  # Legacy ledger without tickers — allow all
+        return self._ticker_a == ticker_a and self._ticker_b == ticker_b
 
     # ── Per-side accessors ──────────────────────────────────────────
 
@@ -308,11 +319,11 @@ class PositionLedger:
 
     # ── Persistence ────────────────────────────────────────────────
 
-    def to_save_dict(self) -> dict[str, int]:
-        """Export fill state for persistence across restarts.
+    def to_save_dict(self) -> dict[str, int | str | None]:
+        """Export full ledger state for persistence across restarts.
 
-        Only saves filled counts/costs/fees — resting orders are recovered
-        from the orders API on next startup.
+        Saves fills AND resting orders so startup has accurate state
+        without needing to reconstruct from Kalshi APIs.
         """
         a = self._sides[Side.A]
         b = self._sides[Side.B]
@@ -323,16 +334,21 @@ class PositionLedger:
             "filled_b": b.filled_count,
             "cost_b": b.filled_total_cost,
             "fees_b": b.filled_fees,
+            "resting_id_a": a.resting_order_id,
+            "resting_count_a": a.resting_count,
+            "resting_price_a": a.resting_price,
+            "resting_id_b": b.resting_order_id,
+            "resting_count_b": b.resting_count,
+            "resting_price_b": b.resting_price,
         }
 
-    def seed_from_saved(self, data: dict[str, int] | None) -> None:
-        """Seed fill state from persisted data.
+    def seed_from_saved(self, data: dict[str, int | str | None] | None) -> None:
+        """Seed full ledger state from persisted data.
 
-        Sets a floor for fills — sync_from_orders and sync_from_positions
-        will only increase from here, never decrease (monotonic fill rule).
-        This prevents ledger amnesia for same-ticker pairs where
-        sync_from_positions is unavailable and archived orders are
-        invisible to sync_from_orders.
+        Fills: sets a floor (monotonic — sync can only increase).
+        Resting: restored directly so check_imbalances sees accurate
+        state on the first cycle instead of phantom imbalances.
+        The normal sync_from_orders cycle will correct any drift.
         """
         if not data:
             return
@@ -342,7 +358,7 @@ class PositionLedger:
             saved_fills = data.get(f"filled_{prefix}", 0)
             saved_cost = data.get(f"cost_{prefix}", 0)
             saved_fees = data.get(f"fees_{prefix}", 0)
-            if saved_fills > side.filled_count:
+            if isinstance(saved_fills, int) and saved_fills > side.filled_count:
                 logger.info(
                     "ledger_seeded_from_saved",
                     event_ticker=self.event_ticker,
@@ -351,8 +367,17 @@ class PositionLedger:
                     current_fills=side.filled_count,
                 )
                 side.filled_count = saved_fills
-                side.filled_total_cost = max(side.filled_total_cost, saved_cost)
-                side.filled_fees = max(side.filled_fees, saved_fees)
+                side.filled_total_cost = max(side.filled_total_cost, int(saved_cost or 0))
+                side.filled_fees = max(side.filled_fees, int(saved_fees or 0))
+
+            # Restore resting state
+            saved_id = data.get(f"resting_id_{prefix}")
+            saved_count = data.get(f"resting_count_{prefix}", 0)
+            saved_price = data.get(f"resting_price_{prefix}", 0)
+            if saved_id and isinstance(saved_count, int) and saved_count > 0:
+                side.resting_order_id = str(saved_id)
+                side.resting_count = saved_count
+                side.resting_price = int(saved_price or 0)
 
     def sync_from_orders(self, orders: list, ticker_a: str, ticker_b: str) -> None:
         """Reconcile ledger against polled order state from Kalshi.

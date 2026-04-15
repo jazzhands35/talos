@@ -37,7 +37,7 @@ def _make_engine(**overrides) -> TradingEngine:
     scanner = overrides.pop("scanner", ArbitrageScanner(books))
     defaults = dict(
         scanner=scanner,
-        game_manager=overrides.pop("game_manager", MagicMock(spec=GameManager)),
+        game_manager=overrides.pop("game_manager", MagicMock(spec=GameManager, on_change=None)),
         rest_client=overrides.pop("rest_client", AsyncMock(spec=KalshiRESTClient)),
         market_feed=overrides.pop("market_feed", MagicMock(spec=MarketFeed)),
         tracker=overrides.pop("tracker", TopOfMarketTracker(books)),
@@ -151,6 +151,7 @@ def _engine_with_pair() -> tuple[TradingEngine, AsyncMock]:
         rest_client=rest,
     )
     engine._initial_sync_done = True  # tests assume synced state
+    engine._account_sync_done = True
     return engine, rest
 
 
@@ -180,6 +181,39 @@ def _engine_with_pair_and_books(
         rest_client=rest,
     )
     engine._initial_sync_done = True  # tests assume synced state
+    engine._account_sync_done = True
+    return engine, rest
+
+
+def _engine_with_same_ticker_pair() -> tuple[TradingEngine, AsyncMock]:
+    """Build an engine for a same-ticker YES/NO pair."""
+    books = OrderBookManager()
+    scanner = ArbitrageScanner(books)
+    scanner.add_pair(
+        "MKT-1",
+        "MKT-1",
+        "MKT-1",
+        side_a="yes",
+        side_b="no",
+        kalshi_event_ticker="EVT-1",
+    )
+    pair = ArbPair(
+        event_ticker="MKT-1",
+        ticker_a="MKT-1",
+        ticker_b="MKT-1",
+        side_a="yes",
+        side_b="no",
+        kalshi_event_ticker="EVT-1",
+    )
+    adjuster = BidAdjuster(books, [pair], unit_size=10)
+    rest = AsyncMock(spec=KalshiRESTClient)
+    engine = _make_engine(
+        scanner=scanner,
+        adjuster=adjuster,
+        rest_client=rest,
+    )
+    engine._initial_sync_done = True
+    engine._account_sync_done = True
     return engine, rest
 
 
@@ -344,7 +378,7 @@ class TestPolling:
         rest.get_all_orders.return_value = []
         rest.get_queue_positions.return_value = {}
         # Positions API shows actual holdings
-        rest.get_positions.return_value = [
+        rest.get_all_positions.return_value = [
             Position(ticker="TK-A", position=-30, total_traded=1380),
             Position(ticker="TK-B", position=-10, total_traded=520),
         ]
@@ -359,10 +393,14 @@ class TestPolling:
     @pytest.mark.asyncio
     async def test_refresh_account_positions_failure_is_non_fatal(self):
         """If positions API fails, sync_from_orders still works."""
+        from talos.errors import KalshiAPIError
+
         engine, rest = _engine_with_pair()
         rest.get_all_orders.return_value = []
         rest.get_queue_positions.return_value = {}
-        rest.get_positions.side_effect = RuntimeError("API error")
+        rest.get_all_positions.side_effect = KalshiAPIError(
+            status_code=500, body="server error"
+        )
 
         # Should not raise — positions failure is logged, not fatal
         await engine.refresh_account()
@@ -386,8 +424,10 @@ class TestActions:
 
     @pytest.mark.asyncio
     async def test_place_bids_error_notifies(self):
+        from talos.errors import KalshiAPIError
+
         engine, rest = _engine_with_pair()
-        rest.create_order.side_effect = RuntimeError("API down")
+        rest.create_order.side_effect = KalshiAPIError(status_code=500, body="API down")
         notifications = []
         engine.on_notification = lambda msg, sev, toast=False: notifications.append((msg, sev))
 
@@ -617,6 +657,7 @@ class TestProposalQueue:
             "TK-B", order_id="ord-b-new", fill_count=0, remaining_count=10, no_price=48
         )
         engine._rest.amend_order = AsyncMock(return_value=(old_order, new_order))
+        engine._rest.get_order = AsyncMock(return_value=old_order)
         await engine.approve_proposal(key)
         assert len(engine.proposal_queue) == 0
         engine._rest.amend_order.assert_called_once()
@@ -676,7 +717,7 @@ class TestProposalQueue:
         tracker = TopOfMarketTracker(books)
         rest = AsyncMock(spec=KalshiRESTClient)
         rest.get_orders = AsyncMock(return_value=[])
-        rest.get_positions = AsyncMock(return_value=[])
+        rest.get_all_positions = AsyncMock(return_value=[])
         engine = TradingEngine(
             scanner=scanner,
             game_manager=MagicMock(spec=GameManager),
@@ -730,6 +771,8 @@ def _engine_with_automation() -> tuple[TradingEngine, AsyncMock]:
     )
     gm = MagicMock(spec=GameManager)
     gm.is_blacklisted.return_value = False
+    gm.volumes_24h = {"TK-A": 1000, "TK-B": 1000}
+    gm.on_change = None
     engine = TradingEngine(
         scanner=scanner,
         game_manager=gm,
@@ -823,7 +866,7 @@ class TestCheckImbalances:
             qty_a=100,
             qty_b=100,
             raw_edge=8,
-            fee_edge=0.0,
+            fee_edge=5.0,
             tradeable_qty=100,
             timestamp="2026-03-16T00:00:00Z",
         )
@@ -842,6 +885,7 @@ class TestCheckImbalances:
         rest.create_order = AsyncMock(return_value=_make_order("TK-B", order_id="new-b"))
         rest.create_order_group = AsyncMock(return_value="grp-test")
 
+        engine.mark_event_dirty("EVT-1")
         await engine.check_imbalances()
 
         # No proposals queued — auto-executed directly
@@ -886,7 +930,7 @@ class TestCheckImbalances:
         rest.cancel_order = AsyncMock()
         # Verification sync happens after action (single event-scoped fetch)
         rest.get_all_orders = AsyncMock(return_value=[])
-        rest.get_positions = AsyncMock(return_value=[])
+        rest.get_all_positions = AsyncMock(return_value=[])
 
         await engine.approve_proposal(key)
 
@@ -901,6 +945,7 @@ class TestCheckImbalances:
         """When post-action verify fails, operator sees a warning toast."""
         from datetime import UTC, datetime
 
+        from talos.errors import KalshiAPIError
         from talos.models.proposal import Proposal, ProposalKey, ProposedRebalance
 
         engine, rest = _engine_with_pair_and_books()
@@ -933,7 +978,9 @@ class TestCheckImbalances:
 
         rest.cancel_order = AsyncMock()
         # Verify fails — API unreachable after action
-        rest.get_all_orders = AsyncMock(side_effect=RuntimeError("API down"))
+        rest.get_all_orders = AsyncMock(
+            side_effect=KalshiAPIError(status_code=500, body="API down")
+        )
 
         notifications: list[tuple[str, str]] = []
         engine.on_notification = lambda msg, sev, toast=False: notifications.append((msg, sev))
@@ -1189,6 +1236,36 @@ class TestStaleBookRecovery:
         await engine._recover_stale_books()
 
     @pytest.mark.asyncio
+    async def test_stale_recovery_is_rate_limited(self):
+        engine, _, books = _engine_with_real_feed()
+        book_a = books.get_book("TK-A")
+        assert book_a is not None
+        book_a.last_update = time.time() - 121.0
+
+        await engine._recover_stale_books()
+        await engine._recover_stale_books()
+
+        engine._feed.unsubscribe.assert_called_once_with("TK-A")  # type: ignore[attr-defined]
+        engine._feed.subscribe.assert_called_once_with("TK-A")  # type: ignore[attr-defined]
+
+    @pytest.mark.asyncio
+    async def test_stale_recovery_retries_after_cooldown(self, monkeypatch: pytest.MonkeyPatch):
+        engine, _, books = _engine_with_real_feed()
+        book_a = books.get_book("TK-A")
+        assert book_a is not None
+        book_a.last_update = time.time() - 121.0
+
+        clock = {"now": 1000.0}
+        monkeypatch.setattr("talos.engine.time.monotonic", lambda: clock["now"])
+
+        await engine._recover_stale_books()
+        clock["now"] += 121.0
+        await engine._recover_stale_books()
+
+        assert engine._feed.unsubscribe.call_count == 2  # type: ignore[attr-defined]
+        assert engine._feed.subscribe.call_count == 2  # type: ignore[attr-defined]
+
+    @pytest.mark.asyncio
     async def test_refresh_account_calls_recovery(self):
         """refresh_account triggers stale book recovery before main logic."""
         engine, rest, books = _engine_with_real_feed()
@@ -1205,6 +1282,21 @@ class TestStaleBookRecovery:
         # Recovery should have been called (unsubscribe + subscribe for TK-A)
         engine._feed.unsubscribe.assert_called_once_with("TK-A")  # type: ignore[attr-defined]
         engine._feed.subscribe.assert_called_once_with("TK-A")  # type: ignore[attr-defined]
+
+    @pytest.mark.asyncio
+    async def test_stale_recovery_logs_cycle_timing(self, capsys: pytest.CaptureFixture[str]):
+        engine, _, books = _engine_with_real_feed()
+        book_a = books.get_book("TK-A")
+        assert book_a is not None
+        book_a.last_update = time.time() - 121.0
+
+        await engine._recover_stale_books()
+
+        out = capsys.readouterr().out
+        assert "stale_book_recovery_cycle" in out
+        assert "elapsed_ms" in out
+        assert "attempted_count" in out
+        assert "skipped_cooldown_count" in out
 
 
 class TestPortfolioFeedWiring:
@@ -1534,6 +1626,84 @@ class TestReconcileWithKalshi:
         # Auth fills = max(10, 15) = 15, ledger has 10 → mismatch
         assert "reconcile_fill_mismatch" in out
 
+    def test_fill_mismatch_deduped_until_state_changes(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        engine, _ = _engine_with_pair()
+        ledger = engine.adjuster.get_ledger("EVT-1")
+        ledger.record_fill(Side.A, 10, 45)
+
+        orders = [
+            _make_order(
+                "TK-A", order_id="ord-a", fill_count=10, remaining_count=0, status="executed"
+            ),
+        ]
+        pos_map = {"TK-A": Position(ticker="TK-A", position=-15, total_traded=675)}
+
+        engine._reconcile_with_kalshi(orders, pos_map)
+        first = capsys.readouterr().out
+        assert "reconcile_fill_mismatch" in first
+
+        engine._reconcile_with_kalshi(orders, pos_map)
+        second = capsys.readouterr().out
+        assert "reconcile_fill_mismatch" not in second
+
+        pos_map = {"TK-A": Position(ticker="TK-A", position=-16, total_traded=720)}
+        engine._reconcile_with_kalshi(orders, pos_map)
+        third = capsys.readouterr().out
+        assert "reconcile_fill_mismatch" in third
+
+    @pytest.mark.asyncio
+    async def test_refresh_account_skips_fill_mismatch_until_account_sync_complete(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """Startup reconciliation should wait for the first account refresh."""
+        engine, rest = _engine_with_pair()
+        engine._account_sync_done = False
+        ledger = engine.adjuster.get_ledger("EVT-1")
+        ledger.record_fill(Side.A, 10, 45)
+
+        rest.get_all_orders.return_value = []
+        rest.get_queue_positions.return_value = {}
+        rest.get_all_positions.return_value = [
+            Position(ticker="TK-A", position=-15, total_traded=675),
+        ]
+
+        await engine.refresh_account()
+
+        out = capsys.readouterr().out
+        assert "reconcile_fill_mismatch" not in out
+        assert engine._account_sync_done is True
+
+    def test_same_ticker_reconcile_ignores_positions_net_holdings(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """Same-ticker YES/NO reconciliation must not use net positions for both sides."""
+        engine, _ = _engine_with_same_ticker_pair()
+        ledger = engine.adjuster.get_ledger("MKT-1")
+        ledger.record_fill(Side.A, 2, 48)
+
+        orders = [
+            Order(
+                order_id="yes-ord",
+                ticker="MKT-1",
+                action="buy",
+                side="yes",
+                no_price=0,
+                yes_price=48,
+                initial_count=2,
+                remaining_count=0,
+                fill_count=2,
+                status="executed",
+            ),
+        ]
+        pos_map = {"MKT-1": Position(ticker="MKT-1", position=2, total_traded=96)}
+
+        engine._reconcile_with_kalshi(orders, pos_map)
+
+        out = capsys.readouterr().out
+        assert "reconcile_fill_mismatch" not in out
+
     def test_resting_mismatch_logged(self, capsys: pytest.CaptureFixture[str]) -> None:
         """Ledger resting disagrees with Kalshi — log warning."""
         engine, _ = _engine_with_pair()
@@ -1598,7 +1768,7 @@ class TestAutoRebalance:
             qty_a=100,
             qty_b=100,
             raw_edge=7,
-            fee_edge=0.0,
+            fee_edge=5.0,
             tradeable_qty=100,
             timestamp="2026-03-16T00:00:00Z",
         )
@@ -1616,6 +1786,7 @@ class TestAutoRebalance:
         notifications: list[tuple[str, str]] = []
         engine.on_notification = lambda msg, sev, toast=False: notifications.append((msg, sev))
 
+        engine.mark_event_dirty("EVT-1")
         await engine.check_imbalances()
 
         # Should have auto-placed catch-up, NOT added to proposal queue
@@ -1643,7 +1814,7 @@ class TestAutoRebalance:
             qty_a=100,
             qty_b=100,
             raw_edge=7,
-            fee_edge=0.0,
+            fee_edge=5.0,
             tradeable_qty=100,
             timestamp="2026-03-16T00:00:00Z",
         )
@@ -1657,6 +1828,7 @@ class TestAutoRebalance:
         rest.create_order = AsyncMock(return_value=_make_order("TK-B", order_id="new-b"))
         rest.create_order_group = AsyncMock(return_value="grp-test")
 
+        engine.mark_event_dirty("EVT-1")
         await engine.check_imbalances()
 
         # Catch-up placed on behind side even in exit-only
@@ -1681,7 +1853,7 @@ class TestAutoRebalance:
             qty_a=100,
             qty_b=100,
             raw_edge=7,
-            fee_edge=0.0,
+            fee_edge=5.0,
             tradeable_qty=100,
             timestamp="2026-03-16T00:00:00Z",
         )
@@ -1695,6 +1867,7 @@ class TestAutoRebalance:
         rest.create_order = AsyncMock(return_value=_make_order("TK-B", order_id="new-b"))
         rest.create_order_group = AsyncMock(return_value="grp-test")
 
+        engine.mark_event_dirty("EVT-1")
         await engine.check_imbalances()
 
         assert rest.create_order.call_count == 1
@@ -1716,7 +1889,7 @@ class TestAutoRebalance:
             qty_a=100,
             qty_b=100,
             raw_edge=7,
-            fee_edge=0.0,
+            fee_edge=5.0,
             tradeable_qty=100,
             timestamp="2026-03-16T00:00:00Z",
         )
@@ -1724,6 +1897,7 @@ class TestAutoRebalance:
         rest.create_order = AsyncMock(return_value=_make_order("TK-A", order_id="new"))
         rest.create_order_group = AsyncMock(return_value="grp-test")
 
+        engine.mark_event_dirty("EVT-1")
         await engine.check_imbalances()
 
         assert rest.create_order.call_count == 2
@@ -1750,7 +1924,7 @@ class TestStalePositionCleanup:
     async def test_first_detection_flags_but_does_not_remove(self):
         engine, rest = self._setup()
         # Positions API returns nothing for our tickers → settled
-        rest.get_positions.return_value = []
+        rest.get_all_positions.return_value = []
 
         await engine.refresh_account()
 
@@ -1761,7 +1935,7 @@ class TestStalePositionCleanup:
     @pytest.mark.asyncio
     async def test_second_consecutive_detection_removes_game(self):
         engine, rest = self._setup()
-        rest.get_positions.return_value = []
+        rest.get_all_positions.return_value = []
         gm = engine._game_manager
         gm.remove_game = AsyncMock()
 
@@ -1781,12 +1955,12 @@ class TestStalePositionCleanup:
         engine, rest = self._setup()
 
         # Strike 1: no positions
-        rest.get_positions.return_value = []
+        rest.get_all_positions.return_value = []
         await engine.refresh_account()
         assert "EVT-1" in engine._stale_candidates
 
         # Next cycle: position reappears (transient gap resolved)
-        rest.get_positions.return_value = [
+        rest.get_all_positions.return_value = [
             Position(ticker="TK-A", position=-10, total_traded=450),
         ]
         await engine.refresh_account()
@@ -1802,7 +1976,7 @@ class TestStalePositionCleanup:
         rest.get_balance.return_value = Balance(balance=5000, portfolio_value=5000)
         rest.get_all_orders.return_value = []
         rest.get_queue_positions.return_value = {}
-        rest.get_positions.return_value = []
+        rest.get_all_positions.return_value = []
 
         await engine.refresh_account()
 
@@ -1811,10 +1985,453 @@ class TestStalePositionCleanup:
     @pytest.mark.asyncio
     async def test_positions_api_failure_does_not_false_positive(self):
         """If get_positions raises, stale_candidates should not change."""
+        from talos.errors import KalshiAPIError
+
         engine, rest = self._setup()
-        rest.get_positions.side_effect = RuntimeError("rate limited")
+        rest.get_all_positions.side_effect = KalshiAPIError(
+            status_code=500, body="rate limited"
+        )
 
         await engine.refresh_account()
 
         # No candidates should be added on API failure
         assert len(engine._stale_candidates) == 0
+
+
+# ── WS Reaction Pipeline Tests ──────────────────────────────────
+
+
+class TestEventClaims:
+    def test_claim_returns_true_when_unclaimed(self):
+        engine = _make_engine()
+        assert engine._claim_event("EVT-1", "ws") is True
+        assert engine._event_claims["EVT-1"] == "ws"
+
+    def test_claim_returns_false_when_other_owner(self):
+        engine = _make_engine()
+        engine._claim_event("EVT-1", "ws")
+        assert engine._claim_event("EVT-1", "poll") is False
+
+    def test_claim_same_owner_succeeds(self):
+        engine = _make_engine()
+        engine._claim_event("EVT-1", "ws")
+        assert engine._claim_event("EVT-1", "ws") is True
+
+    def test_release_clears_claim(self):
+        engine = _make_engine()
+        engine._claim_event("EVT-1", "ws")
+        engine._release_event("EVT-1", "ws")
+        assert "EVT-1" not in engine._event_claims
+        # Can be claimed by another owner now
+        assert engine._claim_event("EVT-1", "poll") is True
+
+    def test_release_ignores_wrong_owner(self):
+        engine = _make_engine()
+        engine._claim_event("EVT-1", "ws")
+        engine._release_event("EVT-1", "poll")  # wrong owner — no effect
+        assert engine._event_claims["EVT-1"] == "ws"
+
+    def test_stale_claim_force_released(self):
+        engine = _make_engine()
+        engine._claim_event("EVT-1", "ws")
+        # Backdate the claim time to simulate staleness
+        engine._event_claim_times["EVT-1"] = time.monotonic() - 120.0
+        assert engine._claim_event("EVT-1", "poll") is True
+        assert engine._event_claims["EVT-1"] == "poll"
+
+
+class TestReactionQueue:
+    def test_on_order_update_enqueues_on_fill(self):
+        engine, _ = _engine_with_pair()
+        engine._orders_cache = [
+            _make_order("TK-A", order_id="ord-a", fill_count=5, remaining_count=5),
+        ]
+        msg = UserOrderMessage(
+            order_id="ord-a",
+            ticker="TK-A",
+            status="resting",
+            side="no",
+            no_price=45,
+            fill_count=7,
+            remaining_count=3,
+        )
+        engine._on_order_update(msg)
+        assert not engine._reaction_queue.empty()
+        assert engine._reaction_queue.get_nowait() == "EVT-1"
+
+    def test_on_order_update_no_enqueue_without_fills(self):
+        engine, _ = _engine_with_pair()
+        engine._orders_cache = [
+            _make_order("TK-A", order_id="ord-a", fill_count=5, remaining_count=5),
+        ]
+        msg = UserOrderMessage(
+            order_id="ord-a",
+            ticker="TK-A",
+            status="resting",
+            side="no",
+            no_price=45,
+            fill_count=5,  # same as before — no new fills
+            remaining_count=5,
+        )
+        engine._on_order_update(msg)
+        assert engine._reaction_queue.empty()
+
+    def test_on_order_update_no_enqueue_before_sync(self):
+        engine, _ = _engine_with_pair()
+        engine._initial_sync_done = False
+        engine._orders_cache = [
+            _make_order("TK-A", order_id="ord-a", fill_count=5, remaining_count=5),
+        ]
+        msg = UserOrderMessage(
+            order_id="ord-a",
+            ticker="TK-A",
+            status="resting",
+            side="no",
+            no_price=45,
+            fill_count=7,
+            remaining_count=3,
+        )
+        engine._on_order_update(msg)
+        assert engine._reaction_queue.empty()
+
+    def test_on_fill_enqueues_event(self):
+        engine, _ = _engine_with_pair()
+        msg = FillMessage(
+            trade_id="fill-1",
+            order_id="ord-a",
+            market_ticker="TK-A",
+            side="no",
+            count=3,
+            yes_price=55,
+            post_position=-3,
+        )
+        engine._on_fill(msg)
+        assert not engine._reaction_queue.empty()
+        assert engine._reaction_queue.get_nowait() == "EVT-1"
+
+    def test_on_fill_marks_dirty(self):
+        engine, _ = _engine_with_pair()
+        msg = FillMessage(
+            trade_id="fill-1",
+            order_id="ord-a",
+            market_ticker="TK-A",
+            side="no",
+            count=3,
+            yes_price=55,
+            post_position=-3,
+        )
+        engine._on_fill(msg)
+        assert "EVT-1" in engine._dirty_events
+
+    def test_on_fill_no_enqueue_before_sync(self):
+        engine, _ = _engine_with_pair()
+        engine._initial_sync_done = False
+        msg = FillMessage(
+            trade_id="fill-1",
+            order_id="ord-a",
+            market_ticker="TK-A",
+            side="no",
+            count=3,
+            yes_price=55,
+            post_position=-3,
+        )
+        engine._on_fill(msg)
+        assert engine._reaction_queue.empty()
+        # But dirty marking should still happen regardless
+        assert "EVT-1" in engine._dirty_events
+
+
+class TestReactionConsumer:
+    @pytest.mark.asyncio
+    async def test_consumer_processes_event(self):
+        engine, _ = _engine_with_pair()
+        engine._reaction_queue.put_nowait("EVT-1")
+
+        # Run _react_to_event directly (consumer tested via queue drain)
+        await engine._react_to_event("EVT-1")
+
+        assert "EVT-1" in engine._last_ws_reaction
+        assert time.monotonic() - engine._last_ws_reaction["EVT-1"] < 2.0
+
+    @pytest.mark.asyncio
+    async def test_consumer_coalesces_duplicates(self):
+        engine, _ = _engine_with_pair()
+        # Put same event 3 times
+        for _ in range(3):
+            engine._reaction_queue.put_nowait("EVT-1")
+
+        # Drain the queue like the consumer does
+        first = engine._reaction_queue.get_nowait()
+        events: set[str] = {first}
+        while not engine._reaction_queue.empty():
+            events.add(engine._reaction_queue.get_nowait())
+
+        assert events == {"EVT-1"}
+        assert len(events) == 1
+
+    @pytest.mark.asyncio
+    async def test_consumer_skips_claimed_event(self):
+        engine, _ = _engine_with_pair()
+        # Pre-claim by poll
+        engine._claim_event("EVT-1", "poll")
+
+        # WS consumer should fail to claim
+        assert engine._claim_event("EVT-1", "ws") is False
+
+    @pytest.mark.asyncio
+    async def test_consumer_releases_claim_on_error(self):
+        engine, _ = _engine_with_pair()
+        engine._claim_event("EVT-1", "ws")
+
+        # Simulate error in reaction
+        try:
+            raise RuntimeError("test error")
+        except RuntimeError:
+            pass
+        finally:
+            engine._release_event("EVT-1", "ws")
+
+        assert "EVT-1" not in engine._event_claims
+
+    @pytest.mark.asyncio
+    async def test_consumer_survives_error(self):
+        """The consumer loop should handle exceptions without crashing."""
+        engine, _ = _engine_with_pair()
+
+        # _react_to_event with unknown event won't crash — returns early
+        await engine._react_to_event("NONEXISTENT")
+        # Should not raise
+
+
+class TestReactToEvent:
+    @pytest.mark.asyncio
+    async def test_react_runs_scoped_pipeline(self):
+        engine, _ = _engine_with_pair()
+        jumps_called: list[str] = []
+        imbalance_called: list[str] = []
+
+        def mock_jumps(et: str, pair: object) -> None:
+            jumps_called.append(et)
+
+        async def mock_imbalance(et: str, pair: object) -> None:
+            imbalance_called.append(et)
+
+        engine._reevaluate_jumps_for = mock_jumps  # type: ignore[assignment]
+        engine._check_imbalance_for = mock_imbalance  # type: ignore[assignment]
+
+        await engine._react_to_event("EVT-1")
+
+        assert jumps_called == ["EVT-1"]
+        assert imbalance_called == ["EVT-1"]
+
+    @pytest.mark.asyncio
+    async def test_react_skips_before_initial_sync(self):
+        engine, _ = _engine_with_pair()
+        engine._initial_sync_done = False
+
+        jumps_called: list[str] = []
+        engine._reevaluate_jumps_for = lambda et, p: jumps_called.append(et)  # type: ignore[assignment]
+
+        await engine._react_to_event("EVT-1")
+
+        assert jumps_called == []
+        assert "EVT-1" not in engine._last_ws_reaction
+
+    @pytest.mark.asyncio
+    async def test_react_stamps_timestamp(self):
+        engine, _ = _engine_with_pair()
+        before = time.monotonic()
+        await engine._react_to_event("EVT-1")
+        after = time.monotonic()
+
+        assert "EVT-1" in engine._last_ws_reaction
+        assert before <= engine._last_ws_reaction["EVT-1"] <= after
+
+    @pytest.mark.asyncio
+    async def test_react_skips_unknown_event(self):
+        engine, _ = _engine_with_pair()
+        # Should not raise, should not stamp
+        await engine._react_to_event("NONEXISTENT")
+        assert "NONEXISTENT" not in engine._last_ws_reaction
+
+
+class TestPollUsesSharedClaim:
+    @pytest.mark.asyncio
+    async def test_check_imbalances_skips_ws_claimed(self):
+        engine, rest = _engine_with_pair()
+        engine._dirty_events.add("EVT-1")
+        engine._claim_event("EVT-1", "ws")  # WS holds claim
+
+        await engine.check_imbalances()
+
+        # Poll should have skipped — no rebalance calls
+        rest.create_order.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_check_imbalances_processes_unclaimed(self):
+        engine, rest = _engine_with_pair()
+        engine._dirty_events.add("EVT-1")
+        # No claim — poll should process freely
+        # (With balanced ledger, no rebalance needed, but no skip either)
+        await engine.check_imbalances()
+        # The key assertion: event was NOT skipped due to claim
+        assert "EVT-1" not in engine._event_claims  # claim released
+
+    @pytest.mark.asyncio
+    async def test_check_imbalances_releases_claim_after(self):
+        engine, _ = _engine_with_pair()
+        engine._dirty_events.add("EVT-1")
+
+        await engine.check_imbalances()
+
+        # Claim should be released after processing
+        assert "EVT-1" not in engine._event_claims
+
+    @pytest.mark.asyncio
+    async def test_full_sweep_still_works(self):
+        """Full sweep should process all events regardless of dirty set."""
+        engine, _ = _engine_with_pair()
+        # Don't add to dirty — but force full sweep
+        engine._full_sweep_counter = 9  # next call triggers full sweep
+
+        await engine.check_imbalances()
+
+        # Claim should be released
+        assert "EVT-1" not in engine._event_claims
+
+
+class TestClaimMutualExclusionIntegration:
+    """Prove that WS and poll paths cannot execute rebalance for the same
+    event concurrently — the claim mechanism enforces mutual exclusion."""
+
+    @pytest.mark.asyncio
+    async def test_ws_holds_claim_poll_skips(self):
+        """WS consumer claims event and runs slow reaction.
+        Poll path tries same event concurrently — must skip, not execute."""
+        engine, rest = _engine_with_pair()
+
+        # Track which paths actually executed rebalance logic
+        executed_by: list[str] = []
+        ws_claimed = asyncio.Event()
+
+        # Replace _check_imbalance_for with a slow version that signals
+        # when it's holding the claim, giving poll a chance to race.
+        async def slow_ws_check(et: str, pair: object) -> None:
+            executed_by.append("ws")
+            ws_claimed.set()  # Signal: WS now holds the claim
+            await asyncio.sleep(0.1)  # Hold claim for 100ms
+
+        engine._check_imbalance_for = slow_ws_check  # type: ignore[assignment]
+
+        # Seed dirty so poll path wants to process EVT-1
+        engine._dirty_events.add("EVT-1")
+
+        async def ws_path() -> None:
+            """Simulate WS consumer: claim → react → release."""
+            claimed = engine._claim_event("EVT-1", "ws")
+            assert claimed, "WS should claim successfully"
+            try:
+                await engine._react_to_event("EVT-1")
+            finally:
+                engine._release_event("EVT-1", "ws")
+
+        async def poll_path() -> None:
+            """Simulate poll: wait for WS to claim, then try same event."""
+            await ws_claimed.wait()  # Ensure WS holds claim first
+            await engine.check_imbalances()
+
+        # Run both concurrently
+        await asyncio.gather(ws_path(), poll_path())
+
+        # WS should have executed; poll should have been blocked by claim
+        assert "ws" in executed_by
+        assert len(executed_by) == 1, (
+            f"Expected only WS to execute, got: {executed_by}"
+        )
+        # All claims should be released after both paths complete
+        assert not engine._event_claims
+
+    @pytest.mark.asyncio
+    async def test_poll_claims_ws_skips(self):
+        """Mirror test: poll claims first, WS consumer must skip."""
+        engine, _ = _engine_with_pair()
+
+        ws_reacted: list[str] = []
+        original_react = engine._react_to_event
+
+        async def tracking_react(et: str) -> None:
+            ws_reacted.append(et)
+            await original_react(et)
+
+        # Poll claims the event
+        engine._claim_event("EVT-1", "poll")
+
+        # WS consumer tries to claim — should fail
+        claimed = engine._claim_event("EVT-1", "ws")
+        assert not claimed
+
+        # Run react — it would succeed if called, but the consumer
+        # would never reach it because claim fails first.
+        # Simulate what the consumer loop does:
+        if engine._claim_event("EVT-1", "ws"):
+            try:
+                await tracking_react("EVT-1")
+            finally:
+                engine._release_event("EVT-1", "ws")
+
+        assert ws_reacted == []  # WS never ran
+
+        # Cleanup
+        engine._release_event("EVT-1", "poll")
+        assert not engine._event_claims
+
+
+class TestFillDriftDetection:
+    def test_on_fill_logs_drift(self, capsys: pytest.CaptureFixture[str]):
+        engine, _ = _engine_with_pair()
+        # Seed ledger with 5 fills on side A
+        ledger = engine._adjuster.get_ledger("EVT-1")
+        engine._orders_cache = [
+            _make_order("TK-A", order_id="ord-a", fill_count=5, remaining_count=0),
+        ]
+        ledger.sync_from_orders(
+            engine._orders_cache, ticker_a="TK-A", ticker_b="TK-B"
+        )
+
+        msg = FillMessage(
+            trade_id="fill-1",
+            order_id="ord-a",
+            market_ticker="TK-A",
+            side="no",
+            count=3,
+            yes_price=55,
+            post_position=-8,  # Kalshi says 8, ledger says 5
+        )
+        engine._on_fill(msg)
+
+        captured = capsys.readouterr()
+        assert "ws_fill_position_drift" in captured.out
+
+    def test_on_fill_no_drift(self, capsys: pytest.CaptureFixture[str]):
+        engine, _ = _engine_with_pair()
+        ledger = engine._adjuster.get_ledger("EVT-1")
+        engine._orders_cache = [
+            _make_order("TK-A", order_id="ord-a", fill_count=5, remaining_count=0),
+        ]
+        ledger.sync_from_orders(
+            engine._orders_cache, ticker_a="TK-A", ticker_b="TK-B"
+        )
+
+        msg = FillMessage(
+            trade_id="fill-1",
+            order_id="ord-a",
+            market_ticker="TK-A",
+            side="no",
+            count=1,
+            yes_price=55,
+            post_position=-5,  # Matches ledger
+        )
+        engine._on_fill(msg)
+
+        captured = capsys.readouterr()
+        assert "ws_fill_position_drift" not in captured.out

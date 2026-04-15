@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
-    from talos.auto_accept import AutoAcceptState
+    from talos.auto_accept import ExecutionMode
     from talos.models.proposal import Proposal
 
 
@@ -19,19 +19,24 @@ class AutoAcceptLogger:
         self._log_dir = log_dir
         self._current_file: Path | None = None
 
-    def log_session_start(self, state: AutoAcceptState, config: dict[str, Any]) -> None:
+    def log_session_start(self, state: ExecutionMode, config: dict[str, Any]) -> None:
         """Create session file and write the start event."""
         self._log_dir.mkdir(parents=True, exist_ok=True)
         ts = datetime.now(UTC)
         filename = ts.strftime("%Y-%m-%d_%H%M%S") + ".jsonl"
         self._current_file = self._log_dir / filename
-        duration_hours = state.duration.total_seconds() / 3600 if state.duration else 0
+        if state.auto_stop_at and state.started_at:
+            elapsed = (state.auto_stop_at - state.started_at).total_seconds()
+            duration_hours: float | None = elapsed / 3600
+        else:
+            duration_hours = None  # indefinite
         self._write(
             {
                 "timestamp": ts.isoformat(),
                 "event": "session_start",
                 "config": config,
                 "duration_hours": duration_hours,
+                "mode": state.mode.value,
             }
         )
 
@@ -39,7 +44,7 @@ class AutoAcceptLogger:
         self,
         proposal: Proposal,
         state_snapshot: dict[str, Any],
-        state: AutoAcceptState,
+        state: ExecutionMode,
     ) -> None:
         """Log an auto-accepted proposal with full state snapshot."""
         self._write(
@@ -67,7 +72,7 @@ class AutoAcceptLogger:
         proposal: Proposal,
         error: str,
         state_snapshot: dict[str, Any],
-        state: AutoAcceptState,
+        state: ExecutionMode,
     ) -> None:
         """Log an auto-accept failure."""
         self._write(
@@ -88,7 +93,7 @@ class AutoAcceptLogger:
             }
         )
 
-    def log_session_end(self, state: AutoAcceptState, final_positions: dict[str, Any]) -> None:
+    def log_session_end(self, state: ExecutionMode, final_positions: dict[str, Any]) -> None:
         """Write the session end summary."""
         self._write(
             {

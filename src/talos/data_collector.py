@@ -131,6 +131,27 @@ CREATE TABLE IF NOT EXISTS settlements (
     total_pnl INTEGER
 );
 
+CREATE TABLE IF NOT EXISTS decisions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts TEXT NOT NULL,
+    event_ticker TEXT,
+    ticker TEXT,
+    side TEXT,
+    trigger TEXT,
+    outcome TEXT,
+    reason TEXT,
+    book_top INTEGER,
+    resting_price INTEGER,
+    resting_count INTEGER,
+    new_price INTEGER,
+    effective_this REAL,
+    effective_other REAL,
+    fee_edge REAL,
+    exit_only INTEGER
+);
+CREATE INDEX IF NOT EXISTS idx_decisions_event_ts
+    ON decisions(event_ticker, ts);
+
 CREATE TABLE IF NOT EXISTS event_outcomes (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     ts TEXT NOT NULL,
@@ -331,6 +352,52 @@ class DataCollector:
             post_position=post_position,
             queue_position=queue_position,
             time_since_order=time_since_order,
+        )
+
+    # ── Decisions ─────────────────────────────────────────────────
+
+    def log_decision(
+        self,
+        *,
+        event_ticker: str,
+        ticker: str = "",
+        side: str = "",
+        trigger: str,
+        outcome: str,
+        reason: str = "",
+        book_top: int | None = None,
+        resting_price: int | None = None,
+        resting_count: int | None = None,
+        new_price: int | None = None,
+        effective_this: float | None = None,
+        effective_other: float | None = None,
+        fee_edge: float | None = None,
+        exit_only: bool | None = None,
+    ) -> None:
+        """Record an evaluation decision — including silent skips.
+
+        Every exit path of BidAdjuster.evaluate_jump and every silent
+        short-circuit in the engine should call this so the timeline
+        in the review panel can show what Talos decided (or declined
+        to decide) at each moment.
+        """
+        self._insert(
+            "decisions",
+            ts=self._now(),
+            event_ticker=event_ticker,
+            ticker=ticker,
+            side=side,
+            trigger=trigger,
+            outcome=outcome,
+            reason=reason,
+            book_top=book_top,
+            resting_price=resting_price,
+            resting_count=resting_count,
+            new_price=new_price,
+            effective_this=effective_this,
+            effective_other=effective_other,
+            fee_edge=fee_edge,
+            exit_only=None if exit_only is None else (1 if exit_only else 0),
         )
 
     # ── Market snapshots ──────────────────────────────────────────

@@ -28,6 +28,7 @@ class ArbitrageScanner:
         self._opportunities: dict[str, Opportunity] = {}
         self._all_snapshots: dict[str, Opportunity] = {}
         self._sorted_cache: list[Opportunity] | None = None
+        self._next_id: int = 1
 
     def add_pair(
         self,
@@ -42,11 +43,15 @@ class ArbitrageScanner:
         side_a: str = "no",
         side_b: str = "no",
         kalshi_event_ticker: str = "",
+        talos_id: int = 0,
     ) -> None:
         """Register a pair of markets to monitor."""
         if any(p.event_ticker == event_ticker for p in self._pairs):
             return
+        assigned_id = talos_id if talos_id > 0 else self._next_id
+        self._next_id = max(self._next_id, assigned_id + 1)
         pair = ArbPair(
+            talos_id=assigned_id,
             event_ticker=event_ticker,
             ticker_a=ticker_a,
             ticker_b=ticker_b,
@@ -98,11 +103,27 @@ class ArbitrageScanner:
         self._sorted_cache = None
         logger.info("scanner_pair_removed", event_ticker=event_ticker)
 
+    def pairs_for_ticker(self, ticker: str) -> list[ArbPair]:
+        """Return all registered pairs that include this ticker."""
+        return self._pairs_by_ticker.get(ticker, [])
+
     def scan(self, ticker: str) -> None:
         """Re-evaluate all pairs involving this ticker."""
         pairs = self._pairs_by_ticker.get(ticker, [])
         for pair in pairs:
             self._evaluate_pair(pair)
+
+    def _derive_price(self, ticker: str, side: str) -> tuple[int, int] | None:
+        """Derive implied price from the opposite side of the book.
+
+        When the NO side is empty but YES bids exist, the implied NO ask
+        is ``100 - best_yes_bid``.  Similarly for the reverse.
+        """
+        opposite = "yes" if side == "no" else "no"
+        level = self._books.best_ask(ticker, side=opposite)
+        if level:
+            return 100 - level.price, level.quantity
+        return None
 
     def _evaluate_pair(self, pair: ArbPair) -> None:
         """Check one pair for arbitrage opportunity."""
@@ -112,12 +133,44 @@ class ArbitrageScanner:
 
         if not no_a or not no_b:
             self._opportunities.pop(pair.event_ticker, None)
+            # Derive implied prices from opposite side for display
+            existing = self._all_snapshots.get(pair.event_ticker)
+            if existing is not None:
+                update: dict[str, object] = {"timestamp": datetime.now(UTC).isoformat()}
+                pa, qa = (no_a.price, no_a.quantity) if no_a else (None, 0)
+                pb, qb = (no_b.price, no_b.quantity) if no_b else (None, 0)
+                if pa is None:
+                    derived = self._derive_price(pair.ticker_a, pair.side_a)
+                    if derived:
+                        pa, qa = derived
+                if pb is None:
+                    derived = self._derive_price(pair.ticker_b, pair.side_b)
+                    if derived:
+                        pb, qb = derived
+                if pa is not None:
+                    update["no_a"] = pa
+                    update["qty_a"] = qa
+                if pb is not None:
+                    update["no_b"] = pb
+                    update["qty_b"] = qb
+                if pa is not None and pb is not None:
+                    update["raw_edge"] = 100 - pa - pb
+                    update["fee_edge"] = fee_adjusted_edge(pa, pb, rate=pair.fee_rate)
+                    update["tradeable_qty"] = min(qa, qb)
+                self._all_snapshots[pair.event_ticker] = existing.model_copy(
+                    update=update
+                )
             return
 
         book_a = self._books.get_book(pair.ticker_a)
         book_b = self._books.get_book(pair.ticker_b)
         if (book_a and book_a.stale) or (book_b and book_b.stale):
             self._opportunities.pop(pair.event_ticker, None)
+            existing = self._all_snapshots.get(pair.event_ticker)
+            if existing is not None:
+                self._all_snapshots[pair.event_ticker] = existing.model_copy(
+                    update={"timestamp": datetime.now(UTC).isoformat()}
+                )
             logger.warning(
                 "scanner_stale_book_skip",
                 event_ticker=pair.event_ticker,
@@ -173,6 +226,13 @@ class ArbitrageScanner:
     def all_snapshots(self) -> dict[str, Opportunity]:
         """All monitored pairs with latest prices (including non-positive edge)."""
         return dict(self._all_snapshots)
+
+    def get_talos_id(self, event_ticker: str) -> int:
+        """Look up the internal Talos ID for an event ticker."""
+        for pair in self._pairs:
+            if pair.event_ticker == event_ticker:
+                return pair.talos_id
+        return 0
 
     @property
     def pairs(self) -> list[ArbPair]:

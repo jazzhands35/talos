@@ -153,7 +153,8 @@ def aggregate_settlements(
     """Aggregate settlement revenue and cost by time window.
 
     Returns dict with keys: today_pnl, today_invested, yesterday_pnl,
-    yesterday_invested, week_pnl, week_invested.
+    yesterday_invested, week_pnl, week_invested,
+    d24h_pnl, d24h_events, d7d_pnl, d7d_events, d30d_pnl, d30d_events.
     """
     if now_pt is None:
         now_pt = datetime.now(PT)
@@ -161,6 +162,9 @@ def aggregate_settlements(
     today_start = now_pt.replace(hour=0, minute=0, second=0, microsecond=0)
     yesterday_start = today_start - timedelta(days=1)
     week_start = today_start - timedelta(days=6)
+    h24_start = now_pt - timedelta(hours=24)
+    d7_start = now_pt - timedelta(days=7)
+    d30_start = now_pt - timedelta(days=30)
 
     buckets: dict[str, int] = {
         "today_pnl": 0,
@@ -169,7 +173,17 @@ def aggregate_settlements(
         "yesterday_invested": 0,
         "week_pnl": 0,
         "week_invested": 0,
+        "d24h_pnl": 0,
+        "d24h_events": 0,
+        "d7d_pnl": 0,
+        "d7d_events": 0,
+        "d30d_pnl": 0,
+        "d30d_events": 0,
     }
+    # Count unique events, not individual market settlements
+    events_24h: set[str] = set()
+    events_7d: set[str] = set()
+    events_30d: set[str] = set()
 
     for s in settlements:
         settled_str = s.get("settled_time", "")
@@ -181,9 +195,16 @@ def aggregate_settlements(
             continue
 
         revenue = s.get("revenue", 0)
+        # Same-ticker YES/NO pairs: Kalshi nets positions, reporting
+        # revenue=0 even though each matched pair settles at 100¢.
+        # Add back the implicit payout for matched pairs.
+        yes_count = s.get("yes_count", 0)
+        no_count = s.get("no_count", 0)
+        implicit_revenue = min(yes_count, no_count) * 100
         cost = s.get("no_total_cost", 0) + s.get("yes_total_cost", 0)
         fees = s.get("fee_cost", 0)
-        profit = revenue - cost - fees
+        profit = revenue + implicit_revenue - cost - fees
+        evt = s.get("event_ticker", "")
 
         if settled_dt >= today_start:
             buckets["today_pnl"] += profit
@@ -194,6 +215,19 @@ def aggregate_settlements(
         if settled_dt >= week_start:
             buckets["week_pnl"] += profit
             buckets["week_invested"] += cost
+        if settled_dt >= h24_start:
+            buckets["d24h_pnl"] += profit
+            events_24h.add(evt)
+        if settled_dt >= d7_start:
+            buckets["d7d_pnl"] += profit
+            events_7d.add(evt)
+        if settled_dt >= d30_start:
+            buckets["d30d_pnl"] += profit
+            events_30d.add(evt)
+
+    buckets["d24h_events"] = len(events_24h)
+    buckets["d7d_events"] = len(events_7d)
+    buckets["d30d_events"] = len(events_30d)
 
     return buckets
 

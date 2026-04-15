@@ -10,6 +10,7 @@ from urllib.parse import urlparse
 import structlog
 
 from talos.errors import KalshiAPIError
+from talos.fees import maker_fee_rate
 from talos.market_feed import MarketFeed
 from talos.models.market import Event, Market
 from talos.models.strategy import ArbPair
@@ -104,8 +105,6 @@ _SPORTS_SET = set(SPORTS_SERIES)
 SCAN_SERIES = SPORTS_SERIES
 
 DEFAULT_NONSPORTS_CATEGORIES: list[str] = [
-    "Climate and Weather",
-    "Crypto",
     "Companies",
     "Politics",
     "Science and Technology",
@@ -184,6 +183,10 @@ class GameManager:
     Async — owns REST calls and feed subscriptions.
     """
 
+    # Class-level default so MagicMock(spec=GameManager) can see the
+    # attribute. Each instance still rebinds its own callback.
+    on_change: Callable[[], None] | None = None
+
     def __init__(
         self,
         rest: KalshiRESTClient,
@@ -241,6 +244,15 @@ class GameManager:
     def ticker_blacklist(self) -> list[str]:
         """Current blacklist entries."""
         return list(self._ticker_blacklist)
+
+    def get_game(self, event_ticker: str) -> ArbPair | None:
+        """Look up a monitored game by event ticker."""
+        return self._games.get(event_ticker)
+
+    async def replace_blacklist(self, entries: list[str]) -> list[str]:
+        """Replace the blacklist and remove any now-blocked games."""
+        self._ticker_blacklist = list(entries)
+        return await self.remove_blacklisted_games()
 
     async def add_game(self, url_or_ticker: str, *, subscribe: bool = True) -> ArbPair:
         """Set up monitoring for a game from a URL or event ticker."""
@@ -307,12 +319,13 @@ class GameManager:
         try:
             series = await self._rest.get_series(event.series_ticker)
             fee_type = series.fee_type
-            fee_rate = series.fee_multiplier
+            fee_rate = maker_fee_rate(series.fee_type, series.fee_multiplier)
             logger.info(
                 "series_fee_info",
                 series=event.series_ticker,
                 fee_type=fee_type,
                 fee_rate=fee_rate,
+                raw_multiplier=series.fee_multiplier,
             )
         except Exception:
             logger.warning(
@@ -388,7 +401,7 @@ class GameManager:
         try:
             series = await self._rest.get_series(event.series_ticker)
             fee_type = series.fee_type
-            fee_rate = series.fee_multiplier
+            fee_rate = maker_fee_rate(series.fee_type, series.fee_multiplier)
         except Exception:
             logger.warning(
                 "series_fee_fetch_failed", series=event.series_ticker, exc_info=True,
@@ -468,8 +481,10 @@ class GameManager:
         side_b = str(data.get("side_b", "no"))
         kalshi_event_ticker = str(data.get("kalshi_event_ticker", ""))
         series_ticker = str(data.get("series_ticker", ""))
+        talos_id = int(data.get("talos_id", 0))
 
         pair = ArbPair(
+            talos_id=talos_id,
             event_ticker=event_ticker,
             ticker_a=ticker_a,
             ticker_b=ticker_b,
@@ -478,7 +493,10 @@ class GameManager:
             kalshi_event_ticker=kalshi_event_ticker,
             series_ticker=series_ticker,
             fee_type=str(data.get("fee_type", "quadratic_with_maker_fees")),
-            fee_rate=float(data.get("fee_rate", 0.0175)),
+            fee_rate=maker_fee_rate(
+                str(data.get("fee_type", "quadratic_with_maker_fees")),
+                float(data.get("fee_rate", 0.0175)),
+            ),
             close_time=str(data["close_time"]) if data.get("close_time") else None,
             expected_expiration_time=(
                 str(data["expected_expiration_time"])
@@ -497,6 +515,7 @@ class GameManager:
             fee_rate=pair.fee_rate,
             close_time=pair.close_time,
             expected_expiration_time=pair.expected_expiration_time,
+            talos_id=talos_id,
         )
         self._games[event_ticker] = pair
         if "sub_title" in data:
@@ -595,12 +614,24 @@ class GameManager:
         logger.info("all_games_cleared", count=len(tickers))
 
     async def refresh_volumes(self) -> None:
-        """Re-fetch 24h volume for all monitored markets, batched by series."""
-        # Group active games by series ticker (with fallback for old data)
-        series_tickers: set[str] = set()
+        """Re-fetch 24h volume for all monitored markets, batched by series.
+
+        Prioritizes series with missing volume data so the UI fills in fast.
+        """
+        # Group active games by series ticker, track which have missing data
+        series_missing: set[str] = set()
+        series_loaded: set[str] = set()
         for pair in self.active_games:
             st = pair.series_ticker or pair.event_ticker.split("-")[0]
-            series_tickers.add(st)
+            has_a = pair.ticker_a in self._volumes_24h
+            has_b = pair.ticker_b in self._volumes_24h
+            if has_a and has_b:
+                series_loaded.add(st)
+            else:
+                series_missing.add(st)
+
+        # Fetch missing-data series first, then the rest
+        ordered = list(series_missing) + [s for s in series_loaded if s not in series_missing]
 
         sem = asyncio.Semaphore(4)
 
@@ -616,7 +647,7 @@ class GameManager:
                 except Exception:
                     return []
 
-        results = await asyncio.gather(*(_fetch(s) for s in series_tickers))
+        results = await asyncio.gather(*(_fetch(s) for s in ordered))
         for batch in results:
             for event in batch:
                 for m in event.markets:

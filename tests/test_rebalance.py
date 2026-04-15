@@ -8,6 +8,7 @@ import pytest
 
 from talos.bid_adjuster import BidAdjuster
 from talos.models.order import Order
+from talos.models.portfolio import Position
 from talos.models.proposal import ProposedRebalance
 from talos.models.strategy import ArbPair, Opportunity
 from talos.orderbook import OrderBookManager
@@ -54,7 +55,7 @@ def _make_snapshot(no_a: int = 45, no_b: int = 48) -> Opportunity:
         qty_a=100,
         qty_b=100,
         raw_edge=100 - no_a - no_b,
-        fee_edge=0.0,
+        fee_edge=5.0,
         tradeable_qty=100,
         timestamp="2026-03-13T00:00:00Z",
     )
@@ -258,7 +259,7 @@ class TestComputeRebalanceProposal:
         assert result.rebalance.catchup_qty == 0
 
     def test_catchup_bridges_full_gap(self):
-        """Catch-up quantity covers the full gap (no unit cap)."""
+        """Catch-up quantity bridges the full gap in one step (no unit cap)."""
         pair = _make_pair()
         ledger = PositionLedger(event_ticker="EVT-1", unit_size=10)
         ledger.record_fill(Side.A, 50, 45)
@@ -270,7 +271,7 @@ class TestComputeRebalanceProposal:
         )
         assert result is not None
         assert result.rebalance is not None
-        assert result.rebalance.catchup_qty == 30  # full gap: 50 - 20
+        assert result.rebalance.catchup_qty == 30
 
     def test_catchup_falls_back_to_profitable_price(self):
         """When snapshot price is unprofitable, catch-up uses max profitable price.
@@ -319,7 +320,7 @@ class TestComputeRebalanceProposal:
         assert result.rebalance is None or result.rebalance.catchup_qty == 0
 
     def test_catchup_full_gap_not_capped(self):
-        """Catch-up quantity is the full gap, not capped at unit_size."""
+        """Catch-up quantity bridges full gap, not capped at unit_size."""
         pair = _make_pair()
         ledger = PositionLedger(event_ticker="EVT-1", unit_size=20)
         ledger.record_fill(Side.A, 40, 45)
@@ -331,7 +332,7 @@ class TestComputeRebalanceProposal:
         )
         assert result is not None
         assert result.rebalance is not None
-        assert result.rebalance.catchup_qty == 25  # full gap, not capped at 20
+        assert result.rebalance.catchup_qty == 25
 
     def test_target_is_over_filled_not_max(self):
         """Target = over_filled. Over-side resting is always cancelled."""
@@ -733,6 +734,101 @@ class TestExecuteRebalance:
             "skipped" in msg.lower() or "balanced" in msg.lower() for msg, _ in notifications
         )
 
+    @pytest.mark.asyncio
+    async def test_duplicate_orders_cancelled_when_tracked_already_at_target(self):
+        """Double-bid: 2 separate orders (each qty 1) with unit_size=1.
+
+        The tracked order is already at target_resting=1, but a second
+        duplicate order causes persistent overcommit.  The sweep should
+        cancel the duplicate.
+        """
+        scanner, adjuster, rest = _make_exec_context()
+
+        # Tracked order: already at qty 1 (= target)
+        rest.get_order = AsyncMock(
+            return_value=_make_order(
+                "TK-A", order_id="ord-a", remaining_count=1, no_price=45,
+            )
+        )
+        rest.decrease_order = AsyncMock()
+        # Sweep returns both the tracked order AND the duplicate
+        rest.get_all_orders = AsyncMock(
+            return_value=[
+                _make_order(
+                    "TK-A", order_id="ord-a", remaining_count=1, no_price=45,
+                ),
+                _make_order(
+                    "TK-A", order_id="ord-a-dup", remaining_count=1, no_price=45,
+                ),
+            ]
+        )
+        rest.cancel_order = AsyncMock()
+
+        rebalance = ProposedRebalance(
+            event_ticker="EVT-1",
+            side="A",
+            order_id="ord-a",
+            ticker="TK-A",
+            current_resting=2,
+            target_resting=1,
+        )
+        notifications: list[tuple[str, str]] = []
+        await execute_rebalance(
+            rebalance,
+            rest_client=rest,
+            adjuster=adjuster,
+            scanner=scanner,
+            notify=lambda msg, sev: notifications.append((msg, sev)),
+        )
+
+        # Tracked order should NOT be decreased (already at 1)
+        rest.decrease_order.assert_not_called()
+        # Duplicate order SHOULD be cancelled
+        rest.cancel_order.assert_called_once_with("ord-a-dup")
+        assert any("duplicate" in msg.lower() for msg, _ in notifications)
+
+    @pytest.mark.asyncio
+    async def test_no_duplicate_sweep_when_no_extras(self):
+        """When tracked order is the only one, sweep finds nothing to cancel."""
+        scanner, adjuster, rest = _make_exec_context()
+
+        rest.get_order = AsyncMock(
+            return_value=_make_order(
+                "TK-A", order_id="ord-a", remaining_count=5, no_price=45,
+            )
+        )
+        rest.decrease_order = AsyncMock(
+            return_value=_make_order("TK-A", order_id="ord-a", remaining_count=3)
+        )
+        # Only the tracked order exists
+        rest.get_all_orders = AsyncMock(
+            return_value=[
+                _make_order(
+                    "TK-A", order_id="ord-a", remaining_count=3, no_price=45,
+                ),
+            ]
+        )
+        rest.cancel_order = AsyncMock()
+
+        rebalance = ProposedRebalance(
+            event_ticker="EVT-1",
+            side="A",
+            order_id="ord-a",
+            ticker="TK-A",
+            current_resting=5,
+            target_resting=3,
+        )
+        await execute_rebalance(
+            rebalance,
+            rest_client=rest,
+            adjuster=adjuster,
+            scanner=scanner,
+            notify=lambda msg, sev: None,
+        )
+
+        rest.decrease_order.assert_called_once_with("ord-a", reduce_to=3)
+        rest.cancel_order.assert_not_called()
+
 
 # ── Fresh sync before catch-up ───────────────────────────────────────
 
@@ -874,6 +970,93 @@ class TestFreshSyncBeforeCatchup:
             count=10,
             order_group_id="grp-test",
         )
+
+
+    @pytest.mark.asyncio
+    async def test_catchup_records_placement_in_ledger(self):
+        """After successful catch-up order, ledger must record placement
+        to prevent another imbalance pass from reproposing before next poll.
+
+        Regression: without record_placement, the under-side's committed state
+        is stale and another catch-up is immediately reproposed.
+        """
+        scanner, adjuster, rest = _make_exec_context()
+        ledger = adjuster.get_ledger("EVT-1")
+        ledger.record_fill(Side.A, 30, 45)
+        ledger.record_fill(Side.B, 20, 48)
+
+        rest.get_all_orders = AsyncMock(
+            return_value=[
+                _make_order("TK-A", order_id="oa", fill_count=30, no_price=45, status="canceled"),
+                _make_order("TK-B", order_id="ob", fill_count=20, no_price=48, status="canceled"),
+            ]
+        )
+        rest.get_all_positions = AsyncMock(return_value=[])
+        created = _make_order("TK-B", order_id="catchup-1", remaining_count=10, no_price=48)
+        rest.create_order = AsyncMock(return_value=created)
+
+        rebalance = ProposedRebalance(
+            event_ticker="EVT-1",
+            side="A",
+            catchup_ticker="TK-B",
+            catchup_price=48,
+            catchup_qty=10,
+        )
+        await execute_rebalance(
+            rebalance,
+            rest_client=rest,
+            adjuster=adjuster,
+            scanner=scanner,
+            notify=lambda msg, sev: None,
+        )
+
+        # Ledger must reflect the catch-up placement immediately
+        assert ledger.resting_order_id(Side.B) == "catchup-1"
+        assert ledger.resting_count(Side.B) == 10
+
+    @pytest.mark.asyncio
+    async def test_fresh_sync_calls_positions_api(self):
+        """Fresh sync before catch-up must augment from positions API,
+        not just orders, to handle archived fills.
+
+        Regression: orders-only sync misses archived fills, computing
+        wrong catch-up quantity.
+        """
+        scanner, adjuster, rest = _make_exec_context()
+        ledger = adjuster.get_ledger("EVT-1")
+
+        # Orders API shows 0 fills (old orders archived)
+        rest.get_all_orders = AsyncMock(return_value=[])
+        # Positions API shows the real fills
+        rest.get_all_positions = AsyncMock(
+            return_value=[
+                Position(ticker="TK-A", position=-30, total_traded=1350, fees_paid=5),
+                Position(ticker="TK-B", position=-20, total_traded=960, fees_paid=4),
+            ]
+        )
+        created = _make_order("TK-B", order_id="catchup-2", remaining_count=10, no_price=48)
+        rest.create_order = AsyncMock(return_value=created)
+
+        rebalance = ProposedRebalance(
+            event_ticker="EVT-1",
+            side="A",
+            catchup_ticker="TK-B",
+            catchup_price=48,
+            catchup_qty=10,
+        )
+        await execute_rebalance(
+            rebalance,
+            rest_client=rest,
+            adjuster=adjuster,
+            scanner=scanner,
+            notify=lambda msg, sev: None,
+        )
+
+        # Positions API must have been called during fresh sync
+        rest.get_all_positions.assert_called_once()
+        # Ledger fills should reflect positions data, not zero from orders
+        assert ledger.filled_count(Side.A) == 30
+        assert ledger.filled_count(Side.B) == 20
 
 
 # ── Top-up detection tests ───────────────────────────────────────────

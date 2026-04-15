@@ -178,6 +178,12 @@ class OrderBookManager:
         """Return subscribed tickers that have no book (never received data)."""
         return [t for t in subscribed if t not in self._books]
 
+    def most_recent_update(self) -> float:
+        """Epoch timestamp of the most recently updated book, or 0.0 if no books."""
+        if not self._books:
+            return 0.0
+        return max(book.last_update for book in self._books.values())
+
     def get_book(self, ticker: str) -> LocalOrderBook | None:
         """Get current book state, or None if not tracked."""
         return self._books.get(ticker)

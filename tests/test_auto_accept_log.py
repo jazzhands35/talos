@@ -6,7 +6,8 @@ import json
 from datetime import UTC, datetime
 from pathlib import Path
 
-from talos.auto_accept import AutoAcceptState
+import talos.auto_accept_log as auto_accept_log_module
+from talos.auto_accept import ExecutionMode
 from talos.auto_accept_log import AutoAcceptLogger
 from talos.models.proposal import Proposal, ProposalKey, ProposedBid
 
@@ -32,29 +33,42 @@ def _make_proposal() -> Proposal:
     )
 
 
-def test_session_start_writes_jsonl(tmp_path: Path) -> None:
-    log_dir = tmp_path / "sessions"
-    logger = AutoAcceptLogger(log_dir)
-    state = AutoAcceptState()
-    state.start(hours=2.0)
+def _fixed_log_file(monkeypatch, *, second: int) -> Path:
+    fixed = datetime(2026, 4, 3, 17, 45, second, tzinfo=UTC)
+
+    class _FixedDateTime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return fixed if tz else fixed.replace(tzinfo=None)
+
+    monkeypatch.setattr(auto_accept_log_module, "datetime", _FixedDateTime)
+    path = Path("tests") / fixed.strftime("%Y-%m-%d_%H%M%S.jsonl")
+    path.unlink(missing_ok=True)
+    return path
+
+
+def test_session_start_writes_jsonl(monkeypatch) -> None:
+    log_file = _fixed_log_file(monkeypatch, second=1)
+    logger = AutoAcceptLogger(Path("tests"))
+    state = ExecutionMode()
+    state.enter_automatic(hours=2.0)
     config = {"edge_threshold_cents": 1.0, "unit_size": 10}
 
-    logger.log_session_start(state, config)
+    try:
+        logger.log_session_start(state, config)
+        line = json.loads(log_file.read_text().strip())
+        assert line["event"] == "session_start"
+        assert line["config"]["unit_size"] == 10
+        assert "duration_hours" in line
+    finally:
+        log_file.unlink(missing_ok=True)
 
-    files = list(log_dir.glob("*.jsonl"))
-    assert len(files) == 1
-    line = json.loads(files[0].read_text().strip())
-    assert line["event"] == "session_start"
-    assert line["config"]["unit_size"] == 10
-    assert "duration_hours" in line
 
-
-def test_log_accepted_writes_state_snapshot(tmp_path: Path) -> None:
-    log_dir = tmp_path / "sessions"
-    logger = AutoAcceptLogger(log_dir)
-    state = AutoAcceptState()
-    state.start(hours=1.0)
-    logger.log_session_start(state, {})
+def test_log_accepted_writes_state_snapshot(monkeypatch) -> None:
+    log_file = _fixed_log_file(monkeypatch, second=2)
+    logger = AutoAcceptLogger(Path("tests"))
+    state = ExecutionMode()
+    state.enter_automatic(hours=1.0)
 
     proposal = _make_proposal()
     snapshot = {
@@ -64,47 +78,52 @@ def test_log_accepted_writes_state_snapshot(tmp_path: Path) -> None:
         "top_of_market": {},
     }
 
-    logger.log_accepted(proposal, snapshot, state)
+    try:
+        logger.log_session_start(state, {})
+        logger.log_accepted(proposal, snapshot, state)
+        lines = log_file.read_text().strip().split("\n")
+        assert len(lines) == 2
+        entry = json.loads(lines[1])
+        assert entry["event"] == "auto_accepted"
+        assert entry["proposal"]["kind"] == "bid"
+        assert entry["state_snapshot"]["balance_cents"] == 50000
+        assert "session" in entry
+    finally:
+        log_file.unlink(missing_ok=True)
 
-    files = list(log_dir.glob("*.jsonl"))
-    lines = files[0].read_text().strip().split("\n")
-    assert len(lines) == 2
-    entry = json.loads(lines[1])
-    assert entry["event"] == "auto_accepted"
-    assert entry["proposal"]["kind"] == "bid"
-    assert entry["state_snapshot"]["balance_cents"] == 50000
-    assert "session" in entry
 
-
-def test_log_session_end(tmp_path: Path) -> None:
-    log_dir = tmp_path / "sessions"
-    logger = AutoAcceptLogger(log_dir)
-    state = AutoAcceptState()
-    state.start(hours=1.0)
+def test_log_session_end(monkeypatch) -> None:
+    log_file = _fixed_log_file(monkeypatch, second=3)
+    logger = AutoAcceptLogger(Path("tests"))
+    state = ExecutionMode()
+    state.enter_automatic(hours=1.0)
     state.accepted_count = 5
-    logger.log_session_start(state, {})
 
-    logger.log_session_end(state, final_positions={})
+    try:
+        logger.log_session_start(state, {})
+        logger.log_session_end(state, final_positions={})
+        lines = log_file.read_text().strip().split("\n")
+        last = json.loads(lines[-1])
+        assert last["event"] == "session_end"
+        assert last["total_accepted"] == 5
+    finally:
+        log_file.unlink(missing_ok=True)
 
-    files = list(log_dir.glob("*.jsonl"))
-    lines = files[0].read_text().strip().split("\n")
-    last = json.loads(lines[-1])
-    assert last["event"] == "session_end"
-    assert last["total_accepted"] == 5
 
-
-def test_log_error(tmp_path: Path) -> None:
-    log_dir = tmp_path / "sessions"
-    logger = AutoAcceptLogger(log_dir)
-    state = AutoAcceptState()
-    state.start(hours=1.0)
-    logger.log_session_start(state, {})
+def test_log_error(monkeypatch) -> None:
+    log_file = _fixed_log_file(monkeypatch, second=4)
+    logger = AutoAcceptLogger(Path("tests"))
+    state = ExecutionMode()
+    state.enter_automatic(hours=1.0)
 
     proposal = _make_proposal()
-    logger.log_error(proposal, "API timeout", {"balance_cents": 50000}, state)
 
-    files = list(log_dir.glob("*.jsonl"))
-    lines = files[0].read_text().strip().split("\n")
-    last = json.loads(lines[-1])
-    assert last["event"] == "auto_accept_error"
-    assert last["error"] == "API timeout"
+    try:
+        logger.log_session_start(state, {})
+        logger.log_error(proposal, "API timeout", {"balance_cents": 50000}, state)
+        lines = log_file.read_text().strip().split("\n")
+        last = json.loads(lines[-1])
+        assert last["event"] == "auto_accept_error"
+        assert last["error"] == "API timeout"
+    finally:
+        log_file.unlink(missing_ok=True)

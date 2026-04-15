@@ -9,6 +9,7 @@ from textual.app import App, ComposeResult
 from textual.containers import Vertical
 from textual.widgets import Button, Footer, Header, Input, Label, Static
 
+from talos.automation_config import DEFAULT_UNIT_SIZE
 from talos.errors import KalshiAPIError
 from talos.ui.theme import APP_CSS
 
@@ -24,7 +25,18 @@ def write_env_file(path: Path, *, key_id: str, key_path: str) -> None:
 
 def write_default_settings(path: Path) -> None:
     """Write default settings.json for new installs."""
-    path.write_text(json.dumps({"unit_size": 5, "ticker_blacklist": []}, indent=2) + "\n")
+    path.write_text(
+        json.dumps(
+            {
+                "unit_size": DEFAULT_UNIT_SIZE,
+                "ticker_blacklist": [],
+                "execution_mode": "automatic",
+                "auto_stop_hours": None,
+            },
+            indent=2,
+        )
+        + "\n"
+    )
 
 
 class SetupScreen(Static):

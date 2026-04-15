@@ -39,13 +39,15 @@ Kalshi's Market API returns `expected_expiration_time` — the estimated market 
 - `safety-audit` — after changes, since exit-only timing affects order cancellation
 - `superpowers:test-driven-development` — TDD throughout
 
+## Status: COMPLETE (2026-03-17)
+
 ## Phases
 
-1. [[plans/05-expiration-start-time/phase-1-market-model]] — Parse `expected_expiration_time` into Market model
-2. [[plans/05-expiration-start-time/phase-2-threading]] — Thread through ArbPair and GameManager
-3. [[plans/05-expiration-start-time/phase-3-offset-lookup]] — Sport-specific offset table and start time computation
-4. [[plans/05-expiration-start-time/phase-4-resolver-fallback]] — Integrate as GameStatusResolver fallback
-5. [[plans/05-expiration-start-time/phase-5-display]] — UI display for estimated start times
+1. [[plans/05-expiration-start-time/phase-1-market-model]] — DONE — Parse `expected_expiration_time` into Market model
+2. [[plans/05-expiration-start-time/phase-2-threading]] — DONE — Thread through ArbPair and GameManager
+3. [[plans/05-expiration-start-time/phase-3-offset-lookup]] — DONE — Sport-specific offset table and start time computation
+4. [[plans/05-expiration-start-time/phase-4-resolver-fallback]] — DONE — Integrate as GameStatusResolver fallback
+5. [[plans/05-expiration-start-time/phase-5-display]] — DONE — UI display for estimated start times
 
 ## Verification
 

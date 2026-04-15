@@ -61,6 +61,16 @@ Footer {{
     height: 1fr;
 }}
 
+#performance-panel {{
+    width: 2fr;
+    min-width: 28;
+    border: solid {SURFACE1};
+    border-title-color: {BLUE};
+    background: {SURFACE0};
+    padding: 0 1;
+    height: 1fr;
+}}
+
 #activity-log {{
     width: 3fr;
     border: solid {SURFACE1};
