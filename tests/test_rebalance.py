@@ -1302,3 +1302,66 @@ class TestYesNoRebalance:
         assert rebalance is not None
         assert rebalance.reduce_side == "no"
         assert rebalance.catchup_side == "no"
+
+
+# ── Open-unit avg scoping tests ──────────────────────────────────────
+
+
+class TestRebalanceCatchupOpenScope:
+    """compute_rebalance_proposal catchup fallback uses open-unit avg."""
+
+    def test_catchup_price_uses_open_avg_not_lifetime_blend(self):
+        """Closed unit at 92/7 must not raise the max profitable catch-up
+        price above what's safe against the open unit's 18c basis."""
+        pair = ArbPair(
+            event_ticker="EVT-X",
+            ticker_a="TK-A",
+            ticker_b="TK-B",
+            side_a="no",
+            side_b="no",
+            fee_rate=0.0,
+        )
+        ledger = PositionLedger(
+            "EVT-X",
+            unit_size=5,
+            ticker_a="TK-A",
+            ticker_b="TK-B",
+            side_a_str="no",
+            side_b_str="no",
+        )
+        # Closed unit 1 at A=92, B=7 — after both fills, _reconcile_closed fires
+        # and moves all 5 contracts into the closed bucket on each side.
+        ledger.record_fill(Side.A, 5, 92)
+        ledger.record_fill(Side.B, 5, 7)
+        # Open unit: B has 5 filled @ 18, A has 0 filled.
+        # State: A filled=5 closed=5 open=0; B filled=10 closed=5 open=5.
+        ledger.record_fill(Side.B, 5, 18)
+        # Imbalance: B committed=10, A committed=5, delta=-5, over=B, under=A.
+        # Scanner snapshot: A ask at 86.
+        # is_placement_safe(A, catchup=True): other=B open_avg=18,
+        #   fee_adj(86, rate=0) + fee_adj(18, rate=0) = 86 + 18 = 104 >= 100 → False.
+        # Fallback:
+        #   old (lifetime blend): avg_B = (7*5+18*5)/10 = 12.5 → max_profitable=87 > 86
+        #   new (open-unit avg):  open_avg_B = 18 → max_profitable=81 <= 81
+        snapshot = Opportunity(
+            event_ticker="EVT-X",
+            ticker_a="TK-A",
+            ticker_b="TK-B",
+            no_a=86,
+            no_b=18,
+            qty_a=100,
+            qty_b=100,
+            raw_edge=100 - 86 - 18,
+            fee_edge=-4.0,
+            tradeable_qty=5,
+            timestamp="2026-04-15T00:00:00Z",
+        )
+        books = _books_with_data(no_a=86, no_b=18)
+        proposal = compute_rebalance_proposal(
+            "EVT-X", ledger, pair, snapshot, "X", books,
+        )
+        assert proposal is not None
+        assert proposal.rebalance is not None
+        # With open-scope: max_profitable_price(18, rate=0) = 81.
+        # Without: max_profitable_price(12.5 blended avg, rate=0) = 87 (allowing 86).
+        assert proposal.rebalance.catchup_price <= 81

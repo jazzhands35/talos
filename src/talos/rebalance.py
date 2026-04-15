@@ -136,9 +136,8 @@ def compute_rebalance_proposal(
             )
             if not ok:
                 # Compute the highest price that IS profitable
-                over_side_state = ledger._sides[over]
-                if over_side_state.filled_count > 0:
-                    other_avg = over_side_state.filled_total_cost / over_side_state.filled_count
+                if ledger.open_count(over) > 0:
+                    other_avg = ledger.open_avg_filled_price(over)
                     fallback = max_profitable_price(
                         other_avg,
                         rate=pair.fee_rate,
