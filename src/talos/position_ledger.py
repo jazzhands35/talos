@@ -245,10 +245,11 @@ class PositionLedger:
                     f"resting={s.resting_count} + new={count} > {self.unit_size}",
                 )
 
-        # P18: fee-adjusted profitability
+        # P18: fee-adjusted profitability (open-unit scoped — matched pairs
+        # are locked in and must not subsidize decisions about the open unit).
         other = self._sides[side.other]
-        if other.filled_count > 0:
-            other_price = other.filled_total_cost / other.filled_count
+        if self.open_count(side.other) > 0:
+            other_price = self.open_avg_filled_price(side.other)
         elif other.resting_count > 0:
             other_price = other.resting_price
         else:

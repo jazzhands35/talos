@@ -1179,3 +1179,24 @@ class TestSavedDictSchema:
             assert len(migrated) == 1, f"Expected migration log for bad_value={bad_value!r}"
             # Migration zeroed and reconciled — closed_count_a != 5 (the restored-verbatim value)
             assert ledger._sides[Side.A].closed_count == 10  # reconciled, not restored
+
+
+class TestIsPlacementSafeOpenScope:
+    """is_placement_safe uses open avg, not lifetime blend."""
+
+    def test_rejects_placement_against_open_unit_avg(self):
+        """A closed unit at 92/7 must not subsidize a new Yes 86 placement."""
+        from talos.position_ledger import PositionLedger, Side
+        ledger = PositionLedger("EVT-X", unit_size=5)
+        # Pre-close one unit at 92/7
+        ledger.record_fill(Side.A, 5, 92)
+        ledger.record_fill(Side.B, 5, 7)
+        # Now simulate the open unit having B filled at 18c (no A yet)
+        ledger.record_fill(Side.B, 5, 18)
+        # Try to place Yes 86 on A against the open-unit B avg of 18
+        # Fee-free market: 86 + 18 = 104 → unprofitable
+        ok, reason = ledger.is_placement_safe(Side.A, count=5, price=86, rate=0.0)
+        assert not ok
+        # Lifetime avg B would be (35 + 90) / 10 = 12.5 → would falsely pass
+        # Open avg B is 18 → correctly blocks
+        assert "104" in reason or "profitable" in reason.lower()
