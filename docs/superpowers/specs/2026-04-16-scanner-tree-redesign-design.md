@@ -216,7 +216,29 @@ Missing `tree` sub-object → defaults. Legacy settings.json files load identica
 
 Filter settings (`excluded_categories`, `min_volume_24h`, etc.) affect **tree rendering only**. They do not auto-remove entries from `games_full.json`. A selected pair whose market falls below `min_volume_24h` keeps being monitored; the filter just hides it from the tree view.
 
-#### 2.4 Staged (uncommitted) tree edits — in-memory only
+#### 2.4 ArbPair record construction from discovery cache
+
+The tree commit path materializes full `ArbPair` records from the in-memory discovery cache — **no REST calls on the commit hot-path**. Each record is built from:
+
+| Field | Source |
+|---|---|
+| `event_ticker` | market ticker (non-sports) or Kalshi event ticker (sports) |
+| `ticker_a`, `ticker_b` | market tickers from `EventNode.markets` + sports/non-sports shape rule |
+| `side_a`, `side_b` | `"yes"/"no"` for non-sports YES/NO; both `"no"` for sports cross-NO |
+| `kalshi_event_ticker` | `EventNode.ticker` |
+| `series_ticker` | `SeriesNode.ticker` |
+| `fee_type` | `SeriesNode.fee_type` (hydrated at bootstrap, §3.1) |
+| `fee_rate` | `maker_fee_rate(SeriesNode.fee_type, SeriesNode.fee_multiplier)` — pure function applied at construction |
+| `close_time` | `EventNode.close_time` or `MarketNode.close_time` |
+| `expected_expiration_time` | same source |
+| `sub_title`, `label` | `EventNode.sub_title` / derived via existing `extract_leg_labels()` (pure function over sub_title) |
+| `source` | `"tree"` |
+
+**Property: commit is a pure local operation.** If any required field is missing from the cache (which can happen if the user commits immediately after a discovery-fetch error left a SeriesNode stale), the commit validator surfaces this as a blocker — "cannot build pair record for KXFOO-26APR: fee metadata unavailable, refresh discovery (`r`) and retry." The user-facing escape hatch is a manual refresh, not a silent background REST.
+
+This matters for the SURVIVOR replay test and for offline resilience: commits cannot block on Kalshi's availability at commit time.
+
+#### 2.5 Staged (uncommitted) tree edits — in-memory only
 
 TreeScreen holds staged tick/untick changes in process memory (not persisted). Structure:
 
@@ -247,7 +269,11 @@ class SeriesNode(BaseModel):
     category: str
     tags: list[str]
     frequency: str                           # one_off | weekly | annual | ...
-    events: dict[str, "EventNode"] | None   # None = not fetched yet
+    # Fee metadata — populated from the /series bootstrap response.
+    # Required at commit time to construct ArbPair records without additional REST.
+    fee_type: str                            # e.g., "quadratic_with_maker_fees"
+    fee_multiplier: float                    # raw multiplier; maker_fee_rate() applied at pair build
+    events: dict[str, "EventNode"] | None    # None = not fetched yet
     events_loaded_at: datetime | None
 
 class EventNode(BaseModel):
@@ -295,14 +321,16 @@ Exposed as `MilestoneResolver.event_start(event_ticker) -> datetime | None`.
 
 Runs once, in background (does not block Engine startup beyond the gate in §5.3).
 
-1. `GET /series` — returns all ~9,700 series in one response (~11 MB).
-2. Group by category. Build `CategoryNode` tree skeleton with `SeriesNode` stubs.
+1. `GET /series` — returns all ~9,700 series in one response (~11 MB). Each response object carries `ticker, title, category, tags, frequency, fee_type, fee_multiplier`.
+2. Group by category. Build `CategoryNode` tree. Each `SeriesNode` is populated with **all** series-level metadata including `fee_type` and `fee_multiplier` — not a stub.
 3. Parallel: paginate `GET /milestones?minimum_start_date=<now>&limit=200` until cursor exhausted. Build `MilestoneIndex` by `related_event_ticker`.
 4. Emit `discovery_ready`.
 
 Cost: ~16 API calls, ~3 seconds elapsed.
 
-Events are not fetched at startup. Series nodes are stubs until the user expands them.
+**Fee metadata is fully hydrated at bootstrap.** This is required so that tree commits can construct `ArbPair` records without any additional REST calls. The `/series` endpoint already returns what we need — we just weren't exposing it.
+
+Events are not fetched at startup. Series nodes are stubs on their `events` field only (the `events: dict | None = None` signals lazy-load); all other series-level fields are populated.
 
 #### 3.2 Lazy event fetch
 
@@ -460,10 +488,10 @@ Uncommitted state shows in footer: `* 3 changes pending`. `escape` with uncommit
 
 #### 4.7 Commit-time schedule validator
 
-On commit, before firing events to `GameManager`:
+On commit, before invoking `Engine.add_pairs_from_selection()`:
 
-1. For each staged addition, resolve the event's start time via the cascade (manual → milestone → sports GSR).
-2. If no source returns a value AND the user has not set `manual_event_start: "none"`, flag as needing-schedule.
+1. For each staged pair addition, extract its `kalshi_event_ticker` and resolve via the cascade (manual override in TreeMetadataStore → milestone in MilestoneResolver → sports GSR).
+2. If no source returns a value AND the user has not set `manual_event_start: "none"`, flag as needing-schedule. Deduplicate by `kalshi_event_ticker` so a 46-market Fed event is prompted for once, not 46 times.
 3. If any needing-schedule events exist, open popup:
 
 ```
@@ -483,8 +511,8 @@ On commit, before firing events to `GameManager`:
 └────────────────────────────────────────────────────────────────────┘
 ```
 
-4. On `save all & commit`: times persist to `manual_event_start`, then `GameManager.add_game()` for each.
-5. On `cancel commit`: staged selections preserved in tree. No events added. User returns to tree.
+4. On `save all & commit`: collected times are staged into `staged.to_set_manual_start`; commit flow continues as in §5.1 (manual overrides persist to TreeMetadataStore, then `Engine.add_pairs_from_selection()` fires).
+5. On `cancel commit`: staged selections preserved in tree. No overrides persisted. No engine mutations. User returns to tree.
 6. If no needing-schedule events: no popup. Commit proceeds immediately.
 
 Optional escape hatch: `e` keybinding on a tree row opens the single-row version of this popup pre-commit.
@@ -535,27 +563,55 @@ async def on_commit(self):
                 return   # user cancelled; staged preserved
             staged.to_set_manual_start.update(entries)
 
-        # 2. Write event-level metadata first (so resolver cascade sees overrides
-        #    before engine ever ticks for the new pairs)
-        if staged.to_set_manual_start or staged.to_set_unticked or staged.to_clear_unticked:
+        # 2. Write manual_event_start BEFORE engine ops. Rationale: this is a
+        #    user-intent override; it is correct to have it on disk regardless
+        #    of whether the corresponding engine add/remove succeeds. If add
+        #    fails and is retried later, the override is already present.
+        if staged.to_set_manual_start:
             self._tree_metadata_store.apply(
                 manual_event_start=staged.to_set_manual_start,
-                set_unticked=staged.to_set_unticked,
-                clear_unticked=staged.to_clear_unticked,
             )
 
         # 3. Engine add/remove (engine handles full wiring + persistence)
+        added: list[ArbPair] = []
+        removed: list[str] = []
         if staged.to_add:
-            await self._engine.add_pairs_from_selection(staged.to_add)
+            added = await self._engine.add_pairs_from_selection(staged.to_add)
         if staged.to_remove:
-            await self._engine.remove_pairs_from_selection(staged.to_remove)
+            removed = await self._engine.remove_pairs_from_selection(staged.to_remove)
 
-        # 4. Clear staged state
-        self._staged_changes = StagedChanges.empty()
+        # 4. Apply untick-state mutations ONLY for pairs the engine actually
+        #    added/removed. This prevents tree_metadata.json from drifting out
+        #    of sync with the monitored set on partial engine failures.
+        added_keys = {p.kalshi_event_ticker or p.event_ticker for p in added}
+        removed_keys = self._keys_for_removed_pairs(removed)
+        applied_set_unticked = [k for k in staged.to_set_unticked if k in removed_keys]
+        applied_clear_unticked = [k for k in staged.to_clear_unticked if k in added_keys]
+        if applied_set_unticked or applied_clear_unticked:
+            self._tree_metadata_store.apply(
+                set_unticked=applied_set_unticked,
+                clear_unticked=applied_clear_unticked,
+            )
+
+        # 5. Keep unapplied untick mutations in staged for retry
+        unapplied_set = set(staged.to_set_unticked) - set(applied_set_unticked)
+        unapplied_clear = set(staged.to_clear_unticked) - set(applied_clear_unticked)
+        if unapplied_set or unapplied_clear:
+            self._staged_changes = StagedChanges(
+                to_set_unticked=list(unapplied_set),
+                to_clear_unticked=list(unapplied_clear),
+            )
+            logger.warning("tree_commit_partial",
+                           unapplied_set=list(unapplied_set),
+                           unapplied_clear=list(unapplied_clear))
+        else:
+            self._staged_changes = StagedChanges.empty()
     except Exception:
         logger.exception("tree_commit_failed")
         # Staged changes preserved for retry
 ```
+
+**Ordering invariant:** metadata writes that represent *pure user intent* (manual_event_start) persist before engine ops; metadata writes that *describe the monitored state* (deliberately_unticked set/clear) persist only after the corresponding engine mutation succeeds. This prevents partial-failure desync where `tree_metadata.json` says an event is deliberately unticked while the engine is still actively monitoring it, or vice versa.
 
 `Engine.add_pairs_from_selection(records)` is a new method that wraps the existing orchestration:
 
@@ -701,28 +757,51 @@ def _resolve_event_start(self, kalshi_event_ticker: str, pair: ArbPair
 
 #### 5.3 Startup sequence — safety-first gate
 
-Uses the existing restoration path. `load_saved_games_full()` returns the pair records; `GameManager.restore_game()` already reconstitutes each pair without REST calls; Engine performs the same orchestration (adjuster wiring, GSR wiring, feed subs) as at runtime.
+Talos does not have a single engine-owned tick loop. The runtime is a mix of: `TradingEngine.start_feed()` at [engine.py:746](src/talos/engine.py:746) (WebSocket + `_setup_initial_games`) and `TalosApp.on_mount()` at [ui/app.py:125](src/talos/ui/app.py:125) (~11 polling timers). The gate must be grounded in these concrete owners.
+
+**What the gate blocks:**
+
+The `Engine` exposes a single awaitable `ready_for_trading: asyncio.Event`. The following paths await it before proceeding:
+
+| Path | Owner | Why gated |
+|---|---|---|
+| `_setup_initial_games()` restoration loop | `TradingEngine.start_feed` | Adds pairs to engine; must happen after TreeMetadataStore + MilestoneResolver are armed. |
+| `_check_exit_only` callback | Engine refresh cycle | Resolver cascade would fall through on missing milestones; safety principle says wait. |
+| `_auto_accept_tick` | TalosApp timer ([ui/app.py:135](src/talos/ui/app.py:135)) | Could accept a proposal against an event whose exit-only should be live but isn't. |
+| Proposer/adjuster reactions to WS ticker updates | `_start_reaction_consumer` ([engine.py:760](src/talos/engine.py:760)) | Ticker-driven proposal generation — same reasoning as `_auto_accept_tick`. |
+
+**What the gate does NOT block** (read-only / observational):
+
+- `_poll_balance`, `_poll_account`, `_poll_queue`, `_poll_trades`, `_poll_settlements` — balance/account polling for display.
+- `_log_market_snapshots` — replay logging.
+- `_refresh_proposals` — UI-side refresh of already-generated proposals.
+- Tree browsing itself — user can navigate the tree during the gate window; commits will queue and apply after the gate opens.
+- WebSocket `connect()` + listen-loop start. Feeds can be subscribed once pairs are added; the gate just delays when pairs get added.
+
+**Timeline:**
 
 ```
 t=0.0   Process starts
-t=0.1   settings.json + tree_metadata.json loaded
+t=0.1   settings.json + tree_metadata.json loaded synchronously
         TreeMetadataStore armed with manual_event_start overrides
-t=0.2   load_saved_games_full() returns pair records
-t=0.2   For each record: GameManager.restore_game() + engine wiring (background task)
 t=0.2   DiscoveryService + MilestoneResolver start (background task)
-t=2-5   Milestones fully loaded
-t=2-5   Pair restoration complete (runs parallel with milestone load)
-t=5     Engine begins tick loop — all resolvers armed
-t=30    Hard cap: if milestones still not loaded, Engine starts with red
-        warning banner (exit-only scheduling degraded) and logs. Manual overrides
-        still work (they loaded at t=0.1).
+t=0.2   TalosApp.on_mount schedules polling timers (they fire, but gated
+        callbacks await ready_for_trading before proceeding)
+t=0.2   TradingEngine.start_feed() begins — WS connects, listen loop starts
+t=0.3   _setup_initial_games() AWAITS ready_for_trading before restoration
+t=2-5   Milestones fully loaded → ready_for_trading.set()
+t=2-5   _setup_initial_games() proceeds: loads games_full.json, reconstitutes
+        pairs through Engine entry points, subscribes feeds
+t=5+    All gated callbacks resume; trading fully armed
+t=30    Hard cap: if milestones still not loaded, ready_for_trading.set()
+        fires anyway with a structured warning (exit_only_degraded=True).
+        Red banner in UI: "started without milestones — exit-only scheduling
+        may be degraded." Manual overrides still work (they loaded at t=0.1).
 ```
 
-Engine does not begin the trading loop until either (a) `milestones_ready` emits, or (b) 30-second fallback expires. Hard cap avoids deadlock on Kalshi outages.
+**Rationale** for Option B over Option A (proceed immediately): Principle "Safety over speed" — a ~5-second startup delay is recoverable; running `_check_exit_only` or `_auto_accept_tick` without an armed resolver cascade is not. See `brain/principles.md`.
 
-Rationale for Option B over Option A (proceed immediately): Principle "Safety over speed" — a ~5-second startup delay is recoverable; trading without an armed resolver cascade is not. See `brain/principles.md`.
-
-**Critical ordering:** TreeMetadataStore loads **before** any pair is added to the Engine. This ensures that when the first `_check_exit_only` tick runs, `manual_event_start` overrides are visible — so a restart 2 minutes before KXSURVIVORMENTION's 8 PM airtime correctly fires exit-only rather than falling through to milestone (which Kalshi doesn't curate) and then to sports GSR (which doesn't match) and finally to "no schedule."
+**Critical ordering:** TreeMetadataStore loads synchronously at t=0.1, before any gated callback can proceed. This ensures that when the first post-gate `_check_exit_only` tick runs, `manual_event_start` overrides are visible — so a restart 2 minutes before KXSURVIVORMENTION's 8 PM airtime correctly fires exit-only rather than falling through to milestone (which Kalshi doesn't curate) and then to sports GSR (which doesn't match) and finally to "no schedule."
 
 #### 5.4 Deletions
 
