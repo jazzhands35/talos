@@ -115,55 +115,6 @@ class TestDecisionLogic:
         assert proposal is None
 
 
-class TestDualJumpTiebreaker:
-    def setup_method(self):
-        self.pair = ArbPair(event_ticker="EVT-1", ticker_a="TK-A", ticker_b="TK-B")
-        self.books = FakeBookManager({"TK-A": 48, "TK-B": 33})
-        self.adjuster = BidAdjuster(
-            book_manager=self.books,
-            pairs=[self.pair],
-            unit_size=10,
-        )
-
-    def test_most_behind_side_goes_first(self):
-        ledger = self.adjuster.get_ledger("EVT-1")
-        # A: 3 filled, 7 resting → needs 7 more
-        # B: 6 filled, 4 resting → needs 4 more
-        ledger.record_fill(Side.A, count=3, price=47)
-        ledger.record_resting(Side.A, order_id="ord-a", count=7, price=47)
-        ledger.record_fill(Side.B, count=6, price=32)
-        ledger.record_resting(Side.B, order_id="ord-b", count=4, price=32)
-
-        # Both jumped — A should go first (needs 7 > B's 4)
-        self.adjuster.evaluate_jump("TK-A", at_top=False)
-        self.adjuster.evaluate_jump("TK-B", at_top=False)
-
-        # Only A's proposal should be active, B should be deferred
-        assert self.adjuster.has_pending_proposal("EVT-1", Side.A)
-        assert not self.adjuster.has_pending_proposal("EVT-1", Side.B)
-        assert self.adjuster.has_deferred("EVT-1", Side.B)
-
-    def test_deferred_side_reevaluated_on_completion(self):
-        ledger = self.adjuster.get_ledger("EVT-1")
-        ledger.record_fill(Side.A, count=3, price=47)
-        ledger.record_resting(Side.A, order_id="ord-a", count=7, price=47)
-        ledger.record_fill(Side.B, count=6, price=32)
-        ledger.record_resting(Side.B, order_id="ord-b", count=4, price=32)
-
-        # Both jumped
-        self.adjuster.evaluate_jump("TK-A", at_top=False)
-        self.adjuster.evaluate_jump("TK-B", at_top=False)
-
-        # Simulate A completing — clear A's resting and fill it
-        ledger.record_cancel(Side.A, "ord-a")
-        ledger.record_fill(Side.A, count=7, price=48)
-
-        # Notify adjuster that A is complete — should re-evaluate B
-        proposal = self.adjuster.on_side_complete("EVT-1", Side.A)
-        assert proposal is not None
-        assert proposal.side == "B"
-
-
 def _make_order(order_id: str, price: int, fill_count: int, remaining_count: int) -> Order:
     return Order(
         order_id=order_id,

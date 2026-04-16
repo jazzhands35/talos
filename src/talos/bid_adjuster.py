@@ -59,8 +59,6 @@ class BidAdjuster:
         # Pending proposals: event_ticker → {side → proposal}
         self._proposals: dict[str, dict[Side, ProposedAdjustment]] = {}
 
-        # Deferred jumps: event_ticker → set of deferred sides
-        self._deferred: dict[str, set[Side]] = {}
 
     @property
     def ledgers(self) -> dict[str, PositionLedger]:
@@ -130,7 +128,6 @@ class BidAdjuster:
         """Unregister an event pair."""
         self._ledgers.pop(event_ticker, None)
         self._proposals.pop(event_ticker, None)
-        self._deferred.pop(event_ticker, None)
         # Clean ticker map — remove entries for this event
         to_clean: list[str] = []
         for ticker, entries in self._ticker_map.items():
@@ -219,9 +216,6 @@ class BidAdjuster:
 
         # Back at top — nothing to do
         if at_top:
-            # Clear any deferred for this side
-            deferred = self._deferred.get(pair.event_ticker, set())
-            deferred.discard(adj_side)
             self._log_decision(
                 event_ticker=pair.event_ticker,
                 ticker=ticker,
@@ -429,63 +423,6 @@ class BidAdjuster:
             )
             return _hold(hold_reason)
 
-        # Dual-jump tiebreaker (Principle 19)
-        other_ticker = pair.ticker_a if other_side is Side.A else pair.ticker_b
-        other_pair_side = pair.side_a if other_side is Side.A else pair.side_b
-        other_jumped = self._is_jumped(other_ticker, ledger, other_side, side=other_pair_side)
-        if other_jumped:
-            this_remaining = ledger.unit_remaining(adj_side)
-            other_remaining = ledger.unit_remaining(other_side)
-            if this_remaining == 0:
-                this_remaining = ledger.resting_count(adj_side)
-            if other_remaining == 0:
-                other_remaining = ledger.resting_count(other_side)
-
-            if this_remaining < other_remaining or (
-                this_remaining == other_remaining and adj_side is Side.B
-            ):
-                # Other side is more behind, or equal with deterministic
-                # tiebreak: Side.A always wins when equal (avoids both-deferred deadlock)
-                self._deferred.setdefault(pair.event_ticker, set()).add(adj_side)
-                logger.info(
-                    "jump_deferred",
-                    ticker=ticker,
-                    side=adj_side.value,
-                    reason=f"other side needs {other_remaining} vs this side {this_remaining}",
-                )
-                deferred_reason = (
-                    f"deferred — other side needs {other_remaining} fills "
-                    f"vs this side {this_remaining}"
-                )
-                self._log_decision(
-                    event_ticker=pair.event_ticker,
-                    ticker=ticker,
-                    adj_side=adj_side,
-                    trigger=trigger,
-                    outcome="hold_deferred",
-                    reason=deferred_reason,
-                    book_top=new_price,
-                    resting_price=cur_resting_price,
-                    resting_count=cur_resting_count,
-                    new_price=new_price,
-                    effective_this=this_effective,
-                    effective_other=other_effective,
-                    exit_only=exit_only,
-                )
-                return _hold(deferred_reason)
-            else:
-                # This side is more behind — cancel other side's existing proposal
-                evt_proposals = self._proposals.get(pair.event_ticker, {})
-                if other_side in evt_proposals:
-                    logger.info(
-                        "proposal_superseded_by_tiebreaker",
-                        event_ticker=pair.event_ticker,
-                        superseded_side=other_side.value,
-                        winning_side=adj_side.value,
-                    )
-                    del evt_proposals[other_side]
-                self._deferred.setdefault(pair.event_ticker, set()).add(other_side)
-
         # Build proposal — resting_order_id is guaranteed non-None (checked above)
         cancel_id = ledger.resting_order_id(adj_side)
         assert cancel_id is not None
@@ -553,10 +490,6 @@ class BidAdjuster:
             logger.info("proposal_superseded", event_ticker=pair.event_ticker, side=adj_side.value)
         evt_proposals[adj_side] = proposal
 
-        # Clear deferred flag for this side
-        deferred = self._deferred.get(pair.event_ticker, set())
-        deferred.discard(adj_side)
-
         self._log_decision(
             event_ticker=pair.event_ticker,
             ticker=ticker,
@@ -575,28 +508,6 @@ class BidAdjuster:
 
         return proposal
 
-    def on_side_complete(
-        self, event_ticker: str, completed_side: Side
-    ) -> ProposedAdjustment | None:
-        """Called when a side's unit completes. Re-evaluates deferred jumps.
-
-        Returns a proposal for the deferred side if still appropriate.
-        """
-        deferred = self._deferred.get(event_ticker, set())
-        other = completed_side.other
-        if other not in deferred:
-            return None
-
-        deferred.discard(other)
-
-        # Find the ticker for the deferred side
-        for ticker, entries in self._ticker_map.items():
-            for pair, s in entries:
-                if pair.event_ticker == event_ticker and s is other:
-                    pair_side = pair.side_a if other == Side.A else pair.side_b
-                    return self.evaluate_jump(ticker, at_top=False, side=pair_side)
-        return None
-
     def resolve_event(self, ticker: str) -> str | None:
         """Resolve a market ticker to its event ticker, or None if unknown."""
         result = self.resolve_pair(ticker)
@@ -606,9 +517,6 @@ class BidAdjuster:
 
     def has_pending_proposal(self, event_ticker: str, side: Side) -> bool:
         return side in self._proposals.get(event_ticker, {})
-
-    def has_deferred(self, event_ticker: str, side: Side) -> bool:
-        return side in self._deferred.get(event_ticker, set())
 
     def get_proposal(self, event_ticker: str, side: Side) -> ProposedAdjustment | None:
         return self._proposals.get(event_ticker, {}).get(side)
@@ -805,21 +713,6 @@ class BidAdjuster:
                 if pair.event_ticker == event_ticker:
                     return pair.fee_rate
         return MAKER_FEE_RATE
-
-    def _is_jumped(
-        self,
-        ticker: str,
-        ledger: PositionLedger,
-        adj_side: Side,
-        side: str = "no",
-    ) -> bool:
-        """Check if a side has been jumped (book price > resting price)."""
-        if ledger.resting_order_id(adj_side) is None:
-            return False
-        best = self._books.best_ask(ticker, side=side)
-        if best is None:
-            return False
-        return best.price > ledger.resting_price(adj_side)
 
     def _check_post_cancel_safety(
         self,
