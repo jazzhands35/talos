@@ -1,7 +1,7 @@
 # Scanner Tree Redesign — Milestone-Driven Discovery and Selection
 
 **Date:** 2026-04-16
-**Status:** Approved for implementation planning
+**Status:** Approved for implementation planning (revised after Codex review, 2026-04-16)
 
 ## Problem
 
@@ -51,13 +51,13 @@ Structural outcome: it should be impossible for Talos to trade a pinpoint-event 
 - Auto-subscription to new events as they appear in a ticked series. Manual-only selection, as explicit user preference.
 - Replacing `GameStatusResolver` for sports. GSR retains its role for live/post-game state transitions in sports markets.
 - UI work beyond the tree screen and commit-popup (e.g., no monitoring-screen redesign, no settings-screen revamp beyond adding tree-settings access).
-- Migrating historical data. No `selections.json` exists today; new file is created empty on first tree-mode start.
+- Migrating historical data. `games_full.json` already exists; schema gains one optional field (`source`). `tree_metadata.json` is created empty on first write.
 
 ## Design
 
 ### 1. Architecture
 
-Four new components plus rewires to three existing ones.
+Three new components plus rewires to two existing ones.
 
 **New components:**
 
@@ -65,14 +65,15 @@ Four new components plus rewires to three existing ones.
 |---|---|---|
 | `DiscoveryService` | `src/talos/discovery.py` | Kalshi discovery cache (categories, series, events). Background refresh loops. Dedicated `asyncio.Semaphore(5)`. |
 | `MilestoneResolver` | `src/talos/milestones.py` | Paginated `/milestones` ingest. In-memory index keyed by `event_ticker`. Atomic-swap refresh. |
-| `SelectionStore` | `src/talos/selection_store.py` | Persists leaf-level selections to `brain/selections.json`. Emits add/remove events. |
-| `TreeScreen` | `src/talos/ui/tree_screen.py` | Textual screen: tree render, tickboxes, filter, keybindings, commit-popup. |
+| `TreeMetadataStore` | `src/talos/tree_metadata.py` | Persists **event-level** metadata (first-seen, reviewed-at, manual_event_start, deliberately-unticked set) to `tree_metadata.json`. Does NOT store pair selections — those live in `games_full.json`. |
+| `TreeScreen` | `src/talos/ui/tree_screen.py` | Textual screen: tree render, tickboxes, filter, keybindings, commit-popup. Owns **in-memory** staged tick/untick changes until commit. |
 
 **Modified components:**
 
-- `GameManager` — loses `scan_events()`, `DEFAULT_NONSPORTS_CATEGORIES`, `_nonsports_max_days`, hardcoded `volume_24h > 0` checks. Gains `_on_selection_added` / `_on_selection_removed` handlers, `_winding_down` set, and inventory-aware removal.
-- `Engine._check_exit_only` — replaced with resolver cascade (manual → milestone → sports GSR → nothing). `_expiration_fallback` path deleted.
+- `Engine` — owns the monitored-pair lifecycle (existing). Gains two new entry points: `add_pairs_from_selection(records)` and `remove_pairs_from_selection(pair_tickers)`. Each handles the full orchestration that today's `add_games` / `remove_game` (at [engine.py:2839](src/talos/engine.py:2839) and [engine.py:2940](src/talos/engine.py:2940)) already performs — GameManager wiring, adjuster ledger creation/removal, GSR wiring, data_collector logging, and persistence via the existing `save_games_full()` ([persistence.py:84](src/talos/persistence.py:84)). Also gains the new resolver cascade in `_check_exit_only` (manual → milestone → sports GSR → nothing). `_expiration_fallback` call is deleted.
+- `GameManager` — loses `scan_events()`, `DEFAULT_NONSPORTS_CATEGORIES`, `_nonsports_max_days`, hardcoded `volume_24h > 0` checks. Engine gains a `_winding_down` set and inventory-aware removal behavior (invoked from Engine entry points, not from direct store events). `GameManager`'s public API is unchanged.
 - `GameStatusResolver` — narrowed to sports live/post signals. Scheduling role transferred to `MilestoneResolver`. `estimate_start_time` retained as a library utility.
+- `persistence.py` — `save_games_full` / `load_saved_games_full` unchanged in shape. The games_full record schema gains an optional `source` field (observability only; engine treats all persisted entries identically). No new persistence file under `brain/` — all runtime state stays under `get_data_dir()`.
 - `automation_config.py` — gains startup/discovery settings; keeps `exit_only_minutes` single value.
 
 **Data flow:**
@@ -81,65 +82,86 @@ Four new components plus rewires to three existing ones.
 DiscoveryService ──polls──► Kalshi REST API
       │ cached snapshot
       ▼
-TreeScreen ──reads──► MilestoneResolver
-      │ tick/untick/commit
+TreeScreen ─────reads─────► MilestoneResolver
+      │                    TreeMetadataStore (for event metadata/overrides)
+      │
+      │ staged changes held in memory until commit
+      │
+      │ on commit:
       ▼
-SelectionStore ──events──► GameManager ──► Scanner + Feeds
-  (brain/selections.json)
+Engine.add_pairs_from_selection / Engine.remove_pairs_from_selection
+      │
+      ├──► GameManager (feeds + scanner)
+      ├──► BidAdjuster (ledger)
+      ├──► GameStatusResolver (GSR wiring)
+      ├──► DataCollector (replay log)
+      └──► persistence.save_games_full() ──► games_full.json
+                                              (single source of truth for
+                                               "what Talos monitors")
 
-Engine._check_exit_only ──reads──► MilestoneResolver + SelectionStore (manual overrides)
+Engine._check_exit_only reads:
+  TreeMetadataStore.manual_event_start(kalshi_event_ticker)
+  MilestoneResolver.event_start(kalshi_event_ticker)
+  GameStatusResolver.get(event_ticker)
 ```
+
+Key invariant: `games_full.json` is the single persistent record of monitored pairs. There is no separate `selections.json`. Committing a tree selection writes to `games_full.json` via the existing persistence path; unticking removes from the same file (after winding-down completes).
 
 ### 2. Data model
 
-#### 2.1 Selection state — `brain/selections.json`
+#### 2.1 Pair persistence — existing `games_full.json` (extended minimally)
 
-Leaf-level only. A tick at series or category level in the UI expands to individual event entries before persisting. No hierarchical memory of "intent to monitor series X."
+Selections at the persistence layer are **ArbPair records**, not events. This matches the actual monitored-pair identity the engine creates today. See §10 for the rationale.
+
+Existing schema (from [persistence.py:84](src/talos/persistence.py:84) + [game_manager.py:459 `restore_game`](src/talos/game_manager.py:459)):
+
+```json
+[
+  {
+    "talos_id": 1,
+    "event_ticker": "KXFEDMENTION-26APR-YIEL",
+    "ticker_a": "KXFEDMENTION-26APR-YIEL",
+    "ticker_b": "KXFEDMENTION-26APR-YIEL",
+    "side_a": "yes",
+    "side_b": "no",
+    "kalshi_event_ticker": "KXFEDMENTION-26APR",
+    "series_ticker": "KXFEDMENTION",
+    "fee_type": "quadratic_with_maker_fees",
+    "fee_rate": 0.0175,
+    "close_time": "2026-04-30T14:00:00Z",
+    "expected_expiration_time": "2026-04-29T14:00:00Z",
+    "sub_title": "On Apr 29, 2026",
+    "label": "Powell April press",
+
+    "source": "tree"
+  }
+]
+```
+
+**Schema extension (minimal):**
+
+- **`source`** (string, optional) — provenance tag. Values: `"tree"` (added via tree commit), `"manual_url"` (added via URL paste/command), `"restore"` (reconstituted at startup), `"migration"` (seeded during Phase 3 flag-flip migration). Engine does **not** branch on this field. It is observability / audit only.
+
+No new persistence file for selections. Legacy records without `source` are read as having `source = null`; engine behavior is identical.
+
+**Pair shape recap by event type:**
+
+| Event type | Records in games_full | Shape |
+|---|---|---|
+| Sports (e.g., NHL game) | 1 per event | `event_ticker == kalshi_event_ticker`, `ticker_a != ticker_b` (cross-NO arb on the two markets) |
+| Non-sports, 1 active market | 1 per market | `event_ticker == ticker_a == ticker_b == market_ticker`, `kalshi_event_ticker` different (YES/NO self-arb) |
+| Non-sports, N active markets | up to N per event | One record per market; all share the same `kalshi_event_ticker`; each pair has `event_ticker == its_own_market_ticker` |
+
+For `KXFEDMENTION-26APR` with 46 markets where the user ticks 5, five records are persisted — each with the same `kalshi_event_ticker` but different market-level `event_ticker`s.
+
+#### 2.2 Event-level metadata — new `tree_metadata.json` under `get_data_dir()`
+
+Event-level tracking and overrides that don't belong on a per-pair record. Keyed by `kalshi_event_ticker` (not pair ticker) because these are decisions about the underlying event, not the arbitrage instrument.
 
 ```json
 {
   "version": 1,
   "updated_at": "2026-04-16T19:42:11Z",
-  "selections": [
-    {
-      "event_ticker": "KXFEDMENTION-26APR",
-      "series_ticker": "KXFEDMENTION",
-      "category": "Mentions",
-      "selected_at": "2026-04-15T20:00:00Z",
-      "markets": ["KXFEDMENTION-26APR-YIEL", "KXFEDMENTION-26APR-TRAD"]
-    },
-    {
-      "event_ticker": "KXEARNINGSMENTIONJPM-26APR14",
-      "series_ticker": "KXEARNINGSMENTIONJPM",
-      "category": "Mentions",
-      "selected_at": "2026-04-14T08:00:00Z",
-      "markets": null
-    }
-  ]
-}
-```
-
-`markets: null` means "all active markets on this event" (today's `add_game` default behavior). `markets: [list]` means only the specified markets.
-
-Rationale for leaf-level: matches "manual-only, no auto-subscribe." A new event appearing in a ticked series is NOT auto-selected — it renders as `[ ]` with a `·NEW` badge, awaiting explicit review.
-
-#### 2.2 Tree settings — `brain/tree_settings.json`
-
-User-tunable via the tree screen. Separate file from selections because change cadence differs (settings: occasional; selections: per-commit).
-
-```json
-{
-  "version": 1,
-  "excluded_categories": ["Sports", "Entertainment"],
-  "min_volume_24h": 100,
-  "min_open_interest": 0,
-  "max_spread_cents": 99,
-  "hide_events_past_close": true,
-
-  "manual_event_start": {
-    "KXSURVIVORMENTION-26APR23": "2026-04-22T20:00:00-04:00",
-    "KXSNLMENTION-26APR25": "none"
-  },
 
   "event_first_seen": {
     "KXTRUMPMENTION-26APR18": "2026-04-16T18:32:00Z"
@@ -148,11 +170,14 @@ User-tunable via the tree screen. Separate file from selections because change c
     "KXTRUMPMENTION-26APR15": "2026-04-13T09:32:11Z"
   },
 
-  "ui_state": {
-    "expanded_categories": ["Politics", "Companies"],
-    "expanded_series": ["KXEARNINGSMENTION", "KXTRUMPMENTION"],
-    "last_refresh": "2026-04-16T19:42:11Z"
-  }
+  "manual_event_start": {
+    "KXSURVIVORMENTION-26APR23": "2026-04-22T20:00:00-04:00",
+    "KXSNLMENTION-26APR25": "none"
+  },
+
+  "deliberately_unticked": [
+    "KXTRUMPMENTION-26APR17"
+  ]
 }
 ```
 
@@ -161,7 +186,50 @@ User-tunable via the tree screen. Separate file from selections because change c
 - `"none"` — explicit user opt-out from exit-only for this event.
 - Missing key — no manual override; resolver cascade consults milestone/GSR.
 
-Filter settings (`excluded_categories`, `min_volume_24h`, etc.) affect **tree rendering only**. They do not auto-remove entries from `selections.json`. A selected event that falls below `min_volume_24h` keeps being monitored; the filter just hides it from the tree view.
+`deliberately_unticked` is the set that renders as `[·]` in the tree (as opposed to `[ ]` for never-ticked). Events drop out of this set only when Kalshi changes their status to closed/finalized.
+
+**Rationale for a sidecar file** (rather than folding into games_full.json): these entries describe events the user may not be actively monitoring. `manual_event_start` for KXSURVIVORMENTION-26APR23 should persist even after the user unticks it, so re-ticking later doesn't lose the override. `deliberately_unticked` entries have no corresponding games_full record by definition.
+
+#### 2.3 Tree UI settings — new `tree` sub-object under existing `settings.json`
+
+Settings live in the same `settings.json` ([persistence.py:50](src/talos/persistence.py:50)) as other UI prefs. A new sub-object isolates tree-specific keys:
+
+```json
+{
+  "...existing_keys": "...",
+  "tree": {
+    "excluded_categories": ["Sports", "Entertainment"],
+    "min_volume_24h": 100,
+    "min_open_interest": 0,
+    "max_spread_cents": 99,
+    "hide_events_past_close": true,
+    "ui_state": {
+      "expanded_categories": ["Politics", "Companies"],
+      "expanded_series": ["KXEARNINGSMENTION", "KXTRUMPMENTION"],
+      "last_refresh": "2026-04-16T19:42:11Z"
+    }
+  }
+}
+```
+
+Missing `tree` sub-object → defaults. Legacy settings.json files load identically.
+
+Filter settings (`excluded_categories`, `min_volume_24h`, etc.) affect **tree rendering only**. They do not auto-remove entries from `games_full.json`. A selected pair whose market falls below `min_volume_24h` keeps being monitored; the filter just hides it from the tree view.
+
+#### 2.4 Staged (uncommitted) tree edits — in-memory only
+
+TreeScreen holds staged tick/untick changes in process memory (not persisted). Structure:
+
+```python
+class StagedChanges:
+    to_add: list[ArbPairRecord]      # pair records to pass to Engine.add_pairs_from_selection
+    to_remove: list[str]             # pair tickers to remove
+    to_set_unticked: list[str]       # event tickers to mark deliberately_unticked
+    to_clear_unticked: list[str]     # event tickers to clear from deliberately_unticked
+    to_set_manual_start: dict[str, str]   # kalshi_event_ticker -> ISO datetime or "none"
+```
+
+Cleared on commit success. Preserved across tree screen push/pop within the same session. Lost on process exit — any unfinalized edits must be re-done after restart. Footer shows `* N changes pending` when non-empty.
 
 #### 2.3 Discovery cache — in-memory only
 
@@ -378,7 +446,7 @@ Expanding the "hidden" row inlines them below, individually tickable.
 - `event_reviewed_at[ticker]` — written when user expands the event OR ticks it.
 - An event is NEW iff `first_seen_at is set AND reviewed_at is unset`.
 - Propagation: SeriesNode is NEW iff any descendant is NEW. CategoryNode is NEW iff any descendant series is NEW.
-- Fields persist in `tree_settings.json`.
+- Fields persist in `tree_metadata.json` (see §2.2).
 
 #### 4.6 Commit flow
 
@@ -449,85 +517,177 @@ While unresolved, the **manual entry remains active**. User's explicit decision 
 
 ### 5. Integration with existing systems
 
-#### 5.1 SelectionStore ↔ GameManager
+#### 5.1 Commit flow — TreeScreen ↔ Engine
 
-`SelectionStore` emits `selection_added(event_ticker, markets)` and `selection_removed(event_ticker)`.
+Engine owns the monitored-pair lifecycle. TreeScreen commits push staged changes through two new Engine entry points, which orchestrate the same add/remove steps that today's `add_games` ([engine.py:2839](src/talos/engine.py:2839)) and `remove_game` ([engine.py:2940](src/talos/engine.py:2940)) already perform.
 
 ```python
-async def _on_selection_added(self, event_ticker, markets):
+# TreeScreen.on_commit():
+async def on_commit(self):
+    staged = self._staged_changes
     try:
-        pair = await self.add_game(event_ticker)
-        if markets is not None:
-            # Filter subscriptions to selected markets only
-            await self._restrict_markets(pair, markets)
-    except Exception:
-        logger.warning("selection_add_failed", event_ticker=event_ticker, exc_info=True)
-        # Do NOT remove from SelectionStore. User intent stands; retry on next restart
-        # or manual refresh.
+        # 1. Validator — ensures all additions have a schedule source or manual override
+        needs_schedule = self._validate_schedules(staged.to_add)
+        if needs_schedule:
+            # Popup: user fills manual_event_start for each. Cancel aborts commit.
+            entries = await self._show_schedule_popup(needs_schedule)
+            if entries is None:
+                return   # user cancelled; staged preserved
+            staged.to_set_manual_start.update(entries)
 
-async def _on_selection_removed(self, event_ticker):
-    pair = self._games.get(event_ticker)
-    if pair is None:
-        return
-    ledger = self._engine.get_ledger(event_ticker)
-    if ledger and (ledger.has_filled_positions() or ledger.has_resting_orders()):
-        self._winding_down.add(event_ticker)
-        await self._engine.enforce_exit_only(event_ticker)
-        logger.info("winding_down_started", event_ticker=event_ticker,
-                    filled_a=ledger.filled_count(Side.A),
-                    filled_b=ledger.filled_count(Side.B))
-        return
-    await self.remove_game(event_ticker)
+        # 2. Write event-level metadata first (so resolver cascade sees overrides
+        #    before engine ever ticks for the new pairs)
+        if staged.to_set_manual_start or staged.to_set_unticked or staged.to_clear_unticked:
+            self._tree_metadata_store.apply(
+                manual_event_start=staged.to_set_manual_start,
+                set_unticked=staged.to_set_unticked,
+                clear_unticked=staged.to_clear_unticked,
+            )
+
+        # 3. Engine add/remove (engine handles full wiring + persistence)
+        if staged.to_add:
+            await self._engine.add_pairs_from_selection(staged.to_add)
+        if staged.to_remove:
+            await self._engine.remove_pairs_from_selection(staged.to_remove)
+
+        # 4. Clear staged state
+        self._staged_changes = StagedChanges.empty()
+    except Exception:
+        logger.exception("tree_commit_failed")
+        # Staged changes preserved for retry
 ```
 
-`_winding_down` set is checked each engine tick. When the ledger for a winding-down event clears, `remove_game` is called automatically and the event emits `winding_down_completed`.
+`Engine.add_pairs_from_selection(records)` is a new method that wraps the existing orchestration:
+
+```python
+async def add_pairs_from_selection(self, records: list[ArbPairRecord]) -> list[ArbPair]:
+    """Commit path for tree-selected pairs. Full engine wiring + persistence."""
+    pairs: list[ArbPair] = []
+    for r in records:
+        try:
+            # Reconstitute pair through the existing restore pathway, stamping source
+            pair = self._game_manager.restore_game({**r, "source": "tree"})
+            if pair is None:
+                continue
+            self._adjuster.add_event(pair)
+            if self._game_status_resolver is not None:
+                self._game_status_resolver.set_expiration(
+                    pair.event_ticker, pair.expected_expiration_time
+                )
+            await self._feed.subscribe(pair.ticker_a)
+            if pair.ticker_b != pair.ticker_a:
+                await self._feed.subscribe(pair.ticker_b)
+            if self._data_collector is not None:
+                self._data_collector.log_game_add(
+                    event_ticker=pair.event_ticker,
+                    series_ticker=pair.series_ticker,
+                    source="tree",
+                    ticker_a=pair.ticker_a,
+                    ticker_b=pair.ticker_b,
+                    fee_type=pair.fee_type,
+                    fee_rate=pair.fee_rate,
+                    scheduled_start=self._resolve_event_start_iso(pair),
+                )
+            pairs.append(pair)
+        except Exception:
+            logger.warning("tree_add_failed",
+                           pair_ticker=r.get("event_ticker"), exc_info=True)
+    # Persist updated games_full after full batch succeeds
+    self._persist_active_games()
+    return pairs
+```
+
+`Engine.remove_pairs_from_selection(pair_tickers)` mirrors this with inventory awareness:
+
+```python
+async def remove_pairs_from_selection(self, pair_tickers: list[str]) -> None:
+    for pt in pair_tickers:
+        pair = self._game_manager.get_game(pt)
+        if pair is None:
+            continue
+
+        # Inventory check — invariant #2 from §1
+        ledger = self._adjuster.get_ledger(pt)
+        if ledger and (ledger.has_filled_positions() or ledger.has_resting_orders()):
+            self._winding_down.add(pt)
+            await self.enforce_exit_only(pt)
+            logger.info("winding_down_started",
+                        pair_ticker=pt,
+                        filled_a=ledger.filled_count(Side.A),
+                        filled_b=ledger.filled_count(Side.B))
+            # Do NOT remove from games_full yet — it comes out when ledger clears.
+            continue
+
+        # Clean removal: reverse of add_pairs_from_selection
+        self._exit_only_events.discard(pt)
+        self._stale_candidates.discard(pt)
+        if self._game_status_resolver is not None:
+            self._game_status_resolver.remove(pt)
+        self._adjuster.remove_event(pt)
+        await self._game_manager.remove_game(pt)
+
+    self._persist_active_games()
+```
+
+`_winding_down` is checked each engine tick. When a pair's ledger clears, the engine calls `remove_pairs_from_selection` with that single ticker and it proceeds to clean removal + persistence update.
+
+`_persist_active_games()` is a small helper that calls `save_games_full(records_from_current_active_pairs)` — reuses the existing persistence function. Persistence happens at the end of each add/remove batch, not per-pair, to minimize disk I/O.
 
 #### 5.2 Engine._check_exit_only cascade
+
+The cascade resolves per **Kalshi event ticker**, not per pair. For non-sports multi-market events, this means all pairs sharing a `kalshi_event_ticker` resolve to the same event-start time (one decision per underlying event, applied to all its market-pairs).
 
 ```python
 def _check_exit_only(self):
     now = datetime.now(UTC)
+    seen_events: set[str] = set()      # dedupe — one decision per kalshi_event_ticker
     for pair in self._scanner.pairs:
-        event = pair.event_ticker
-        if event in self._exit_only_events:
+        # The "key" for scheduling is the underlying Kalshi event, not the pair
+        key = pair.kalshi_event_ticker or pair.event_ticker
+        if key in seen_events:
+            continue
+        seen_events.add(key)
+
+        if pair.event_ticker in self._exit_only_events:
             continue
 
-        start_time, source = self._resolve_event_start(event)
+        start_time, source = self._resolve_event_start(key, pair)
 
         if source == "manual_opt_out":
             continue
 
         if source is None:
-            self._log_once("exit_only_no_schedule", event=event)
+            self._log_once("exit_only_no_schedule", event=key)
             continue
 
         # Sports GSR supplies live/post state transitions
         if source == "sports_gsr":
-            gs = self._gsr.get(event)
-            if gs.state in ("live", "post"):
-                self._flip_exit_only(event, reason=f"sports_{gs.state}")
+            gs = self._game_status_resolver.get(key)
+            if gs and gs.state in ("live", "post"):
+                self._flip_exit_only_for_key(key, reason=f"sports_{gs.state}")
                 continue
 
         # Preemptive lead-time trigger
         lead_min = self._auto_config.exit_only_minutes
         if (start_time - now).total_seconds() < lead_min * 60:
-            self._flip_exit_only(event, reason=source, scheduled_start=start_time)
+            self._flip_exit_only_for_key(key, reason=source, scheduled_start=start_time)
 
-def _resolve_event_start(self, event) -> tuple[datetime | None, str | None]:
-    # 1. Manual override (user owns this)
-    manual = self._selection_store.manual_event_start(event)
+def _resolve_event_start(self, kalshi_event_ticker: str, pair: ArbPair
+                         ) -> tuple[datetime | None, str | None]:
+    # 1. Manual override (user owns this) — keyed by Kalshi event ticker
+    manual = self._tree_metadata_store.manual_event_start(kalshi_event_ticker)
     if manual == "none":
         return (None, "manual_opt_out")
     if manual is not None:
         return (manual, "manual")
 
-    # 2. Kalshi milestone
-    ms = self._milestone_resolver.event_start(event)
+    # 2. Kalshi milestone — keyed by Kalshi event ticker
+    ms = self._milestone_resolver.event_start(kalshi_event_ticker)
     if ms is not None:
         return (ms, "milestone")
 
-    # 3. Sports GSR
-    gs = self._gsr.get(event)
+    # 3. Sports GSR — keyed by event ticker (sports pairs: event_ticker == kalshi_event_ticker)
+    gs = self._game_status_resolver.get(pair.event_ticker)
     if gs and gs.scheduled_start:
         return (gs.scheduled_start, "sports_gsr")
 
@@ -535,38 +695,51 @@ def _resolve_event_start(self, event) -> tuple[datetime | None, str | None]:
     return (None, None)
 ```
 
+`_flip_exit_only_for_key(key, ...)` flips all pairs whose `kalshi_event_ticker == key` into exit-only simultaneously. Ensures the 46 market-pairs of a Fed presser all gate together, not one at a time.
+
 `exit_only_minutes` stays as a single global setting (default 30.0). Applied uniformly across resolver sources.
 
 #### 5.3 Startup sequence — safety-first gate
 
+Uses the existing restoration path. `load_saved_games_full()` returns the pair records; `GameManager.restore_game()` already reconstitutes each pair without REST calls; Engine performs the same orchestration (adjuster wiring, GSR wiring, feed subs) as at runtime.
+
 ```
 t=0.0   Process starts
-t=0.1   selections.json + tree_settings.json loaded
-t=0.5   SelectionStore restores pairs (GameManager.add_game loop, background)
-t=0.5   DiscoveryService + MilestoneResolver start
+t=0.1   settings.json + tree_metadata.json loaded
+        TreeMetadataStore armed with manual_event_start overrides
+t=0.2   load_saved_games_full() returns pair records
+t=0.2   For each record: GameManager.restore_game() + engine wiring (background task)
+t=0.2   DiscoveryService + MilestoneResolver start (background task)
 t=2-5   Milestones fully loaded
+t=2-5   Pair restoration complete (runs parallel with milestone load)
 t=5     Engine begins tick loop — all resolvers armed
 t=30    Hard cap: if milestones still not loaded, Engine starts with red
-        warning banner (exit-only scheduling degraded) and logs.
+        warning banner (exit-only scheduling degraded) and logs. Manual overrides
+        still work (they loaded at t=0.1).
 ```
 
 Engine does not begin the trading loop until either (a) `milestones_ready` emits, or (b) 30-second fallback expires. Hard cap avoids deadlock on Kalshi outages.
 
 Rationale for Option B over Option A (proceed immediately): Principle "Safety over speed" — a ~5-second startup delay is recoverable; trading without an armed resolver cascade is not. See `brain/principles.md`.
 
+**Critical ordering:** TreeMetadataStore loads **before** any pair is added to the Engine. This ensures that when the first `_check_exit_only` tick runs, `manual_event_start` overrides are visible — so a restart 2 minutes before KXSURVIVORMENTION's 8 PM airtime correctly fires exit-only rather than falling through to milestone (which Kalshi doesn't curate) and then to sports GSR (which doesn't match) and finally to "no schedule."
+
 #### 5.4 Deletions
 
 | Code | Fate |
 |---|---|
-| `GameManager.scan_events()` | Deleted in Phase 5. |
-| `DEFAULT_NONSPORTS_CATEGORIES` | Deleted. Tree filters replace. |
+| `GameManager.scan_events()` ([game_manager.py:657](src/talos/game_manager.py:657)) | Deleted in Phase 5. |
+| `DEFAULT_NONSPORTS_CATEGORIES` constant | Deleted. Tree filters replace. |
 | `_nonsports_max_days` | Deleted. No close-time window gate. |
-| `volume_24h > 0` hardcodes (`game_manager.py:559, 694`) | Deleted. `min_volume_24h` tree setting applies at discovery. GameManager trusts SelectionStore. |
+| `volume_24h > 0` hardcodes ([game_manager.py:559](src/talos/game_manager.py:559) and [game_manager.py:694](src/talos/game_manager.py:694)) | Deleted. `min_volume_24h` tree setting applies at discovery (rendering filter). Engine trusts records from games_full.json. |
 | `SPORTS_SERIES` list | Retained, but narrowed role — sports live/post resolution only, not discovery. |
-| `_expiration_fallback` in `GameStatusResolver` | Deleted. `estimate_start_time` retained as library utility. |
+| `_expiration_fallback` path in `GameStatusResolver` | Deleted. `estimate_start_time` retained as library utility for possible future use. |
 | Engine's scheduled call to `scan_events()` | Deleted from refresh loop. |
+| Engine's current `add_games(urls, source="scan")` auto-scan callers | Retained (manual URL add-by-paste), deleted from scheduler. |
 
 ### 6. Settings inventory
+
+Four surfaces, clean ownership. No new files under `brain/`.
 
 #### 6.1 `automation_config.py` additions
 
@@ -582,19 +755,33 @@ discovery_concurrent_limit: int = 5                  # DiscoveryService semaphor
 milestone_refresh_seconds: float = 300.0             # 5 min default
 ```
 
-#### 6.2 Tree settings (JSON, see §2.2)
+#### 6.2 `games_full.json` (runtime persistence, `get_data_dir()`)
 
-Changes via TreeScreen settings panel. Occasional cadence.
+**Existing file, unchanged in shape.** Gains optional `source` field (see §2.1). Canonical "what Talos monitors" record. Written whenever the active pair set changes (add/remove batch).
 
-#### 6.3 Selection state (JSON, see §2.1)
+#### 6.3 `tree_metadata.json` (NEW, `get_data_dir()`)
 
-Changes via TreeScreen commit. Per-commit cadence.
+Event-level tracking and overrides. See §2.2. Change cadence: per-commit for `manual_event_start`, per-expand for `event_reviewed_at`, occasional for `deliberately_unticked`.
 
-#### 6.4 Principles.md addition
+#### 6.4 `settings.json` `tree` sub-object (existing file, extended)
+
+Tree UI filter prefs. See §2.3. Change cadence: occasional (user edits filters).
+
+#### 6.5 `brain/principles.md` addition
 
 New principle to be landed alongside Phase 1 scaffold. Working text (to be refined at write time):
 
 > **Principle N: Safety over speed.** When trading and scheduling decisions are time-sensitive, prefer delay or pause over proceeding on incomplete data. A five-second delayed decision is recoverable; a decision made with stale or missing data is not. This applies to startup sequencing, resolver cascades, milestone conflicts, and any path where "trade now" competes with "verify first."
+
+#### 6.6 File ownership summary
+
+| File | Location | Owner | Change cadence |
+|---|---|---|---|
+| `automation_config.py` | source | code | rare (code review) |
+| `games_full.json` | `get_data_dir()` | Engine (via existing persistence) | per add/remove batch |
+| `tree_metadata.json` | `get_data_dir()` | TreeMetadataStore | per-commit / per-expand |
+| `settings.json` | `get_data_dir()` | existing settings layer | occasional |
+| `brain/principles.md` | repo | human | rare |
 
 ### 7. Migration plan
 
@@ -607,7 +794,7 @@ New principle to be landed alongside Phase 1 scaffold. Working text (to be refin
 
 #### 7.2 Phases
 
-**Phase 1 — Scaffold.** Land new components (DiscoveryService, MilestoneResolver, SelectionStore, TreeScreen) and resolver cascade behind the flag. Add principle to `brain/principles.md`. Unit tests per module. Flag defaults `False`; normal sessions see no behavior change.
+**Phase 1 — Scaffold.** Land new components (DiscoveryService, MilestoneResolver, TreeMetadataStore, TreeScreen), the two new Engine entry points (`add_pairs_from_selection`, `remove_pairs_from_selection`), and the resolver cascade — all behind the flag. Extend `games_full.json` schema with optional `source` field. Add principle to `brain/principles.md`. Unit tests per module. Flag defaults `False`; normal sessions see no behavior change.
 
 **Phase 2 — Dogfood.** Flip `tree_mode = True` locally. Tick a handful of representative events (one covered milestone, one uncovered, one sports, one earnings). Verify: milestone loading, resolver cascade, commit popup, conflict prompt, winding-down.
 
@@ -619,13 +806,17 @@ New principle to be landed alongside Phase 1 scaffold. Working text (to be refin
 
 #### 7.3 State migration
 
-No existing state to migrate. `selections.json` and `tree_settings.json` created empty on first Phase 2 start.
+Talos already persists active pairs via `games_full.json`. The migration is **schema-additive only** — new optional `source` field; no file moves; no data transform.
 
-Active `_games` in GameManager at flag-flip time: auto-seeded into SelectionStore as the initial selection set (one-time, on first tree_mode start). Prevents losing active monitoring state when switching modes.
+- **First Phase 2 start with `tree_mode = True`:** existing `games_full.json` records are read unchanged. Engine stamps `source = "migration"` on any record missing the field, so they're distinguishable in logs from new tree-added records. Pairs continue running without interruption.
+- **`tree_metadata.json`:** created empty on first write (first manual override, first tick marking review, or first deliberate untick).
+- **`settings.json` `tree` sub-object:** created on first save after a tree-settings edit. Absent → defaults apply.
+
+No existing state is moved, renamed, or reformatted. Rollback is a file-compatible no-op: legacy code paths read games_full.json identically regardless of the `source` field's presence.
 
 #### 7.4 Rollback
 
-Any phase: set `tree_mode = False`, restart. Old paths resume. `selections.json` untouched — next re-enable picks up where it left off.
+Any phase: set `tree_mode = False`, restart. Old paths resume. `games_full.json` is read unchanged by legacy code (the optional `source` field is ignored). `tree_metadata.json` stays on disk untouched — next re-enable picks up with all prior overrides intact.
 
 Catastrophic bug discovered after Phase 5 cleanup: `git revert` of the cleanup commit restores legacy paths verbatim.
 
@@ -634,7 +825,8 @@ Catastrophic bug discovered after Phase 5 cleanup: `git revert` of the cleanup c
 **Unit tests:**
 - `DiscoveryService`: mocked httpx, pagination, error handling, semaphore bounds.
 - `MilestoneResolver`: index building, atomic replace, refresh loop.
-- `SelectionStore`: persistence round-trip, event emission, three-state computation.
+- `TreeMetadataStore`: persistence round-trip for manual overrides / first-seen / reviewed-at / deliberately-unticked set.
+- Tree commit path: staged changes → Engine.add_pairs_from_selection / remove_pairs_from_selection → games_full.json updated + full engine wiring (adjuster, GSR, data_collector).
 - `Engine._resolve_event_start`: cascade order, each branch, manual opt-out, missing schedule.
 - Schedule conflict detection: threshold edge cases, time-zone correctness.
 
@@ -672,6 +864,33 @@ logger.info("tree_manual_refresh", elapsed_s=...)
 ```
 
 All route to the existing `data_collector` replay log. Post-hoc analysis (as was used to diagnose SURVIVOR) remains straightforward.
+
+## 10. Persistence identity — why leaves are pairs, not events
+
+The tree UI thinks in terms of **events** — that's how humans reason about Kalshi markets ("the Fed presser," "the Survivor episode"). But the engine's real unit of monitoring is the **ArbPair**, and a single Kalshi event can produce multiple independent pairs.
+
+**Current engine model** (unchanged by this design):
+
+- **Sports events** → exactly one `ArbPair` per event (cross-NO arb on the two markets). `event_ticker == kalshi_event_ticker`, `ticker_a != ticker_b`.
+- **Non-sports with 1 market** → one `ArbPair` where `event_ticker == ticker_a == ticker_b == market_ticker`, sides are "yes"/"no" (YES/NO self-arb). `kalshi_event_ticker` stored as separate metadata.
+- **Non-sports with N markets** → up to N independent `ArbPair`s. Each has `event_ticker == its_own_market_ticker`. All share the same `kalshi_event_ticker`.
+
+**Persistence is keyed by `event_ticker` (the pair identity)**, not by `kalshi_event_ticker`. This is how `games_full.json` has worked since it was introduced; any scanner/adjuster/ledger lookup goes through the pair's `event_ticker`.
+
+**What this design does:**
+
+- **Leaf selections persist as pair records** — one record per ArbPair — in the existing `games_full.json`. No new persistence layer, no new identity model.
+- **Tree UI presents an event-centric view** — the expandable "event" node is a convenience grouping. Expanding shows the markets underneath (which correspond 1:1 with pairs for non-sports, or a single pair for sports).
+- **Ticking an event at event-level is syntactic sugar** for "tick all its active markets." The commit fans out to N pair records.
+- **Event-level metadata** (`manual_event_start`, `first_seen`, `reviewed_at`, `deliberately_unticked`) is keyed by `kalshi_event_ticker` — because these decisions are about the underlying event, and should apply uniformly to all pairs sharing that event.
+
+**What this design does NOT do:**
+
+- Introduce a new "MonitoredEvent" entity that contains multiple child pairs.
+- Rewrite the scanner, adjuster, or ledger to operate at event level.
+- Change how `add_game` / `remove_game` / `restore_game` work internally.
+
+The net effect: UI is event-centric; persistence is pair-centric; the engine is unchanged. Codex-surfaced concern addressed.
 
 ## Open questions deferred to implementation
 
