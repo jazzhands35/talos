@@ -462,18 +462,29 @@ class TalosApp(App):
 
         t_fetch = _time.perf_counter()
         await self._discovery_service.bootstrap()
+        series_ms = int((_time.perf_counter() - t_fetch) * 1000)
+        series_count = sum(c.series_count for c in self._discovery_service.categories.values())
         _log.info(
             "tree_bootstrap_series_done",
-            elapsed_ms=int((_time.perf_counter() - t_fetch) * 1000),
-            series_count=sum(c.series_count for c in self._discovery_service.categories.values()),
+            elapsed_ms=series_ms,
+            series_count=series_count,
+        )
+        self.notify(
+            f"Series: {series_count} in {series_ms} ms",
+            severity="information",
         )
 
         t_ms = _time.perf_counter()
         await self._milestone_resolver.refresh()
+        ms_elapsed = int((_time.perf_counter() - t_ms) * 1000)
         _log.info(
             "tree_bootstrap_milestones_done",
-            elapsed_ms=int((_time.perf_counter() - t_ms) * 1000),
+            elapsed_ms=ms_elapsed,
             milestone_count=self._milestone_resolver.count,
+        )
+        self.notify(
+            f"Milestones: {self._milestone_resolver.count} in {ms_elapsed} ms",
+            severity="information",
         )
 
         if self._engine is not None:
