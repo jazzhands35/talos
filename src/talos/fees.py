@@ -1,29 +1,57 @@
 """Maker fee calculations for Kalshi NO+NO arbitrage.
 
-Kalshi uses a **quadratic** fee model:
-    fee_per_contract = no_price × (100 - no_price) × multiplier / 100
-Fees are charged at fill time, not settlement.
+Kalshi uses a **quadratic** fee model on game markets:
+    fee_per_contract_dollars = RATE × P × (1 − P)
+where P is the price in dollars (cents / 100). In cents-per-contract:
+    fee_cents = RATE × price_cents × (100 − price_cents) / 100
+
+The rate is a Kalshi-wide constant (see Kairos's KALSHI_FEES.md):
+    0.0175   — full rate (no rebate)
+    0.00875  — maker rebate rate (halve when enrolled)
+
+Fees are charged at fill time, not settlement. The ``Series.fee_multiplier``
+field from the Kalshi API is NOT a reliable source for the maker rate —
+Kalshi has been observed returning sentinel values like 1.0 on both
+``quadratic`` and ``quadratic_with_maker_fees`` series. Always use the
+constants below, gated by ``fee_type`` only to zero out fee-free markets.
 """
 
 from __future__ import annotations
 
-MAKER_FEE_RATE = 0.0175
+KALSHI_FEE_RATE = 0.0175
+KALSHI_MAKER_REBATE_RATE = 0.00875
+
+# Back-compat alias. Callers that expect the historical symbol keep working;
+# new code should use ``KALSHI_FEE_RATE`` or ``effective_fee_rate`` directly.
+MAKER_FEE_RATE = KALSHI_FEE_RATE
 
 
-def maker_fee_rate(fee_type: str, fee_multiplier: float) -> float:
-    """Derive the effective maker fee rate from series fee metadata.
+def effective_fee_rate(fee_type: str, *, maker_rebate: bool = False) -> float:
+    """Return the effective per-trade fee rate for a given ``fee_type``.
 
-    Kalshi fee_type semantics:
-    - "quadratic_with_maker_fees": fee_multiplier IS the maker rate (e.g., 0.0175)
-    - "quadratic": taker-only fees; fee_multiplier is the taker rate (1.0). Makers pay 0.
-    - "fee_free" / "no_fee": no fees for anyone
+    ``maker_rebate`` halves the rate for accounts enrolled in Kalshi's
+    maker rebate program. Defaults to the full rate.
     """
     if fee_type in ("fee_free", "no_fee"):
         return 0.0
-    if fee_type == "quadratic_with_maker_fees":
-        return fee_multiplier
-    # "quadratic" and others: maker fee is 0
-    return 0.0
+    return KALSHI_MAKER_REBATE_RATE if maker_rebate else KALSHI_FEE_RATE
+
+
+def coerce_persisted_fee_rate(fee_type: str, fee_rate: float) -> float:
+    """Heal previously persisted ``fee_rate`` values that predate the
+    ``effective_fee_rate`` cleanup.
+
+    Any cached rate that isn't one of the known Kalshi constants
+    (0, 0.00875, 0.0175) is treated as corrupt metadata and replaced with
+    the default for the given ``fee_type``.
+    """
+    if fee_rate in (0.0, KALSHI_MAKER_REBATE_RATE, KALSHI_FEE_RATE):
+        # Still validate against fee_type: a zero rate on a paying type
+        # is suspect and should round-trip to the default.
+        if fee_rate == 0.0 and fee_type not in ("fee_free", "no_fee"):
+            return effective_fee_rate(fee_type)
+        return fee_rate
+    return effective_fee_rate(fee_type)
 
 
 def quadratic_fee(no_price: int, *, rate: float = MAKER_FEE_RATE) -> float:

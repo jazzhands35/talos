@@ -11,7 +11,7 @@ from urllib.parse import urlparse
 import structlog
 
 from talos.errors import KalshiAPIError
-from talos.fees import maker_fee_rate
+from talos.fees import coerce_persisted_fee_rate, effective_fee_rate
 from talos.market_feed import MarketFeed
 from talos.models.market import Event, Market
 from talos.models.strategy import ArbPair
@@ -339,7 +339,7 @@ class GameManager:
         try:
             series = await self._rest.get_series(event.series_ticker)
             fee_type = series.fee_type
-            fee_rate = maker_fee_rate(series.fee_type, series.fee_multiplier)
+            fee_rate = effective_fee_rate(series.fee_type)
             logger.info(
                 "series_fee_info",
                 series=event.series_ticker,
@@ -421,7 +421,7 @@ class GameManager:
         try:
             series = await self._rest.get_series(event.series_ticker)
             fee_type = series.fee_type
-            fee_rate = maker_fee_rate(series.fee_type, series.fee_multiplier)
+            fee_rate = effective_fee_rate(series.fee_type)
         except Exception:
             logger.warning(
                 "series_fee_fetch_failed", series=event.series_ticker, exc_info=True,
@@ -513,7 +513,7 @@ class GameManager:
             kalshi_event_ticker=kalshi_event_ticker,
             series_ticker=series_ticker,
             fee_type=str(data.get("fee_type", "quadratic_with_maker_fees")),
-            fee_rate=maker_fee_rate(
+            fee_rate=coerce_persisted_fee_rate(
                 str(data.get("fee_type", "quadratic_with_maker_fees")),
                 float(data.get("fee_rate", 0.0175)),
             ),
