@@ -4,9 +4,9 @@ from __future__ import annotations
 
 import os
 import sys
+from io import StringIO
 from pathlib import Path
 from typing import TextIO
-from io import StringIO
 
 import structlog
 
@@ -254,11 +254,13 @@ def main() -> None:
     from talos.automation_config import DEFAULT_UNIT_SIZE, AutomationConfig
     from talos.bid_adjuster import BidAdjuster
     from talos.data_collector import DataCollector
+    from talos.discovery import DiscoveryService
     from talos.engine import TradingEngine
     from talos.game_manager import DEFAULT_NONSPORTS_CATEGORIES, GameManager
     from talos.game_status import GameStatusResolver
     from talos.lifecycle_feed import LifecycleFeed
     from talos.market_feed import MarketFeed
+    from talos.milestones import MilestoneResolver
     from talos.orderbook import OrderBookManager
     from talos.persistence import (
         load_saved_games,
@@ -276,6 +278,7 @@ def main() -> None:
     from talos.suggestion_log import SuggestionLog
     from talos.ticker_feed import TickerFeed
     from talos.top_of_market import TopOfMarketTracker
+    from talos.tree_metadata import TreeMetadataStore
     from talos.ui.app import TalosApp
     from talos.ws_client import KalshiWSClient
 
@@ -292,14 +295,29 @@ def main() -> None:
 
     _db_dir = get_data_dir()
     data_collector = DataCollector(_db_dir / "talos_data.db")
-    adjuster = BidAdjuster(
-        books, [], unit_size=unit_size, data_collector=data_collector
-    )
+    adjuster = BidAdjuster(books, [], unit_size=unit_size, data_collector=data_collector)
     portfolio_feed = PortfolioFeed(ws_client=ws)
     ticker_feed = TickerFeed(ws_client=ws)
     lifecycle_feed = LifecycleFeed(ws_client=ws)
     position_feed = PositionFeed(ws_client=ws)
     auto_config = AutomationConfig()
+
+    # Tree-mode collaborators (only constructed when tree_mode is enabled).
+    # DiscoveryService is kept on the app (not the engine) since only TreeScreen
+    # needs it; the engine only uses tree_metadata_store and milestone_resolver.
+    tree_metadata_store: TreeMetadataStore | None = None
+    milestone_resolver: MilestoneResolver | None = None
+    discovery_service: DiscoveryService | None = None
+
+    if auto_config.tree_mode:
+        tree_metadata_store = TreeMetadataStore()
+        tree_metadata_store.load()
+
+        milestone_resolver = MilestoneResolver()
+        discovery_service = DiscoveryService(
+            concurrent_limit=auto_config.discovery_concurrent_limit,
+        )
+
     nonsports_categories = settings.get("nonsports_categories", DEFAULT_NONSPORTS_CATEGORIES)
     nonsports_max_days = int(settings.get("nonsports_max_days", 7))  # type: ignore[arg-type]
     ticker_blacklist = settings.get("ticker_blacklist", [])
@@ -402,6 +420,8 @@ def main() -> None:
         game_status_resolver=game_status_resolver,
         data_collector=data_collector,
         settlement_cache=settlement_cache,
+        tree_metadata_store=tree_metadata_store,
+        milestone_resolver=milestone_resolver,
     )
 
     startup_execution_mode = str(settings.get("execution_mode", "automatic"))
@@ -435,6 +455,10 @@ def main() -> None:
         engine=engine,
         startup_execution_mode=startup_execution_mode,
         startup_auto_stop_hours=startup_auto_stop_hours,
+        automation_config=auto_config,
+        tree_metadata_store=tree_metadata_store,
+        milestone_resolver=milestone_resolver,
+        discovery_service=discovery_service,
     )
 
     # Restore persisted scan mode and wire persistence
@@ -461,9 +485,9 @@ def main() -> None:
 
         crash_log = get_data_dir() / "talos_crash.log"
         with open(crash_log, "a") as f:
-            f.write(f"\n{'='*60}\n")
+            f.write(f"\n{'=' * 60}\n")
             f.write(f"CRASH at {datetime.now(UTC).isoformat()}\n")
-            f.write(f"{'='*60}\n")
+            f.write(f"{'=' * 60}\n")
             traceback.print_exc(file=f)
         raise
 

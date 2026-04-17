@@ -20,12 +20,15 @@ from textual.widgets._data_table import CellDoesNotExist
 
 from talos.auto_accept import ExecutionMode
 from talos.auto_accept_log import AutoAcceptLogger
-from talos.automation_config import DEFAULT_UNIT_SIZE
+from talos.automation_config import DEFAULT_UNIT_SIZE, AutomationConfig
+from talos.discovery import DiscoveryService
 from talos.engine import TradingEngine
 from talos.errors import KalshiRateLimitError
+from talos.milestones import MilestoneResolver
 from talos.models.proposal import ProposalKey
 from talos.models.strategy import BidConfirmation
 from talos.scanner import ArbitrageScanner
+from talos.tree_metadata import TreeMetadataStore
 from talos.ui.event_review import EventReviewScreen
 from talos.ui.proposal_panel import ProposalPanel
 from talos.ui.screens import (
@@ -90,6 +93,10 @@ class TalosApp(App):
         scanner: ArbitrageScanner | None = None,
         startup_execution_mode: str = "automatic",
         startup_auto_stop_hours: float | None = None,
+        automation_config: AutomationConfig | None = None,
+        tree_metadata_store: TreeMetadataStore | None = None,
+        milestone_resolver: MilestoneResolver | None = None,
+        discovery_service: DiscoveryService | None = None,
     ) -> None:
         super().__init__()
         self._engine = engine
@@ -103,6 +110,11 @@ class TalosApp(App):
         self._rate_limit_until: datetime | None = None
         self._scan_mode: str = "sports"
         self.on_scan_mode_change: Callable[[str], None] | None = None
+        # Tree-mode collaborators (None unless automation_config.tree_mode is on).
+        self._automation_config = automation_config
+        self._tree_metadata_store = tree_metadata_store
+        self._milestone_resolver = milestone_resolver
+        self._discovery_service = discovery_service
 
     def compose(self) -> ComposeResult:
         yield Header()
@@ -162,6 +174,17 @@ class TalosApp(App):
             self._start_watchdog()
             self._poll_balance()  # show cash immediately
             self._refresh_volumes()  # populate 24h volume on startup
+            # Tree-mode background tasks: bootstrap discovery + run milestone
+            # refresh loop. Only launched when tree_mode is enabled and all
+            # collaborators are present.
+            if (
+                self._automation_config is not None
+                and self._automation_config.tree_mode
+                and self._discovery_service is not None
+                and self._milestone_resolver is not None
+            ):
+                self._bootstrap_tree_discovery()
+                self._run_tree_milestone_loop()
 
     # ── Engine callbacks ──────────────────────────────────────────
 
@@ -424,6 +447,31 @@ class TalosApp(App):
     async def _start_feed(self) -> None:
         if self._engine is not None:
             await self._engine.start_feed()
+
+    @work(thread=False)
+    async def _bootstrap_tree_discovery(self) -> None:
+        """Tree-mode: bootstrap discovery + initial milestone refresh, then
+        signal the engine that it is ready for trading."""
+        if self._discovery_service is None or self._milestone_resolver is None:
+            return
+        await self._discovery_service.bootstrap()
+        await self._milestone_resolver.refresh()
+        if self._engine is not None:
+            self._engine._ready_for_trading.set()
+
+    @work(thread=False)
+    async def _run_tree_milestone_loop(self) -> None:
+        """Tree-mode: periodic milestone refresh loop (runs until shutdown)."""
+        if (
+            self._discovery_service is None
+            or self._milestone_resolver is None
+            or self._automation_config is None
+        ):
+            return
+        await self._discovery_service.run_milestone_loop(
+            self._milestone_resolver,
+            interval_seconds=self._automation_config.milestone_refresh_seconds,
+        )
 
     @work(thread=False)
     async def _poll_balance(self) -> None:
