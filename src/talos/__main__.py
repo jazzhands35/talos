@@ -362,6 +362,12 @@ def main() -> None:
                 "series_ticker": p.series_ticker,
                 "talos_id": p.talos_id,
             }
+            # Phase 1: persist tree-mode durability fields.
+            # - source is observability only; write only when set.
+            # - engine_state is safety-critical; always write (default "active").
+            if p.source is not None:
+                entry["source"] = p.source
+            entry["engine_state"] = p.engine_state
             # Persist volume data so it's available instantly on restart
             vol_a = game_mgr.volumes_24h.get(p.ticker_a)
             vol_b = game_mgr.volumes_24h.get(p.ticker_b)
