@@ -138,11 +138,13 @@ Existing schema (from [persistence.py:84](src/talos/persistence.py:84) + [game_m
 ]
 ```
 
-**Schema extension (minimal):**
+**Schema extensions (minimal):**
 
 - **`source`** (string, optional) — provenance tag. Values: `"tree"` (added via tree commit), `"manual_url"` (added via URL paste/command), `"restore"` (reconstituted at startup), `"migration"` (seeded during Phase 3 flag-flip migration). Engine does **not** branch on this field. It is observability / audit only.
 
-No new persistence file for selections. Legacy records without `source` are read as having `source = null`; engine behavior is identical.
+- **`engine_state`** (string, optional) — persisted engine state for restart-safety. Values: `"active"` (default; absent field treated as this), `"winding_down"`, `"exit_only"`. Engine does branch on this during restore — see §5.1b for semantics.
+
+No new persistence file for selections. Legacy records without `source` or `engine_state` are read as having `source = null`, `engine_state = "active"`; engine behavior is identical to today.
 
 **Pair shape recap by event type:**
 
@@ -177,6 +179,10 @@ Event-level tracking and overrides that don't belong on a per-pair record. Keyed
 
   "deliberately_unticked": [
     "KXTRUMPMENTION-26APR17"
+  ],
+
+  "deliberately_unticked_pending": [
+    "KXFEDMENTION-26APR"
   ]
 }
 ```
@@ -186,7 +192,9 @@ Event-level tracking and overrides that don't belong on a per-pair record. Keyed
 - `"none"` — explicit user opt-out from exit-only for this event.
 - Missing key — no manual override; resolver cascade consults milestone/GSR.
 
-`deliberately_unticked` is the set that renders as `[·]` in the tree (as opposed to `[ ]` for never-ticked). Events drop out of this set only when Kalshi changes their status to closed/finalized.
+`deliberately_unticked` is the **applied** set that renders as `[·]` in the tree (as opposed to `[ ]` for never-ticked). Events drop out of this set only when Kalshi changes their status to closed/finalized.
+
+`deliberately_unticked_pending` is the **deferred** set — events the user unticked but whose `[·]` has not yet applied because some pairs are still winding down. Survives restart; entries promote into `deliberately_unticked` when the engine emits `event_fully_removed` (either mid-session or shortly after restart as ledgers clear). See §5.1b.
 
 **Rationale for a sidecar file** (rather than folding into games_full.json): these entries describe events the user may not be actively monitoring. `manual_event_start` for KXSURVIVORMENTION-26APR23 should persist even after the user unticks it, so re-ticking later doesn't lose the override. `deliberately_unticked` entries have no corresponding games_full record by definition.
 
@@ -643,6 +651,10 @@ async def on_commit(self):
 
 `Engine.add_pairs_from_selection(records)` mirrors today's `add_games` orchestration exactly (see [engine.py:2839](src/talos/engine.py:2839)). Every step of today's URL-add path is preserved, including the critical `resolve_batch()` call that today populates GSR state for newly-added sports pairs:
 
+**On batch atomicity and the `on_change` callback.** Today's `GameManager.restore_game()` fires `self.on_change()` on every pair add ([game_manager.py:528](src/talos/game_manager.py:528)), and `__main__.py` wires `on_change` to `save_games_full()` ([__main__.py:345](src/talos/__main__.py:345)). If the commit path called `restore_game` in a loop without suppressing this, `games_full.json` would be rewritten N times during an N-pair batch, with partial batch states visible to any concurrent reader (and to a crash mid-batch). The spec requires batch-final persistence; the implementation must suppress the per-pair callback during batch commits.
+
+Proposed mechanism: add a small context manager on GameManager that pauses `on_change` emission. The Engine batch paths wrap the restore loop in it; persistence is called exactly once at batch end. Non-batch callers (URL-add via `Engine.add_games`, manual clear-all, etc.) are unaffected — they keep firing on_change per-pair as today.
+
 ```python
 async def add_pairs_from_selection(
     self, records: list[ArbPairRecord]
@@ -654,16 +666,21 @@ async def add_pairs_from_selection(
     """
     pairs: list[ArbPair] = []
 
-    # Step 1: reconstitute each pair through the existing restore pathway
-    for r in records:
-        try:
-            pair = self._game_manager.restore_game({**r, "source": "tree"})
-            if pair is None:
-                continue
-            pairs.append(pair)
-        except Exception:
-            logger.warning("tree_add_failed",
-                           pair_ticker=r.get("event_ticker"), exc_info=True)
+    # Step 1: reconstitute each pair through the existing restore pathway.
+    # suppress_on_change() is a new GameManager context manager that pauses
+    # the on_change callback — otherwise restore_game would fire
+    # save_games_full() per pair (game_manager.py:528 -> __main__.py:345)
+    # and break batch atomicity.
+    with self._game_manager.suppress_on_change():
+        for r in records:
+            try:
+                pair = self._game_manager.restore_game({**r, "source": "tree"})
+                if pair is None:
+                    continue
+                pairs.append(pair)
+            except Exception:
+                logger.warning("tree_add_failed",
+                               pair_ticker=r.get("event_ticker"), exc_info=True)
 
     # Step 2: wire adjuster ledgers
     for pair in pairs:
@@ -744,9 +761,15 @@ async def remove_pairs_from_selection(
 
     Returns a structured per-pair outcome so the caller can decide per-event
     whether to mark deliberately_unticked, leave it winding, or retry later.
+
+    Wraps the whole batch in suppress_on_change() for the same reason as
+    add_pairs_from_selection — both GameManager.remove_game (line 595) and
+    add_market_as_pair (line 450) fire on_change which today triggers
+    save_games_full. One final persist at batch end, not N.
     """
     outcomes: list[RemoveOutcome] = []
-    for pt in pair_tickers:
+    with self._game_manager.suppress_on_change():
+      for pt in pair_tickers:
         pair = self._game_manager.get_game(pt)
         if pair is None:
             outcomes.append(RemoveOutcome(
@@ -763,6 +786,8 @@ async def remove_pairs_from_selection(
             if ledger and (ledger.has_filled_positions() or ledger.has_resting_orders()):
                 self._winding_down.add(pt)
                 await self.enforce_exit_only(pt)
+                # Persist the winding_down state so it survives a restart
+                self._mark_engine_state(pt, "winding_down")
                 reason = (f"filled={ledger.filled_count(Side.A)},"
                           f"{ledger.filled_count(Side.B)} "
                           f"resting={ledger.resting_count(Side.A)},"
@@ -863,9 +888,68 @@ async def _on_event_fully_removed(self, kalshi_event_ticker: str) -> None:
 
 **Symmetry for manual re-tick during winding:** If the user re-ticks a `winding_down` pair before it clears, the engine cancels the winding state (exits exit-only, re-engages trading — with confirmation, per §4.2), and emits `winding_down_cancelled(pair_ticker, kalshi_event_ticker)`. The tree handler removes the event from `_deferred_set_unticked` so the `[·]` is not later applied to an event the user changed their mind about.
 
-Both `_deferred_set_unticked` and the engine's `_winding_down` set are process-local. A restart with winding-down pairs intact reads them out of `games_full.json` (they never left), restores them as normal monitored pairs, and the engine's exit-only state is re-established from `_exit_only_events` persistence (if persisted) or re-derived from the resolver cascade. Deferred `[·]` flags are NOT persisted — user intent to mark an event as deliberately unticked must be re-asserted after restart if the wind-down was still pending. Acceptable: the pair still exists post-restart with its `[W]` state rendering correctly from `games_full.json`; the user can simply re-untick.
+**Restart durability — both winding state and deferred-untick intent survive process restart.** This is a safety-critical property: a pair the user has unticked must not silently resume normal trading after a crash or restart.
 
-`_persist_active_games()` is a small helper that calls `save_games_full(records_from_current_active_pairs)` — reuses the existing persistence function. Persistence happens at the end of each add/remove batch, not per-pair, to minimize disk I/O.
+Two additions to persistence:
+
+1. **Per-pair `engine_state` field in `games_full.json`**
+
+   Each pair record gains an optional field:
+
+   ```json
+   {
+     "event_ticker": "KXFEDMENTION-26APR-YIEL",
+     ... existing fields ...,
+     "engine_state": "winding_down"
+   }
+   ```
+
+   Values: `"active"` (default; absent field treated as this), `"winding_down"` (user unticked but inventory remains), `"exit_only"` (resolver-triggered exit-only but not user-unticked).
+
+   Written whenever a pair enters or exits these states. On startup, the restore loop applies per-state behavior:
+
+   | Loaded state | Engine restore action |
+   |---|---|
+   | `"active"` or missing | Normal restore — subscribe feeds, register with scanner/adjuster. |
+   | `"winding_down"` | Normal restore **plus** re-add to `_winding_down` set **plus** immediately flip `_exit_only_events`. Pair will not accept new bids; continues to wind down from the state it held pre-restart. |
+   | `"exit_only"` | Normal restore plus immediately flip `_exit_only_events`. Resolver cascade may clear it on next tick if the event has passed. |
+
+2. **`deliberately_unticked_pending` set in `tree_metadata.json`**
+
+   ```json
+   {
+     ...,
+     "deliberately_unticked_pending": ["KXFEDMENTION-26APR"]
+   }
+   ```
+
+   The persisted mirror of `_deferred_set_unticked`. Populated when a commit produces mixed removed/winding outcomes and the `[·]` is deferred pending wind-down completion. On startup, `TreeMetadataStore` loads this into `_deferred_set_unticked`. When `event_fully_removed` fires (either mid-session or immediately post-restart as ledgers clear), the tree applies `[·]` and clears the event from both the in-memory set and the persisted list.
+
+**Why this is non-optional:** without these, the SURVIVOR-class failure mode trivially reappears. Imagine you untick KXSURVIVORMENTION-26APR23 at 7:58 PM with 30 contracts filled, Talos enters winding-down + exit-only, then crashes at 7:59 PM. Without persistence, the 8:00 PM restart: pair is restored from `games_full.json` as a normal active pair, no exit-only trigger fires (uncurated event, no milestone, no manual-override-that-overrides-winding-state), and Talos resumes bidding during the live broadcast. The persistence above blocks that path structurally.
+
+**What is still process-local:** the `_exit_only_events` set for resolver-triggered exit-only (milestone lead-time crossed) does NOT need persistence — the resolver cascade re-derives it on the first post-startup tick. Only **user-intent-driven** exit-only states (winding from untick, resolver-triggered combined with pending [·]) need persistence, which is what the `engine_state` field captures.
+
+`_persist_active_games()` is a small helper that calls `save_games_full(records_from_current_active_pairs)` — reuses the existing persistence function. Persistence happens **exactly once** at the end of each add/remove batch.
+
+**Mechanism — `GameManager.suppress_on_change()`:**
+
+```python
+@contextmanager
+def suppress_on_change(self):
+    """Pause on_change emission within a batch. Engine batches call this
+    to prevent per-pair save_games_full writes; single final persist
+    happens in _persist_active_games() at batch end."""
+    prev = self.on_change
+    self.on_change = None
+    try:
+        yield
+    finally:
+        self.on_change = prev
+```
+
+Inside the `with` block, all GameManager mutations (`restore_game`, `remove_game`, `add_market_as_pair`) skip their `on_change()` call. Non-batch call-sites — URL-paste adds via `Engine.add_games(urls)`, user-initiated `clear_all_games`, etc. — are unaffected; they continue to fire `on_change` per-pair as today, preserving existing behavior for those paths.
+
+**Why not unwire `on_change` → `save_games_full` entirely?** Because that callback is a general-purpose "game set changed" signal, not a persistence-specific hook. Existing subscribers rely on it for UI re-renders; the [__main__.py:345](src/talos/__main__.py:345) wiring to `save_games_full` is one of potentially several subscribers. Suppressing the callback during batches keeps the contract simple: per-pair events still fire for full-runtime callers that depend on them; batch callers explicitly opt out.
 
 #### 5.2 Engine._check_exit_only cascade
 
@@ -961,7 +1045,9 @@ The `Engine` exposes a single awaitable `ready_for_trading: asyncio.Event`. The 
 ```
 t=0.0   Process starts
 t=0.1   settings.json + tree_metadata.json loaded synchronously
-        TreeMetadataStore armed with manual_event_start overrides
+        TreeMetadataStore armed with:
+          - manual_event_start overrides
+          - deliberately_unticked_pending set (loaded into _deferred_set_unticked)
 t=0.2   DiscoveryService + MilestoneResolver start (background task)
 t=0.2   TalosApp.on_mount schedules polling timers (they fire, but gated
         callbacks await ready_for_trading before proceeding)
@@ -969,12 +1055,20 @@ t=0.2   TradingEngine.start_feed() begins — WS connects, listen loop starts
 t=0.3   _setup_initial_games() AWAITS ready_for_trading before restoration
 t=2-5   Milestones fully loaded → ready_for_trading.set()
 t=2-5   _setup_initial_games() proceeds: loads games_full.json, reconstitutes
-        pairs through Engine entry points, subscribes feeds
-t=5+    All gated callbacks resume; trading fully armed
+        pairs through Engine entry points, subscribes feeds. For each pair:
+          - engine_state == "active" (or missing) → normal restore
+          - engine_state == "winding_down" → restore + _winding_down.add(pt)
+                                           + _exit_only_events.add(pt)
+          - engine_state == "exit_only"    → restore + _exit_only_events.add(pt)
+t=5+    All gated callbacks resume; trading fully armed.
+        Any winding-down pairs immediately see exit-only logic applied —
+        no tick window where they could take new bids.
 t=30    Hard cap: if milestones still not loaded, ready_for_trading.set()
         fires anyway with a structured warning (exit_only_degraded=True).
         Red banner in UI: "started without milestones — exit-only scheduling
         may be degraded." Manual overrides still work (they loaded at t=0.1).
+        Persisted winding_down / exit_only states still work (they loaded
+        from games_full.json).
 ```
 
 **Rationale** for Option B over Option A (proceed immediately): Principle "Safety over speed" — a ~5-second startup delay is recoverable; running `_check_exit_only` or `_auto_accept_tick` without an armed resolver cascade is not. See `brain/principles.md`.
