@@ -121,7 +121,7 @@ async def test_space_keybinding_toggles_current_event():
         tree.select_node(event_node)
         await pilot.pause()
 
-        screen.action_toggle_current_node()
+        await screen.action_toggle_current_node()
 
         assert len(screen.staged_changes.to_add) == 1
         assert screen.staged_changes.to_add[0].kalshi_event_ticker == "KXFEDMENTION-26APR"

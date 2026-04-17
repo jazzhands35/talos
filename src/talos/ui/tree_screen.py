@@ -12,6 +12,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any
 
 from textual.app import ComposeResult
+from textual.binding import Binding
 from textual.screen import Screen
 from textual.widgets import Footer, Header, Tree
 from textual.widgets.tree import TreeNode
@@ -93,7 +94,13 @@ class TreeScreen(Screen):
     BINDINGS = [
         ("escape", "app.pop_screen", "Back"),
         ("r", "manual_refresh", "Refresh"),
-        ("space", "toggle_current_node", "Toggle"),
+        # priority=True so this handler wins over Textual Tree's internal
+        # `space` binding (which toggles expand/collapse). We route:
+        #   event leaf  -> tick/untick one event
+        #   series node -> bulk-tick all events in the series
+        #   category    -> bulk-tick all events across the category
+        # Expand/collapse still works via the arrow keys (← / →).
+        Binding("space", "toggle_current_node", "Toggle", priority=True),
         ("c", "commit_changes", "Commit"),
     ]
 
@@ -723,23 +730,147 @@ class TreeScreen(Screen):
 
     # ── Keybinding actions ───────────────────────────────────────────────
 
-    def action_toggle_current_node(self) -> None:
+    async def action_toggle_current_node(self) -> None:
         """Toggle the currently-highlighted tree node.
 
-        For event nodes: stages an add (or unstages if already staged).
-        For series / category nodes: no-op for now (bulk toggle deferred).
+        Dispatches by kind:
+          - event  : tick/untick the single event
+          - series : bulk tick/untick every active event in the series
+          - category: bulk tick/untick across every series in the category
         """
         tree = self.query_one("#tree", Tree)
         node = tree.cursor_node
         if node is None or node.data is None:
             return
-        data = node.data
-        kind = data.get("kind") if isinstance(data, dict) else None
+        data = node.data if isinstance(node.data, dict) else {}
+        kind = data.get("kind")
         if kind == "event":
-            ticker = data.get("ticker") if isinstance(data, dict) else None
+            ticker = data.get("ticker")
             if ticker:
                 self.toggle_event_by_ticker(ticker)
                 self._refresh_node_label(node, ticker)
+        elif kind == "series":
+            series_ticker = data.get("ticker")
+            if series_ticker:
+                await self._bulk_toggle_series(series_ticker)
+        elif kind == "category":
+            category_name = data.get("name")
+            if category_name:
+                await self._bulk_toggle_category(category_name)
+
+    async def _bulk_toggle_series(self, series_ticker: str) -> None:
+        """Stage-tick every active event in the series, or untick all if
+        every event is already ticked/staged-ticked. Fetches events lazily
+        if the series hasn't been drilled into yet."""
+        if self._discovery is None:
+            return
+        events = await self._discovery.get_events_for_series(series_ticker)
+        if not events:
+            self.notify(
+                f"No active events to select under {series_ticker}.",
+                severity="warning",
+            )
+            return
+        tickers = list(events.keys())
+        action, toggled = self._apply_bulk_toggle(tickers)
+        self._find_and_relabel_event_nodes(set(tickers))
+        self.notify(
+            f"{series_ticker}: {action} {toggled}/{len(tickers)} events.",
+            severity="information",
+        )
+
+    async def _bulk_toggle_category(self, category_name: str) -> None:
+        """Stage-tick every active event under every visible series in the
+        category. Fetches any series not yet loaded — in parallel.
+
+        Notifies with a running-count toast since a large category can take
+        several seconds to fan out across its series.
+        """
+        import asyncio as _asyncio
+
+        if self._discovery is None:
+            return
+        cat = self._discovery.categories.get(category_name)
+        if cat is None:
+            return
+        visible = self._visible_series(cat)
+        if not visible:
+            self.notify(
+                f"No visible series under {category_name}.",
+                severity="warning",
+            )
+            return
+
+        self.notify(
+            f"{category_name}: fetching events for {len(visible)} series…",
+            severity="information",
+        )
+        results = await _asyncio.gather(
+            *(self._discovery.get_events_for_series(s.ticker) for s in visible),
+            return_exceptions=True,
+        )
+        all_tickers: list[str] = []
+        for res in results:
+            if isinstance(res, dict):
+                all_tickers.extend(res.keys())
+
+        if not all_tickers:
+            self.notify(
+                f"No active events found under {category_name}.",
+                severity="warning",
+            )
+            return
+
+        action, toggled = self._apply_bulk_toggle(all_tickers)
+        self._find_and_relabel_event_nodes(set(all_tickers))
+        self.notify(
+            f"{category_name}: {action} {toggled}/{len(all_tickers)} events.",
+            severity="information",
+        )
+
+    def _apply_bulk_toggle(self, tickers: list[str]) -> tuple[str, int]:
+        """Apply a tick/untick sweep over a batch of event tickers.
+
+        Rule: if EVERY ticker's current effective state is "checked", we
+        untick all of them; otherwise we tick all of them (skipping ones
+        already ticked). Mirrors how filesystem "Select All" toggles
+        between select-all and select-none.
+
+        Returns (action_label, count_toggled) for the user-facing toast.
+        """
+        states = {et: self._effective_state(et) for et in tickers}
+        all_checked = all(s == "checked" for s in states.values())
+
+        toggled = 0
+        if all_checked:
+            for et in tickers:
+                if states[et] == "checked":
+                    self.toggle_event_by_ticker(et)
+                    toggled += 1
+            return ("unticked", toggled)
+
+        for et in tickers:
+            if states[et] != "checked":
+                self.toggle_event_by_ticker(et)
+                toggled += 1
+        return ("ticked", toggled)
+
+    def _find_and_relabel_event_nodes(self, event_tickers: set[str]) -> None:
+        """Walk the tree and refresh labels for any event nodes whose
+        ticker is in the given set. Used after bulk operations so the
+        visible glyphs update without tearing down the whole tree."""
+        tree = self.query_one("#tree", Tree)
+
+        def walk(node: TreeNode) -> None:
+            data = node.data if isinstance(node.data, dict) else {}
+            if data.get("kind") == "event":
+                et = data.get("ticker")
+                if et in event_tickers:
+                    self._refresh_node_label(node, et)
+            for child in node.children:
+                walk(child)
+
+        walk(tree.root)
 
     def _relabel_series_node(self, node: TreeNode, series_ticker: str) -> None:
         """After a drill-in, update the series node's label to reflect the
