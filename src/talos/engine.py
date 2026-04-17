@@ -11,7 +11,7 @@ import contextlib
 import time
 from collections.abc import Callable
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import httpx
 import structlog
@@ -54,7 +54,9 @@ from talos.ticker_feed import TickerFeed
 from talos.top_of_market import TopOfMarketTracker
 
 if TYPE_CHECKING:
+    from talos.milestones import MilestoneResolver
     from talos.models.strategy import ArbPair, BidConfirmation
+    from talos.tree_metadata import TreeMetadataStore
 
 logger = structlog.get_logger()
 _STALE_BOOK_RECOVERY_COOLDOWN_S = 120.0
@@ -101,6 +103,8 @@ class TradingEngine:
         lifecycle_feed: LifecycleFeed | None = None,
         position_feed: PositionFeed | None = None,
         game_status_resolver: GameStatusResolver | None = None,
+        tree_metadata_store: TreeMetadataStore | None = None,
+        milestone_resolver: MilestoneResolver | None = None,
         data_collector: DataCollector | None = None,
         settlement_cache: SettlementCache | None = None,
     ) -> None:
@@ -118,12 +122,12 @@ class TradingEngine:
         self._ticker_feed = ticker_feed
         self._lifecycle_feed = lifecycle_feed
         self._game_status_resolver = game_status_resolver
+        self._tree_metadata_store = tree_metadata_store
+        self._milestone_resolver = milestone_resolver
         self._data_collector = data_collector
         self._settlement_cache = settlement_cache
         self._position_feed = position_feed
-        self._proposer = OpportunityProposer(
-            self._auto_config, data_collector=data_collector
-        )
+        self._proposer = OpportunityProposer(self._auto_config, data_collector=data_collector)
 
         # Mutable caches
         self._queue_cache: dict[str, int] = {}
@@ -570,10 +574,7 @@ class TradingEngine:
                             to_resting=target_behind_resting,
                         )
                     except KalshiAPIError as e:
-                        if (
-                            e.status_code == 409
-                            and "market_closed" in str(e).lower()
-                        ):
+                        if e.status_code == 409 and "market_closed" in str(e).lower():
                             import contextlib
 
                             with contextlib.suppress(ValueError):
@@ -595,6 +596,43 @@ class TradingEngine:
                         )
 
         await self._verify_after_action(event_ticker)
+
+    def _resolve_event_start(
+        self, kalshi_event_ticker: str, pair: Any
+    ) -> tuple[datetime | None, str | None]:
+        """Resolver cascade per spec §5.2.
+
+        Priority: manual override -> Kalshi milestone -> sports GSR -> nothing.
+
+        Returns (start_time, source) where source is one of:
+          - "manual_opt_out": user explicitly disabled exit-only for this event
+          - "manual":         user-set override; start_time is the datetime
+          - "milestone":      Kalshi milestone start_date
+          - "sports_gsr":     sports provider scheduled_start
+          - None:             no schedule data available
+        """
+        # 1. Manual (user-owned)
+        if self._tree_metadata_store is not None:
+            manual = self._tree_metadata_store.manual_event_start(kalshi_event_ticker)
+            if manual == "none":
+                return (None, "manual_opt_out")
+            if manual is not None:
+                return (manual, "manual")
+
+        # 2. Kalshi milestone
+        if self._milestone_resolver is not None:
+            ms = self._milestone_resolver.event_start(kalshi_event_ticker)
+            if ms is not None:
+                return (ms, "milestone")
+
+        # 3. Sports GSR (keyed by pair.event_ticker — sports pairs have
+        #    event_ticker == kalshi_event_ticker)
+        if self._game_status_resolver is not None:
+            gs = self._game_status_resolver.get(pair.event_ticker)
+            if gs and getattr(gs, "scheduled_start", None):
+                return (gs.scheduled_start, "sports_gsr")
+
+        return (None, None)
 
     def _check_exit_only(self) -> None:
         """Auto-trigger exit-only based on game status, auto-remove when done.
@@ -709,18 +747,14 @@ class TradingEngine:
                     pair = self.find_pair(event_ticker)
                     if pair is not None and pair.close_time:
                         try:
-                            ct = datetime.fromisoformat(
-                                pair.close_time.replace("Z", "+00:00")
-                            )
+                            ct = datetime.fromisoformat(pair.close_time.replace("Z", "+00:00"))
                             if datetime.now(UTC) > ct:
                                 market_done = True
                         except (ValueError, TypeError):
                             pass
                 if market_done:
                     name = self._display_name(event_ticker)
-                    self._notify(
-                        f"Exit-only DONE: {name} — removing (market closed)"
-                    )
+                    self._notify(f"Exit-only DONE: {name} — removing (market closed)")
                     logger.info(
                         "exit_only_auto_remove_determined",
                         event_ticker=event_ticker,
@@ -763,9 +797,7 @@ class TradingEngine:
                 # Start the listen loop BEFORE subscribing — this way,
                 # orderbook snapshots are processed as they arrive instead
                 # of queuing in the WS buffer and hitting all at once.
-                listen_task = asyncio.create_task(
-                    self._feed.start(), name="ws_listen"
-                )
+                listen_task = asyncio.create_task(self._feed.start(), name="ws_listen")
 
                 if first_connect:
                     await self._setup_initial_games()
@@ -1825,9 +1857,7 @@ class TradingEngine:
                     self._overcommit_events.add(pair.event_ticker)
                     # Store reconciliation-derived target so resolution uses
                     # the same data as detection (ledger fill_gap may differ).
-                    targets = self._overcommit_targets.setdefault(
-                        pair.event_ticker, {}
-                    )
+                    targets = self._overcommit_targets.setdefault(pair.event_ticker, {})
                     targets[sl] = allowed
 
                 # Check 2: Multiple resting orders (double-bid indicator)
@@ -2214,7 +2244,7 @@ class TradingEngine:
         pairs_ordered = (
             sorted(
                 self._scanner.pairs,
-                key=lambda p: (0 if p.event_ticker in overcommit_priority else 1),
+                key=lambda p: 0 if p.event_ticker in overcommit_priority else 1,
             )
             if overcommit_priority
             else self._scanner.pairs
@@ -2259,9 +2289,7 @@ class TradingEngine:
                         ledger,
                         pair,
                         self._display_name(pair.event_ticker),
-                        reconciled_targets=overcommit_targets.get(
-                            pair.event_ticker
-                        ),
+                        reconciled_targets=overcommit_targets.get(pair.event_ticker),
                     )
                     if overcommit is not None:
                         self._log_imbalance_outcome(
@@ -2813,17 +2841,17 @@ class TradingEngine:
                 and "market_closed" in str(e).lower()
             )
             if is_market_closed and event_ticker and event_ticker not in self._exit_only_events:
-                    self._exit_only_events.add(event_ticker)
-                    self._enforce_exit_only_sync(event_ticker)
-                    name = self._display_name(event_ticker)
-                    self._notify(
-                        f"Exit-only ON: {name} (market closed)",
-                        "warning",
-                    )
-                    logger.info(
-                        "exit_only_market_closed",
-                        event_ticker=event_ticker,
-                    )
+                self._exit_only_events.add(event_ticker)
+                self._enforce_exit_only_sync(event_ticker)
+                name = self._display_name(event_ticker)
+                self._notify(
+                    f"Exit-only ON: {name} (market closed)",
+                    "warning",
+                )
+                logger.info(
+                    "exit_only_market_closed",
+                    event_ticker=event_ticker,
+                )
 
             is_cross = isinstance(e, KalshiAPIError) and "post only cross" in str(e).lower()
             if is_cross:
@@ -3205,9 +3233,7 @@ class TradingEngine:
             # Update fills from amend response
             fill_delta = old_order.fill_count - ledger.filled_count(side)
             if fill_delta > 0:
-                old_price = (
-                    old_order.no_price if qi.kalshi_side == "no" else old_order.yes_price
-                )
+                old_price = old_order.no_price if qi.kalshi_side == "no" else old_order.yes_price
                 fee_delta = old_order.maker_fees - ledger.filled_fees(side)
                 ledger.record_fill(
                     side,
@@ -3218,9 +3244,7 @@ class TradingEngine:
 
             # Update ledger with new resting state
             amended_price = (
-                amended_order.no_price
-                if qi.kalshi_side == "no"
-                else amended_order.yes_price
+                amended_order.no_price if qi.kalshi_side == "no" else amended_order.yes_price
             )
             ledger.record_resting(
                 side,
@@ -3230,8 +3254,7 @@ class TradingEngine:
             )
 
             self._notify(
-                f"Queue improved: {name} {qi.side} "
-                f"{qi.current_price}c → {qi.improved_price}c",
+                f"Queue improved: {name} {qi.side} {qi.current_price}c → {qi.improved_price}c",
             )
             logger.info(
                 "queue_improvement_executed",
