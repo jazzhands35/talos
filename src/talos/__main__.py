@@ -300,7 +300,12 @@ def main() -> None:
     ticker_feed = TickerFeed(ws_client=ws)
     lifecycle_feed = LifecycleFeed(ws_client=ws)
     position_feed = PositionFeed(ws_client=ws)
-    auto_config = AutomationConfig()
+    # Tree-mode flag can be toggled per-launch via TALOS_TREE_MODE env var
+    # ("1"/"true"/"yes"/"on" → enabled, anything else or unset → disabled).
+    # Without the env var, tree_mode defaults to AutomationConfig's False.
+    _tree_mode_env = os.environ.get("TALOS_TREE_MODE", "").strip().lower()
+    _tree_mode = _tree_mode_env in ("1", "true", "yes", "on")
+    auto_config = AutomationConfig(tree_mode=_tree_mode)
 
     # Tree-mode collaborators (only constructed when tree_mode is enabled).
     # DiscoveryService is kept on the app (not the engine) since only TreeScreen
