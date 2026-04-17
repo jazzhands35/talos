@@ -144,7 +144,9 @@ Existing schema (from [persistence.py:84](src/talos/persistence.py:84) + [game_m
 
 - **`engine_state`** (string, optional) — persisted engine state for restart-safety. Values: `"active"` (default; absent field treated as this), `"winding_down"`, `"exit_only"`. Engine does branch on this during restore — see §5.1b for semantics.
 
-No new persistence file for selections. Legacy records without `source` or `engine_state` are read as having `source = null`, `engine_state = "active"`; engine behavior is identical to today.
+**Implementation requirement for schema durability:** The `ArbPair` Pydantic model gains optional fields `source: str | None = None` and `engine_state: str = "active"`. The legacy persistence writer in [__main__.py:345 `_persist_games`](src/talos/__main__.py:345) is updated to include these in its serialized dict — gated on `if pair.source is not None:` and unconditional for `engine_state` with the `"active"` default — so that **legacy flag-off sessions preserve the fields round-trip** rather than stripping them. Without this update, a `tree_mode=False` session triggered by any `GameManager.on_change` would overwrite `games_full.json` without the new fields, breaking restart durability for wound-down pairs across a flag-flip.
+
+Legacy records without `source` or `engine_state` are read as having `source = null`, `engine_state = "active"`; engine behavior is identical to today. The preserve-round-trip property means that once a record is written by a tree-mode session, flag-off sessions read and re-write it faithfully — Phase 3 dual-run is valid.
 
 **Pair shape recap by event type:**
 
@@ -241,6 +243,12 @@ The tree commit path materializes full `ArbPair` records from the in-memory disc
 | `expected_expiration_time` | same source |
 | `sub_title`, `label` | `EventNode.sub_title` / derived via existing `extract_leg_labels()` (pure function over sub_title) |
 | `source` | `"tree"` |
+| `volume_24h_a` (new field on record) | `MarketNode.volume_24h` for the matching ticker_a market |
+| `volume_24h_b` (new field on record) | `MarketNode.volume_24h` for the matching ticker_b market (same as ticker_a for non-sports YES/NO) |
+
+**Why volumes are on the record, not fetched later:** today's non-tree paths ([game_manager.py:366](src/talos/game_manager.py:366) and [game_manager.py:441](src/talos/game_manager.py:441)) populate `GameManager._volumes_24h` during add. `restore_game()` does NOT populate it ([game_manager.py:459](src/talos/game_manager.py:459)) — startup reconciliation fills volumes from persisted `volume_a`/`volume_b` fields in `games_full.json` via [engine.py:921](src/talos/engine.py:921). The tree commit path uses `restore_game`, so without explicit seeding the new pairs would have zero volume in UI tables, zero in `data_collector.log_game_add` payloads, and no persisted `volume_a`/`volume_b` for the next restart.
+
+Engine's `add_pairs_from_selection` therefore seeds `GameManager._volumes_24h` from the record before any downstream consumer reads it (see §5.1 step 1.5). The `_persist_games` writer then reads those volumes back as usual — one volume-origin path for both live-add and commit-path, no divergence.
 
 **Property: commit is a pure local operation.** If any required field is missing from the cache (which can happen if the user commits immediately after a discovery-fetch error left a SeriesNode stale), the commit validator surfaces this as a blocker — "cannot build pair record for KXFOO-26APR: fee metadata unavailable, refresh discovery (`r`) and retry." The user-facing escape hatch is a manual refresh, not a silent background REST.
 
@@ -677,6 +685,20 @@ async def add_pairs_from_selection(
                 pair = self._game_manager.restore_game({**r, "source": "tree"})
                 if pair is None:
                     continue
+                # Step 1.5: seed 24h volume on GameManager so data_collector
+                # logging, UI renders, and the next _persist_games write all
+                # have accurate volume data. restore_game() does NOT do this
+                # by itself (game_manager.py:459) — only the live-add paths
+                # at game_manager.py:366 and :441 do. Without this seeding,
+                # tree-added pairs would log/render volume=0 and would
+                # persist without volume_a/volume_b fields, degrading
+                # next-restart cache quality.
+                vol_a = r.get("volume_24h_a")
+                vol_b = r.get("volume_24h_b")
+                if vol_a is not None:
+                    self._game_manager._volumes_24h[pair.ticker_a] = int(vol_a)
+                if vol_b is not None and pair.ticker_b != pair.ticker_a:
+                    self._game_manager._volumes_24h[pair.ticker_b] = int(vol_b)
                 pairs.append(pair)
             except Exception:
                 logger.warning("tree_add_failed",
@@ -1145,7 +1167,7 @@ New principle to be landed alongside Phase 1 scaffold. Working text (to be refin
 
 #### 7.2 Phases
 
-**Phase 1 — Scaffold.** Land new components (DiscoveryService, MilestoneResolver, TreeMetadataStore, TreeScreen), the two new Engine entry points (`add_pairs_from_selection`, `remove_pairs_from_selection`), and the resolver cascade — all behind the flag. Extend `games_full.json` schema with optional `source` field. Add principle to `brain/principles.md`. Unit tests per module. Flag defaults `False`; normal sessions see no behavior change.
+**Phase 1 — Scaffold.** Land new components (DiscoveryService, MilestoneResolver, TreeMetadataStore, TreeScreen), the two new Engine entry points (`add_pairs_from_selection`, `remove_pairs_from_selection`), the resolver cascade, and the `suppress_on_change()` context manager — all behind the flag. Extend `ArbPair` with optional `source` and `engine_state` fields; update the legacy `_persist_games` writer in [`__main__.py:345`](src/talos/__main__.py:345) to include both so flag-off sessions preserve them. Add principle to `brain/principles.md`. Unit tests per module, including a regression test that a flag-off session round-trips all `games_full.json` fields faithfully. Flag defaults `False`; normal sessions see no behavior change.
 
 **Phase 2 — Dogfood.** Flip `tree_mode = True` locally. Tick a handful of representative events (one covered milestone, one uncovered, one sports, one earnings). Verify: milestone loading, resolver cascade, commit popup, conflict prompt, winding-down.
 
@@ -1167,7 +1189,7 @@ No existing state is moved, renamed, or reformatted. Rollback is a file-compatib
 
 #### 7.4 Rollback
 
-Any phase: set `tree_mode = False`, restart. Old paths resume. `games_full.json` is read unchanged by legacy code (the optional `source` field is ignored). `tree_metadata.json` stays on disk untouched — next re-enable picks up with all prior overrides intact.
+Any phase: set `tree_mode = False`, restart. Old paths resume. `games_full.json` is read and re-written by the Phase-1-updated legacy writer, which preserves `source` / `engine_state` fields round-trip (they're read into `ArbPair`, persisted back on next `on_change` save). `tree_metadata.json` stays on disk untouched — next re-enable picks up with all prior overrides and deferred-untick flags intact. Winding-down pairs persisted with `engine_state = "winding_down"` survive the round-trip — a flag-off session re-reads them with that state preserved on disk, even though the legacy engine doesn't act on the field. Re-enabling tree_mode picks up the winding-down state correctly.
 
 Catastrophic bug discovered after Phase 5 cleanup: `git revert` of the cleanup commit restores legacy paths verbatim.
 
