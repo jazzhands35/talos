@@ -71,12 +71,29 @@ class DiscoveryService:
         # Offload the CPU-bound Pydantic construction loop to a thread so
         # the event loop stays responsive during the several-second build.
         categories = await asyncio.to_thread(self._build_categories, all_series)
-
         self.categories = categories
+
+        # Populate per-series open-event counts. Uses one paginated /events
+        # call with with_nested_markets=false so the payload is small (event
+        # metadata only; ~300-500 bytes per event vs ~2KB with markets).
+        try:
+            counts = await self._fetch_event_counts_per_series()
+            for cat in self.categories.values():
+                for series in cat.series.values():
+                    series.event_count = counts.get(series.ticker, 0)
+        except Exception:
+            logger.warning("discovery_event_counts_failed", exc_info=True)
+
         logger.info(
             "discovery_bootstrap_ok",
             category_count=len(categories),
             series_count=sum(c.series_count for c in categories.values()),
+            series_with_events=sum(
+                1
+                for cat in categories.values()
+                for s in cat.series.values()
+                if (s.event_count or 0) > 0
+            ),
         )
 
     # ── Internals ────────────────────────────────────────────────────
@@ -110,6 +127,48 @@ class DiscoveryService:
         for cat in categories.values():
             cat.series_count = len(cat.series)
         return categories
+
+    async def _fetch_event_counts_per_series(self) -> dict[str, int]:
+        """Paginated bulk fetch of open events, grouped by series_ticker.
+
+        Uses with_nested_markets=false for a small payload — we only need the
+        series_ticker field per event to count. One call instead of 9,700
+        per-series calls.
+        """
+        async with self._sem:
+            http = self._http or httpx.AsyncClient(timeout=httpx.Timeout(30.0))
+            close_http = self._owns_http
+            try:
+                counts: dict[str, int] = {}
+                cursor: str | None = None
+                now_ts = int(datetime.now(UTC).timestamp())
+                # Safety cap: 40 pages × 200 = 8,000 events.
+                for _ in range(40):
+                    params: dict[str, str] = {
+                        "status": "open",
+                        "with_nested_markets": "false",
+                        "limit": "200",
+                        "min_close_ts": str(now_ts),
+                    }
+                    if cursor:
+                        params["cursor"] = cursor
+                    resp = await http.get(
+                        f"{_KALSHI_API_BASE}/events",
+                        params=params,
+                    )
+                    resp.raise_for_status()
+                    data = resp.json()
+                    for ev in data.get("events", []):
+                        st = ev.get("series_ticker")
+                        if st:
+                            counts[st] = counts.get(st, 0) + 1
+                    cursor = data.get("cursor")
+                    if not cursor:
+                        break
+                return counts
+            finally:
+                if close_http:
+                    await http.aclose()
 
     async def _fetch_all_series(self) -> list[dict[str, Any]]:
         async with self._sem:

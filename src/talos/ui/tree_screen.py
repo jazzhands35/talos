@@ -22,6 +22,7 @@ if TYPE_CHECKING:
     from talos.discovery import DiscoveryService
     from talos.engine import TradingEngine
     from talos.milestones import MilestoneResolver
+    from talos.models.tree import CategoryNode, SeriesNode
     from talos.tree_metadata import TreeMetadataStore
 
 
@@ -106,6 +107,27 @@ class TreeScreen(Screen):
     def _glyph_for_state(self, state: str) -> str:
         return self._GLYPHS.get(state, "[ ]")
 
+    def _series_label(self, ticker: str, series: SeriesNode) -> str:
+        """Render a series node's label, including its open-event count if
+        we have one. Dim-dashed count for unknown; numeric count otherwise.
+        """
+        count = series.event_count
+        if count is None:
+            suffix = "  ?"
+        elif count == 0:
+            suffix = "  (none open)"
+        elif count == 1:
+            suffix = "  1 event"
+        else:
+            suffix = f"  {count} events"
+        return f"[ ] {ticker}{suffix}"
+
+    def _category_label(self, name: str, cat: CategoryNode) -> str:
+        """Render a category label with the total open-event count across
+        its series (not the series count, which is less useful)."""
+        total_events = sum((s.event_count or 0) for s in cat.series.values())
+        return f"[ ] {name}   {cat.series_count} series · {total_events} open"
+
     def __init__(
         self,
         *,
@@ -185,7 +207,7 @@ class TreeScreen(Screen):
 
         for cat_name, cat in sorted(self._discovery.categories.items()):
             cat_node = tree.root.add(
-                f"[ ] {cat_name}   {cat.series_count} open",
+                self._category_label(cat_name, cat),
                 data={"kind": "category", "name": cat_name},
                 expand=False,
             )
@@ -228,14 +250,22 @@ class TreeScreen(Screen):
         _log.info("tree_expand_start", category=category, series_count=cat.series_count)
 
         tree = self.query_one("#tree", Tree)
-        for i, (ticker, series) in enumerate(sorted(cat.series.items())):
+
+        # Sort: series WITH events first (descending by count), then alpha.
+        # Makes it easy to see where the action is without scrolling empty series.
+        def _sort_key(item: tuple[str, Any]) -> tuple[int, str]:
+            ticker, s = item
+            count = s.event_count if s.event_count is not None else -1
+            # Negate count so bigger first; ticker ascending as tiebreak.
+            return (-count, ticker)
+
+        for i, (ticker, series) in enumerate(sorted(cat.series.items(), key=_sort_key)):
             child = node.add(
-                f"[ ] {ticker}",
+                self._series_label(ticker, series),
                 data={"kind": "series", "ticker": ticker},
                 expand=False,
             )
             child.add("…", data={"kind": "placeholder"})
-            _ = series  # reserved for future metadata display
             if (i + 1) % 100 == 0:
                 tree.refresh()
                 await _asyncio.sleep(0)

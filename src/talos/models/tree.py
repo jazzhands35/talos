@@ -146,6 +146,11 @@ class SeriesNode(BaseModel):
     frequency: str = "custom"
     fee_type: str = "quadratic_with_maker_fees"
     fee_multiplier: float = 1.0
+    # Count of currently-open events in this series, populated at bootstrap
+    # from a single bulk /events?status=open fetch. None until bootstrap has
+    # populated it; 0 means known-empty (don't drill in); positive means
+    # there's something to see.
+    event_count: int | None = None
     # events: None means "not fetched yet"; {} means "fetched and empty"
     events: dict[str, EventNode] | None = None
     events_loaded_at: datetime | None = None
