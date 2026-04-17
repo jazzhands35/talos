@@ -321,6 +321,7 @@ def main() -> None:
         milestone_resolver = MilestoneResolver()
         discovery_service = DiscoveryService(
             concurrent_limit=auto_config.discovery_concurrent_limit,
+            rest_client=rest,
         )
 
     nonsports_categories = settings.get("nonsports_categories", DEFAULT_NONSPORTS_CATEGORIES)

@@ -25,6 +25,7 @@ from talos.models.tree import (
 
 if TYPE_CHECKING:
     from talos.milestones import MilestoneResolver
+    from talos.rest_client import KalshiRESTClient
 
 logger = structlog.get_logger()
 
@@ -101,10 +102,17 @@ class DiscoveryService:
         http: httpx.AsyncClient | None = None,
         *,
         concurrent_limit: int = 5,
+        rest_client: KalshiRESTClient | None = None,
     ) -> None:
         self._http = http
         self._owns_http = http is None
         self._sem = asyncio.Semaphore(concurrent_limit)
+        # Authenticated REST client. When provided, discovery fetches go
+        # through it so they share the trading client's auth headers (and
+        # therefore the generous authenticated rate bucket) instead of
+        # hitting Kalshi's public /events limits. Tests construct the
+        # service without a REST client and fall back to raw httpx.
+        self._rest = rest_client
         self.categories: dict[str, CategoryNode] = {}
         self._stopped = False
 
@@ -224,20 +232,47 @@ class DiscoveryService:
         return categories
 
     async def _fetch_event_counts_per_series(self) -> dict[str, int]:
-        """Paginated bulk fetch of open events, grouped by series_ticker.
+        """Bulk fetch of open events, grouped by series_ticker.
 
-        Uses with_nested_markets=false for a small payload — we only need the
-        series_ticker field per event to count. One call instead of 9,700
-        per-series calls.
+        Prefers the authenticated KalshiRESTClient when available — its
+        rate bucket is much more generous than the public /events bucket
+        the raw httpx fallback hits. Payload is small (with_nested_markets
+        stays off; we only need series_ticker to count).
         """
+        now_ts = int(datetime.now(UTC).timestamp())
+        if self._rest is not None:
+            # Authenticated paginated sweep. Raw dicts so we don't drop
+            # any fields through Pydantic validation.
+            counts: dict[str, int] = {}
+            cursor: str | None = None
+            for _ in range(40):
+                data = await self._rest.get_events_raw(
+                    status="open",
+                    with_nested_markets=False,
+                    min_close_ts=now_ts,
+                    limit=200,
+                    cursor=cursor,
+                )
+                for ev in data.get("events", []):
+                    st = ev.get("series_ticker")
+                    if st:
+                        counts[st] = counts.get(st, 0) + 1
+                cursor = data.get("cursor")
+                if not cursor:
+                    break
+            return counts
+
+        # Unauthenticated fallback — used in tests and any callsite that
+        # constructs DiscoveryService without a REST client. Hits the
+        # public /events bucket, which 429s aggressively when the trading
+        # client has been active. Kept for test-friendliness; production
+        # always passes rest_client.
         async with self._sem:
             http = self._http or httpx.AsyncClient(timeout=httpx.Timeout(30.0))
             close_http = self._owns_http
             try:
-                counts: dict[str, int] = {}
+                counts_pub: dict[str, int] = {}
                 cursor: str | None = None
-                now_ts = int(datetime.now(UTC).timestamp())
-                # Safety cap: 40 pages × 200 = 8,000 events.
                 for _ in range(40):
                     params: dict[str, str] = {
                         "status": "open",
@@ -257,16 +292,12 @@ class DiscoveryService:
                     for ev in data.get("events", []):
                         st = ev.get("series_ticker")
                         if st:
-                            counts[st] = counts.get(st, 0) + 1
+                            counts_pub[st] = counts_pub.get(st, 0) + 1
                     cursor = data.get("cursor")
                     if not cursor:
                         break
-                    # Small per-page breather — costs ~6s over 40 pages,
-                    # but keeps us comfortably under Kalshi's /events
-                    # throttle so the bulk fetch doesn't starve out the
-                    # subsequent per-series expansions the user triggers.
                     await asyncio.sleep(_BULK_PAGE_SLEEP_SEC)
-                return counts
+                return counts_pub
             finally:
                 if close_http:
                     await http.aclose()
@@ -345,6 +376,19 @@ class DiscoveryService:
         return None
 
     async def _fetch_events_for_series(self, series_ticker: str) -> list[dict[str, Any]]:
+        # Authenticated path — high rate bucket, proper 429 handling via
+        # KalshiRESTClient. get_events_raw preserves all fields the
+        # downstream _parse_event / _parse_market helpers rely on
+        # (close_time, *_dollars price fields, etc.).
+        if self._rest is not None:
+            data = await self._rest.get_events_raw(
+                status="open",
+                series_ticker=series_ticker,
+                with_nested_markets=True,
+                limit=200,
+            )
+            return data.get("events", [])
+
         async with self._sem:
             http = self._http or httpx.AsyncClient(timeout=httpx.Timeout(30.0))
             try:
