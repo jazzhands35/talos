@@ -25,6 +25,67 @@ if TYPE_CHECKING:
     from talos.tree_metadata import TreeMetadataStore
 
 
+try:
+    from talos.game_manager import SPORTS_SERIES as _SPORTS_GSR_PREFIXES_LIST
+
+    _SPORTS_GSR_PREFIXES: set[str] = set(_SPORTS_GSR_PREFIXES_LIST)
+except ImportError:  # pragma: no cover - defensive fallback
+    _SPORTS_GSR_PREFIXES = {
+        "KXNHLGAME",
+        "KXNBAGAME",
+        "KXMLBGAME",
+        "KXNFLGAME",
+        "KXWNBAGAME",
+        "KXCFBGAME",
+        "KXCBBGAME",
+        "KXMLSGAME",
+        "KXEPLGAME",
+        "KXAHLGAME",
+        "KXLOLGAME",
+        "KXCS2GAME",
+        "KXVALGAME",
+        "KXDOTA2GAME",
+        "KXCODGAME",
+        "KXATPMATCH",
+        "KXWTAMATCH",
+        "KXATPCHALLENGERMATCH",
+        "KXWTACHALLENGERMATCH",
+        "KXATPDOUBLES",
+        "KXLALIGAGAME",
+        "KXBUNDESLIGAGAME",
+        "KXSERIEAGAME",
+        "KXLIGUE1GAME",
+        "KXUCLGAME",
+        "KXLIGAMXGAME",
+        "KXKLEAGUEGAME",
+        "KXSHLGAME",
+        "KXKHLGAME",
+        "KXEUROLEAGUEGAME",
+        "KXNBLGAME",
+        "KXBBLGAME",
+        "KXCBAGAME",
+        "KXKBLGAME",
+        "KXUFCFIGHT",
+        "KXBOXING",
+        "KXT20MATCH",
+        "KXIPL",
+        "KXCRICKETODIMATCH",
+        "KXRUGBYNRLMATCH",
+        "KXAFLGAME",
+        "KXNCAAMLAXGAME",
+    }
+
+
+def _series_has_sports_gsr_coverage(series_ticker: str) -> bool:
+    """Quick check: does this series have sports GSR coverage?
+
+    Mirrors the prefix set ``GameManager.SPORTS_SERIES`` uses. Events whose
+    series is covered here always have a game-start timestamp available from
+    GSR, so the commit-time schedule validator can skip them.
+    """
+    return series_ticker in _SPORTS_GSR_PREFIXES
+
+
 class TreeScreen(Screen):
     """Tree-driven selection screen."""
 
@@ -185,13 +246,81 @@ class TreeScreen(Screen):
                 )
             )
 
+    def _events_needing_schedule(self) -> list[ArbPairRecord]:
+        """Return staged-add records whose event has no known schedule source.
+
+        An event has a schedule source iff ANY of these is true:
+          - TreeMetadataStore has a manual_event_start entry for its
+            kalshi_event_ticker (including "none" = opt-out)
+          - MilestoneResolver has a milestone for its kalshi_event_ticker
+          - The series_ticker matches a sports GSR-covered prefix
+            (sports events always have GSR data)
+
+        Returns records that need a schedule. Deduplicated by
+        kalshi_event_ticker — if multiple pairs share the same event, the
+        user is asked only once.
+        """
+        if self._metadata is None:
+            return []
+        seen: set[str] = set()
+        needs: list[ArbPairRecord] = []
+        for r in self.staged_changes.to_add:
+            if r.kalshi_event_ticker in seen:
+                continue
+            seen.add(r.kalshi_event_ticker)
+
+            # Manual override already set? (including "none" opt-out)
+            if self._metadata.manual_event_start(r.kalshi_event_ticker) is not None:
+                continue
+
+            # Milestone covers it?
+            if self._milestones is not None:
+                ms = self._milestones.event_start(r.kalshi_event_ticker)
+                if ms is not None:
+                    continue
+
+            # Sports GSR covers it? (prefix heuristic; exact match happens
+            # in the engine cascade at tick time).
+            if _series_has_sports_gsr_coverage(r.series_ticker):
+                continue
+
+            needs.append(r)
+        return needs
+
     async def commit(self) -> None:
-        """Push staged changes through Engine and reconcile metadata."""
+        """Push staged changes through Engine and reconcile metadata.
+
+        Pre-commit: any staged add whose event has no milestone, no manual
+        override, and no sports GSR coverage triggers the SchedulePopup so
+        the user can enter an event-start time (or explicitly opt out of
+        exit-only scheduling) BEFORE the engine is touched. Cancelling the
+        popup aborts the commit and preserves staged_changes.
+        """
         if self._engine is None or self._metadata is None:
             return
+
+        # Pre-commit validation: prompt for any uncurated events.
+        needs_schedule = self._events_needing_schedule()
+        if needs_schedule:
+            from talos.ui.schedule_popup import SchedulePopup
+
+            popup = SchedulePopup(needs_schedule)
+            result = await self.app.push_screen_wait(popup)
+            if result is None:
+                # User cancelled — abort commit, preserve staged_changes.
+                self.app.notify("Commit cancelled.", severity="warning")
+                return
+            # Merge popup-provided schedules into staged.to_set_manual_start.
+            self.staged_changes.to_set_manual_start.update(result)
+
         staged = self.staged_changes
 
-        # 1. Engine add/remove
+        # 1. Apply manual_event_start FIRST so the resolver cascade sees the
+        #    override before the engine ever ticks for the new pairs.
+        for k, v in staged.to_set_manual_start.items():
+            self._metadata.set_manual_event_start(k, v)
+
+        # 2. Engine add/remove.
         added: list[Any] = []
         remove_outcomes: list[Any] = []
         if staged.to_add:
@@ -203,7 +332,7 @@ class TreeScreen(Screen):
                 staged.to_remove,
             )
 
-        # 2. Apply deferred/applied unticked per §5.1a rules.
+        # 3. Apply deferred/applied unticked per §5.1a rules.
         #    - set_unticked applied when ALL staged pairs for the event came
         #      back "removed". Mixed/winding → defer via _deferred_set_unticked.
         #    - clear_unticked applied when ALL staged pairs for the event
@@ -229,11 +358,7 @@ class TreeScreen(Screen):
             if k in added_keys:
                 self._metadata.clear_deliberately_unticked(k)
 
-        # 3. Apply manual_event_start from staged popup
-        for k, v in staged.to_set_manual_start.items():
-            self._metadata.set_manual_event_start(k, v)
-
-        # 4. Clear staged
+        # 4. Clear staged.
         self.staged_changes = StagedChanges.empty()
 
     def on_event_fully_removed(self, kalshi_event_ticker: str) -> None:

@@ -1,3 +1,4 @@
+from datetime import UTC, datetime
 from typing import Any, cast
 from unittest.mock import AsyncMock
 
@@ -42,6 +43,7 @@ def _make_screen(engine, metadata):
     screen = cast(Any, TreeScreen.__new__(TreeScreen))
     screen._engine = engine
     screen._metadata = metadata
+    screen._milestones = None
     screen._deferred_set_unticked = set()
     screen.staged_changes = StagedChanges.empty()
     return screen
@@ -51,6 +53,9 @@ def _make_screen(engine, metadata):
 async def test_commit_clean_add_triggers_engine_add():
     engine = _FakeEngine()
     md = _FakeMetadata()
+    # Override manual_event_start so the pre-commit schedule validator sees
+    # a schedule source and skips the popup path.
+    md.manual_event_start = lambda _et: "none"  # type: ignore[method-assign]
     screen = _make_screen(engine, md)
     r = ArbPairRecord(
         event_ticker="K-1",
@@ -144,3 +149,164 @@ async def test_commit_set_manual_event_start():
     await screen.commit()
 
     assert calls == [("K-SURV", "2026-04-22T20:00:00-04:00")]
+
+
+# ── Commit-time schedule validator (Codex P1-A) ──────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_commit_aborts_when_needs_schedule_and_no_popup_path():
+    """Simulate: staged event has no milestone, no manual override,
+    no sports coverage → _events_needing_schedule returns it."""
+    engine = _FakeEngine()
+    md = _FakeMetadata()
+    # No manual override for this event.
+    md.manual_event_start = lambda _: None  # type: ignore[method-assign]
+    screen = _make_screen(engine, md)
+    # Milestone resolver that returns None for all events.
+    screen._milestones = type(
+        "FakeMs",
+        (),
+        {"event_start": lambda s, _: None},
+    )()
+    r = ArbPairRecord(
+        event_ticker="KXSURVIVORMENTION-26APR23-MRBE",
+        ticker_a="KXSURVIVORMENTION-26APR23-MRBE",
+        ticker_b="KXSURVIVORMENTION-26APR23-MRBE",
+        kalshi_event_ticker="KXSURVIVORMENTION-26APR23",
+        series_ticker="KXSURVIVORMENTION",
+        category="Mentions",
+    )
+    screen.staged_changes = StagedChanges(to_add=[r])
+
+    needs = screen._events_needing_schedule()
+    assert len(needs) == 1
+    assert needs[0].kalshi_event_ticker == "KXSURVIVORMENTION-26APR23"
+
+
+@pytest.mark.asyncio
+async def test_events_needing_schedule_skips_events_with_manual_override():
+    engine = _FakeEngine()
+    md = _FakeMetadata()
+    md.manual_event_start = (  # type: ignore[method-assign]
+        lambda et: "2026-04-22T20:00:00-04:00" if et == "K" else None
+    )
+    screen = _make_screen(engine, md)
+    screen._milestones = type(
+        "FakeMs",
+        (),
+        {"event_start": lambda s, _: None},
+    )()
+    r = ArbPairRecord(
+        event_ticker="K-1",
+        ticker_a="K-1",
+        ticker_b="K-1",
+        kalshi_event_ticker="K",
+        series_ticker="KXSURVIVORMENTION",
+        category="Mentions",
+    )
+    screen.staged_changes = StagedChanges(to_add=[r])
+    assert screen._events_needing_schedule() == []
+
+
+@pytest.mark.asyncio
+async def test_events_needing_schedule_skips_sports():
+    engine = _FakeEngine()
+    md = _FakeMetadata()
+    md.manual_event_start = lambda _: None  # type: ignore[method-assign]
+    screen = _make_screen(engine, md)
+    screen._milestones = type(
+        "FakeMs",
+        (),
+        {"event_start": lambda s, _: None},
+    )()
+    r = ArbPairRecord(
+        event_ticker="KXNBAGAME-26APR20BOSNYR",
+        ticker_a="KXNBAGAME-26APR20BOSNYR-BOS",
+        ticker_b="KXNBAGAME-26APR20BOSNYR-NYR",
+        kalshi_event_ticker="KXNBAGAME-26APR20BOSNYR",
+        series_ticker="KXNBAGAME",
+        category="Sports",
+        side_a="no",
+        side_b="no",
+    )
+    screen.staged_changes = StagedChanges(to_add=[r])
+    # Sports GSR-covered prefix → no manual entry required.
+    assert screen._events_needing_schedule() == []
+
+
+@pytest.mark.asyncio
+async def test_events_needing_schedule_skips_milestone_covered():
+    engine = _FakeEngine()
+    md = _FakeMetadata()
+    md.manual_event_start = lambda _: None  # type: ignore[method-assign]
+    screen = _make_screen(engine, md)
+    fake_ms = type(
+        "FakeMs",
+        (),
+        {
+            "event_start": lambda s, et: (
+                datetime(2026, 4, 29, 18, 30, tzinfo=UTC) if et == "KXFEDMENTION-26APR" else None
+            ),
+        },
+    )()
+    screen._milestones = fake_ms
+    r = ArbPairRecord(
+        event_ticker="KXFEDMENTION-26APR-YIEL",
+        ticker_a="KXFEDMENTION-26APR-YIEL",
+        ticker_b="KXFEDMENTION-26APR-YIEL",
+        kalshi_event_ticker="KXFEDMENTION-26APR",
+        series_ticker="KXFEDMENTION",
+        category="Mentions",
+    )
+    screen.staged_changes = StagedChanges(to_add=[r])
+    assert screen._events_needing_schedule() == []
+
+
+@pytest.mark.asyncio
+async def test_commit_applies_manual_event_start_before_engine_add():
+    """to_set_manual_start entries must be persisted to TreeMetadataStore
+    BEFORE Engine.add_pairs_from_selection is called, so the first tick
+    sees the override."""
+    engine = _FakeEngine()
+    md = _FakeMetadata()
+    screen = _make_screen(engine, md)
+
+    # Populate staged as if the popup filled it in.
+    screen.staged_changes = StagedChanges(
+        to_add=[
+            ArbPairRecord(
+                event_ticker="K-1",
+                ticker_a="K-1",
+                ticker_b="K-1",
+                kalshi_event_ticker="K",
+                series_ticker="KXSURVIVORMENTION",
+                category="Mentions",
+            )
+        ],
+        to_set_manual_start={"K": "2026-04-22T20:00:00-04:00"},
+    )
+
+    # Track call order.
+    order: list[str] = []
+
+    def _set_start(k: str, _v: str) -> None:
+        order.append(f"set_manual:{k}")
+
+    md.set_manual_event_start = _set_start  # type: ignore[method-assign]
+
+    async def _add(_records):
+        order.append("engine_add")
+        return []
+
+    engine.add_pairs_from_selection = _add  # type: ignore[method-assign]
+
+    # Ensure the popup path is NOT triggered — the override is treated as
+    # already satisfying the schedule requirement.
+    md.manual_event_start = (  # type: ignore[method-assign]
+        lambda et: "2026-04-22T20:00:00-04:00" if et == "K" else None
+    )
+
+    await screen.commit()
+    # Manual start must be applied before engine add.
+    assert order.index("set_manual:K") < order.index("engine_add")
