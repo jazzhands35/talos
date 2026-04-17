@@ -16,6 +16,8 @@ from textual.screen import Screen
 from textual.widgets import Footer, Header, Input, Tree
 from textual.widgets.tree import TreeNode
 
+from talos.models.tree import ArbPairRecord, StagedChanges
+
 if TYPE_CHECKING:
     from talos.discovery import DiscoveryService
     from talos.engine import TradingEngine
@@ -44,6 +46,7 @@ class TreeScreen(Screen):
         self._milestones = milestones
         self._metadata = metadata
         self._engine = engine
+        self.staged_changes: StagedChanges = StagedChanges.empty()
 
     def compose(self) -> ComposeResult:
         yield Header()
@@ -107,3 +110,62 @@ class TreeScreen(Screen):
     async def action_manual_refresh(self) -> None:
         if self._discovery is not None:
             await self._discovery.bootstrap()
+
+    def toggle_event_by_ticker(self, kalshi_event_ticker: str) -> None:
+        """Programmatic toggle used by tests and by keybindings.
+
+        If the event is not currently staged for add, stage it by building
+        an ArbPairRecord per active market. If it IS currently staged, unstage
+        (remove all records for this event from to_add).
+        """
+        if self._discovery is None:
+            return
+
+        # Find the event
+        event_node = None
+        series_ref = None
+        cat_ref = None
+        for cat in self._discovery.categories.values():
+            for series in cat.series.values():
+                if series.events is None:
+                    continue
+                if kalshi_event_ticker in series.events:
+                    event_node = series.events[kalshi_event_ticker]
+                    series_ref = series
+                    cat_ref = cat
+                    break
+            if event_node is not None:
+                break
+        if event_node is None or series_ref is None or cat_ref is None:
+            return
+
+        existing = [
+            r for r in self.staged_changes.to_add if r.kalshi_event_ticker == kalshi_event_ticker
+        ]
+        if existing:
+            for r in list(existing):
+                self.staged_changes.to_add.remove(r)
+            return
+
+        for mkt in event_node.markets:
+            if mkt.status != "active":
+                continue
+            self.staged_changes.to_add.append(
+                ArbPairRecord(
+                    event_ticker=mkt.ticker,
+                    ticker_a=mkt.ticker,
+                    ticker_b=mkt.ticker,
+                    side_a="yes",
+                    side_b="no",
+                    kalshi_event_ticker=kalshi_event_ticker,
+                    series_ticker=series_ref.ticker,
+                    category=cat_ref.name,
+                    fee_type=series_ref.fee_type,
+                    sub_title=event_node.sub_title,
+                    close_time=(
+                        event_node.close_time.isoformat() if event_node.close_time else None
+                    ),
+                    volume_24h_a=mkt.volume_24h,
+                    volume_24h_b=mkt.volume_24h,
+                )
+            )
