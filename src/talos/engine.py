@@ -727,13 +727,30 @@ class TradingEngine:
         reason: str,
         scheduled_start: datetime | None = None,
     ) -> None:
-        """Flip all pairs sharing kalshi_event_ticker into exit-only together.
+        """Flip all pairs sharing kalshi_event_ticker into exit-only.
 
-        For a Fed presser with 46 market-pairs, this ensures all 46 gate
-        simultaneously rather than one per tick.
+        Adds each sibling pair's pair-level event_ticker to _exit_only_events
+        so downstream enforcement (_enforce_all_exit_only, adjuster ledger
+        lookups) keeps working — _exit_only_events is a pair-level set.
+
+        For sports (where event_ticker == kalshi_event_ticker), this adds the
+        single event key. For non-sports multi-market events, this adds
+        every market-pair's event_ticker.
         """
-        self._exit_only_events.add(kalshi_event_ticker)
-        self._game_started_events.add(kalshi_event_ticker)
+        flipped: list[str] = []
+        for pair in self._scanner.pairs:
+            pair_key = pair.kalshi_event_ticker or pair.event_ticker
+            if pair_key != kalshi_event_ticker:
+                continue
+            if pair.event_ticker in self._exit_only_events:
+                continue
+            self._exit_only_events.add(pair.event_ticker)
+            self._game_started_events.add(pair.event_ticker)
+            flipped.append(pair.event_ticker)
+
+        if not flipped:
+            return
+
         name = self._display_name(kalshi_event_ticker)
         self._notify(
             f"EXIT-ONLY: {name} — {reason}",
@@ -744,6 +761,8 @@ class TradingEngine:
             "exit_only_auto_trigger",
             kalshi_event_ticker=kalshi_event_ticker,
             reason=reason,
+            flipped_pairs=flipped,
+            pair_count=len(flipped),
             scheduled_start=(scheduled_start.isoformat() if scheduled_start else None),
         )
 
@@ -1190,6 +1209,13 @@ class TradingEngine:
 
         Runs every 30s as a safety net — catches anything WS missed.
         """
+        # Startup safety gate: tree_mode waits for milestones to load before
+        # the first trading cycle runs. Hard cap inside wait_for_ready_for_trading
+        # means we never deadlock. Subsequent ticks pass through immediately
+        # because _ready_for_trading stays set.
+        if self._auto_config.tree_mode and not self._ready_for_trading.is_set():
+            await self.wait_for_ready_for_trading()
+
         await self._recover_stale_books()
 
         # Bump sync generation so optimistic placements from this cycle

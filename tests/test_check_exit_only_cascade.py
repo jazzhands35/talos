@@ -50,10 +50,15 @@ def test_milestone_within_lead_flips_all_sibling_pairs():
     # Start time is now + 20 min → inside the 30-min lead window
     start = datetime.now(UTC) + timedelta(minutes=20)
     e._milestone_resolver.event_start.return_value = start
+    # Replace the MagicMock stub with the real bound method so the actual
+    # multi-pair behavior is exercised.
+    e._flip_exit_only_for_key = TradingEngine._flip_exit_only_for_key.__get__(e)
     e._check_exit_only_tree_mode()
-    # _flip_exit_only_for_key should have been called once (dedupe by kalshi ticker)
-    assert e._flip_exit_only_for_key.call_count == 1
-    assert "K" in e._exit_only_events
+    # All sibling pair event_tickers should be in _exit_only_events, NOT the
+    # kalshi_event_ticker — _exit_only_events is a pair-level set.
+    assert "K-1" in e._exit_only_events
+    assert "K-2" in e._exit_only_events
+    assert "K" not in e._exit_only_events
 
 
 def test_milestone_beyond_lead_does_not_flip():
@@ -76,8 +81,12 @@ def test_sports_gsr_live_state_flips_immediately():
     gs.state = "live"
     gs.scheduled_start = datetime.now(UTC) - timedelta(minutes=5)
     e._game_status_resolver.get.return_value = gs
+    # Use real method so the pair-keyed behavior is exercised.
+    e._flip_exit_only_for_key = TradingEngine._flip_exit_only_for_key.__get__(e)
     e._check_exit_only_tree_mode()
-    e._flip_exit_only_for_key.assert_called_once()
+    # For sports, event_ticker == kalshi_event_ticker, so the pair's
+    # event_ticker is added to _exit_only_events.
+    assert "KXNBAGAME-26APR20BOSNYR" in e._exit_only_events
 
 
 def test_no_schedule_logs_once_and_skips_flip():
@@ -89,3 +98,26 @@ def test_no_schedule_logs_once_and_skips_flip():
     e._check_exit_only_tree_mode()
     e._log_once.assert_called_once()
     e._flip_exit_only_for_key.assert_not_called()
+
+
+def test_tree_mode_flip_adds_all_sibling_pair_event_tickers():
+    """Non-sports multi-market: flip adds every market-pair's event_ticker
+    (not the kalshi_event_ticker) so adjuster ledger lookups still work."""
+    p1 = _Pair("KXFEDMENTION-26APR-YIEL", "KXFEDMENTION-26APR")
+    p2 = _Pair("KXFEDMENTION-26APR-TRAD", "KXFEDMENTION-26APR")
+    p3 = _Pair("KXFEDMENTION-26APR-RECE", "KXFEDMENTION-26APR")
+    e = _engine_with_scanner([p1, p2, p3])
+    e._tree_metadata_store.manual_event_start.return_value = None
+    start = datetime.now(UTC) + timedelta(minutes=20)
+    e._milestone_resolver.event_start.return_value = start
+    # Replace the MagicMock _flip_exit_only_for_key stub with the real method
+    e._flip_exit_only_for_key = TradingEngine._flip_exit_only_for_key.__get__(e)
+
+    e._check_exit_only_tree_mode()
+
+    # All three market-pairs should be in _exit_only_events by their
+    # PAIR event_ticker, not by the kalshi_event_ticker
+    assert "KXFEDMENTION-26APR-YIEL" in e._exit_only_events
+    assert "KXFEDMENTION-26APR-TRAD" in e._exit_only_events
+    assert "KXFEDMENTION-26APR-RECE" in e._exit_only_events
+    assert "KXFEDMENTION-26APR" not in e._exit_only_events
