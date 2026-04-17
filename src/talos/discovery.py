@@ -8,12 +8,19 @@ Two-level cache:
 from __future__ import annotations
 
 import asyncio
+import contextlib
+from datetime import UTC, datetime
 from typing import Any
 
 import httpx
 import structlog
 
-from talos.models.tree import CategoryNode, SeriesNode
+from talos.models.tree import (
+    CategoryNode,
+    EventNode,
+    MarketNode,
+    SeriesNode,
+)
 
 logger = structlog.get_logger()
 
@@ -26,6 +33,8 @@ class DiscoveryService:
     Holds its own semaphore (default 5 slots) so discovery calls can't
     starve trading calls on the shared REST client pool.
     """
+
+    EVENTS_TTL_SECONDS = 300  # 5 min
 
     def __init__(
         self,
@@ -93,3 +102,133 @@ class DiscoveryService:
             finally:
                 if self._owns_http:
                     await http.aclose()
+
+    # ── Events (lazy, 5-min TTL) ─────────────────────────────────────
+
+    async def get_events_for_series(self, series_ticker: str) -> dict[str, EventNode]:
+        """Return events for a series, fetching lazily if not cached or stale.
+
+        Returns {} for unknown series (not raised).
+        """
+        series = self._find_series(series_ticker)
+        if series is None:
+            return {}
+
+        now = datetime.now(UTC)
+        needs_fetch = (
+            series.events is None
+            or series.events_loaded_at is None
+            or (now - series.events_loaded_at).total_seconds() > self.EVENTS_TTL_SECONDS
+        )
+        if not needs_fetch and series.events is not None:
+            return series.events
+
+        try:
+            raw = await self._fetch_events_for_series(series_ticker)
+        except Exception:
+            logger.warning(
+                "discovery_events_fetch_failed",
+                series=series_ticker,
+                exc_info=True,
+            )
+            # Keep previous cache (if any), just don't update timestamp
+            return series.events or {}
+
+        events: dict[str, EventNode] = {}
+        for raw_ev in raw:
+            try:
+                events[raw_ev["event_ticker"]] = self._parse_event(raw_ev)
+            except Exception:
+                logger.warning(
+                    "discovery_event_parse_failed",
+                    event_ticker=raw_ev.get("event_ticker"),
+                    exc_info=True,
+                )
+
+        series.events = events
+        series.events_loaded_at = now
+        return events
+
+    def _find_series(self, series_ticker: str) -> SeriesNode | None:
+        for cat in self.categories.values():
+            if series_ticker in cat.series:
+                return cat.series[series_ticker]
+        return None
+
+    async def _fetch_events_for_series(self, series_ticker: str) -> list[dict[str, Any]]:
+        async with self._sem:
+            http = self._http or httpx.AsyncClient(timeout=httpx.Timeout(30.0))
+            try:
+                resp = await http.get(
+                    f"{_KALSHI_API_BASE}/events",
+                    params={
+                        "series_ticker": series_ticker,
+                        "status": "open",
+                        "with_nested_markets": "true",
+                        "limit": "200",
+                    },
+                )
+                resp.raise_for_status()
+                data = resp.json()
+                return data.get("events", [])
+            finally:
+                if self._owns_http:
+                    await http.aclose()
+
+    def _parse_event(self, raw: dict[str, Any]) -> EventNode:
+        markets = []
+        for m in raw.get("markets", []):
+            try:
+                markets.append(self._parse_market(m))
+            except Exception:
+                logger.warning(
+                    "market_parse_failed",
+                    ticker=m.get("ticker"),
+                    exc_info=True,
+                )
+        close = raw.get("close_time")
+        close_dt = None
+        if close:
+            with contextlib.suppress(ValueError):
+                close_dt = datetime.fromisoformat(close.replace("Z", "+00:00"))
+        return EventNode(
+            ticker=raw["event_ticker"],
+            series_ticker=raw.get("series_ticker", ""),
+            title=raw.get("title", ""),
+            sub_title=raw.get("sub_title", ""),
+            close_time=close_dt,
+            markets=markets,
+            fetched_at=datetime.now(UTC),
+        )
+
+    def _parse_market(self, raw: dict[str, Any]) -> MarketNode:
+        close = raw.get("close_time")
+        close_dt = None
+        if close:
+            with contextlib.suppress(ValueError):
+                close_dt = datetime.fromisoformat(close.replace("Z", "+00:00"))
+        # open_interest may arrive as string in some responses
+        oi_raw = raw.get("open_interest_fp") or raw.get("open_interest") or 0
+        try:
+            oi = int(float(oi_raw))
+        except (ValueError, TypeError):
+            oi = 0
+        return MarketNode(
+            ticker=raw.get("ticker", ""),
+            title=raw.get("title", ""),
+            yes_bid=_to_cents(raw.get("yes_bid_dollars")),
+            yes_ask=_to_cents(raw.get("yes_ask_dollars")),
+            volume_24h=int(raw.get("volume_24h") or 0),
+            open_interest=oi,
+            status=raw.get("status", "active"),
+            close_time=close_dt,
+        )
+
+
+def _to_cents(val: Any) -> int | None:
+    if val is None:
+        return None
+    try:
+        return int(round(float(val) * 100))
+    except (ValueError, TypeError):
+        return None
