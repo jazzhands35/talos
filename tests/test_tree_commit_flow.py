@@ -5,6 +5,7 @@ from unittest.mock import AsyncMock
 import pytest
 
 from talos.models.tree import ArbPairRecord, RemoveOutcome, StagedChanges
+from talos.ui.schedule_popup import SchedulePopup
 from talos.ui.tree_screen import TreeScreen
 
 
@@ -67,8 +68,9 @@ async def test_commit_clean_add_triggers_engine_add():
     )
     screen.staged_changes = StagedChanges(to_add=[r])
 
-    await screen.commit()
+    completed = await screen.commit()
 
+    assert completed is True
     engine.add_pairs_from_selection.assert_awaited_once()
     assert screen.staged_changes.is_empty()
 
@@ -86,8 +88,9 @@ async def test_commit_all_removed_applies_unticked():
         to_set_unticked=["K"],
     )
 
-    await screen.commit()
+    completed = await screen.commit()
 
+    assert completed is True
     assert md.applied == ["K"]
 
 
@@ -109,8 +112,9 @@ async def test_commit_winding_down_defers_unticked():
         to_set_unticked=["K"],
     )
 
-    await screen.commit()
+    completed = await screen.commit()
 
+    assert completed is True
     # NOT applied directly
     assert md.applied == []
     # Instead, deferred
@@ -146,8 +150,9 @@ async def test_commit_set_manual_event_start():
         to_set_manual_start={"K-SURV": "2026-04-22T20:00:00-04:00"},
     )
 
-    await screen.commit()
+    completed = await screen.commit()
 
+    assert completed is True
     assert calls == [("K-SURV", "2026-04-22T20:00:00-04:00")]
 
 
@@ -307,6 +312,49 @@ async def test_commit_applies_manual_event_start_before_engine_add():
         lambda et: "2026-04-22T20:00:00-04:00" if et == "K" else None
     )
 
-    await screen.commit()
+    completed = await screen.commit()
+    assert completed is True
     # Manual start must be applied before engine add.
     assert order.index("set_manual:K") < order.index("engine_add")
+
+
+def test_schedule_popup_rejects_naive_datetime():
+    with pytest.raises(ValueError):
+        SchedulePopup._parse_aware_datetime("2026-04-22T20:00:00")
+
+    parsed = SchedulePopup._parse_aware_datetime("2026-04-22T20:00:00-04:00")
+    assert parsed.tzinfo is not None
+
+
+@pytest.mark.asyncio
+async def test_action_commit_changes_does_not_announce_success_on_cancel():
+    screen = cast(Any, TreeScreen.__new__(TreeScreen))
+    screen.staged_changes = StagedChanges(
+        to_add=[
+            ArbPairRecord(
+                event_ticker="K-1",
+                ticker_a="K-1",
+                ticker_b="K-1",
+                kalshi_event_ticker="K",
+                series_ticker="KXSURVIVORMENTION",
+                category="Mentions",
+            )
+        ]
+    )
+
+    notifications: list[tuple[str, str]] = []
+    rebuilds: list[str] = []
+
+    async def _commit() -> bool:
+        return False
+
+    screen.commit = _commit  # type: ignore[method-assign]
+    screen.notify = lambda msg, severity="information": notifications.append(  # type: ignore[method-assign]
+        (msg, severity)
+    )
+    screen._rebuild_tree = lambda: rebuilds.append("rebuilt")  # type: ignore[method-assign]
+
+    await screen.action_commit_changes()
+
+    assert notifications == []
+    assert rebuilds == []

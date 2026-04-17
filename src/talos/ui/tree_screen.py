@@ -405,7 +405,7 @@ class TreeScreen(Screen):
             needs.append(r)
         return needs
 
-    async def commit(self) -> None:
+    async def commit(self) -> bool:
         """Push staged changes through Engine and reconcile metadata.
 
         Pre-commit: any staged add whose event has no milestone, no manual
@@ -415,7 +415,7 @@ class TreeScreen(Screen):
         popup aborts the commit and preserves staged_changes.
         """
         if self._engine is None or self._metadata is None:
-            return
+            return False
 
         # Pre-commit validation: prompt for any uncurated events.
         needs_schedule = self._events_needing_schedule()
@@ -427,7 +427,7 @@ class TreeScreen(Screen):
             if result is None:
                 # User cancelled — abort commit, preserve staged_changes.
                 self.app.notify("Commit cancelled.", severity="warning")
-                return
+                return False
             # Merge popup-provided schedules into staged.to_set_manual_start.
             self.staged_changes.to_set_manual_start.update(result)
 
@@ -478,6 +478,7 @@ class TreeScreen(Screen):
 
         # 4. Clear staged.
         self.staged_changes = StagedChanges.empty()
+        return True
 
     def on_event_fully_removed(self, kalshi_event_ticker: str) -> None:
         """Engine listener callback: promote deferred [·] to applied."""
@@ -519,7 +520,9 @@ class TreeScreen(Screen):
         if self.staged_changes.is_empty():
             self.notify("No staged changes to commit.", severity="information")
             return
-        await self.commit()
+        completed = await self.commit()
+        if not completed:
+            return
         self.notify("Commit complete.", severity="information")
         # Rebuild the tree so node glyphs reflect cleared staging
         self._rebuild_tree()

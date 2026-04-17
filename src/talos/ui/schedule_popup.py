@@ -116,6 +116,14 @@ class SchedulePopup(ModalScreen[dict[str, str] | None]):
                 inp.value = "(no exit-only)"
                 inp.disabled = True
 
+    @staticmethod
+    def _parse_aware_datetime(raw: str) -> datetime:
+        """Parse a manual event-start input and require timezone awareness."""
+        parsed = datetime.fromisoformat(raw)
+        if parsed.tzinfo is None or parsed.utcoffset() is None:
+            raise ValueError("timezone offset required")
+        return parsed
+
     def _collect(self) -> dict[str, str] | None:
         """Validate all inputs. Return dict on success, None on failure."""
         result: dict[str, str] = {}
@@ -135,10 +143,11 @@ class SchedulePopup(ModalScreen[dict[str, str] | None]):
                 )
                 return None
             try:
-                datetime.fromisoformat(raw)
+                self._parse_aware_datetime(raw)
             except ValueError:
                 self.app.notify(
-                    f"{et}: invalid ISO 8601 format — example: 2026-04-22T20:00:00-04:00",
+                    f"{et}: invalid ISO 8601 with timezone offset; "
+                    "example: 2026-04-22T20:00:00-04:00",
                     severity="error",
                 )
                 return None
