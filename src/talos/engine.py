@@ -175,6 +175,10 @@ class TradingEngine:
         self._last_ws_reaction: dict[str, float] = {}  # observability: last WS reaction timestamp
         self._reaction_consumer_started: bool = False
 
+        # Startup gate: set once the milestone resolver cascade is armed.
+        # TradingEngine.wait_for_ready_for_trading() awaits this with a hard cap.
+        self._ready_for_trading: asyncio.Event = asyncio.Event()
+
         # Wire portfolio feed callbacks
         if self._portfolio_feed is not None:
             self._portfolio_feed.on_order_update = self._on_order_update
@@ -233,6 +237,28 @@ class TradingEngine:
         event-driven rebalancing instead of polling all 1000+ pairs.
         """
         self._dirty_events.add(event_ticker)
+
+    async def wait_for_ready_for_trading(self) -> None:
+        """Block until the resolver cascade is armed, or a hard cap expires.
+
+        Flag-off (tree_mode = False): return immediately (legacy behavior).
+        Flag-on: await _ready_for_trading.set() OR startup_milestone_wait_seconds
+        elapsed — whichever first. Emits structured log on timeout.
+        """
+        if not self._auto_config.tree_mode:
+            return
+
+        timeout = self._auto_config.startup_milestone_wait_seconds
+        try:
+            await asyncio.wait_for(self._ready_for_trading.wait(), timeout=timeout)
+            logger.info("startup_gate_ready", elapsed_s=None)
+        except TimeoutError:
+            self._ready_for_trading.set()
+            logger.warning(
+                "startup_gate_timeout",
+                elapsed_s=timeout,
+                exit_only_degraded=True,
+            )
 
     # ── Per-event claim mechanism ─────────────���────────────────────
 
