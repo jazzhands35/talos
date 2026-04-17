@@ -10,7 +10,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 from datetime import UTC, datetime
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import httpx
 import structlog
@@ -21,6 +21,9 @@ from talos.models.tree import (
     MarketNode,
     SeriesNode,
 )
+
+if TYPE_CHECKING:
+    from talos.milestones import MilestoneResolver
 
 logger = structlog.get_logger()
 
@@ -46,6 +49,7 @@ class DiscoveryService:
         self._owns_http = http is None
         self._sem = asyncio.Semaphore(concurrent_limit)
         self.categories: dict[str, CategoryNode] = {}
+        self._stopped = False
 
     # ── Bootstrap ────────────────────────────────────────────────────
 
@@ -223,6 +227,39 @@ class DiscoveryService:
             status=raw.get("status", "active"),
             close_time=close_dt,
         )
+
+    # ── Background milestone loop ────────────────────────────────────
+
+    def stop(self) -> None:
+        """Signal background loops to exit after current iteration."""
+        self._stopped = True
+
+    async def run_milestone_loop(
+        self,
+        resolver: MilestoneResolver,
+        *,
+        interval_seconds: float = 300.0,
+    ) -> None:
+        """Drive MilestoneResolver.refresh on a timer until stop() is called.
+
+        Exceptions inside refresh are caught by the resolver itself (it logs
+        and keeps old state); if something escapes, we still catch here so
+        the loop never dies silently.
+        """
+        # Initial refresh ASAP
+        await self._safe_refresh(resolver)
+        while not self._stopped:
+            await asyncio.sleep(interval_seconds)
+            if self._stopped:
+                break
+            await self._safe_refresh(resolver)
+
+    async def _safe_refresh(self, resolver: MilestoneResolver) -> None:
+        try:
+            async with self._sem:
+                await resolver.refresh()
+        except Exception:
+            logger.warning("milestone_loop_iteration_failed", exc_info=True)
 
 
 def _to_cents(val: Any) -> int | None:
