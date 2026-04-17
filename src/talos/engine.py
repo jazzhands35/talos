@@ -145,6 +145,7 @@ class TradingEngine:
         self._order_placed_at: dict[str, float] = {}  # order_id -> monotonic timestamp
         self._exit_only_events: set[str] = set()  # events in exit-only mode
         self._winding_down: set[str] = set()  # pairs removed-while-inventory-present
+        self._event_fully_removed_listeners: list = []
         self._game_started_events: set[str] = set()  # events where game is live/final
         self._last_jump_eval: dict[str, tuple[int, int]] = {}  # ticker -> (book_top, resting)
         # Dedup for replay log: only write an imbalance-eval row on transition.
@@ -1315,6 +1316,8 @@ class TradingEngine:
 
             # Check exit-only triggers and enforce cancellations
             self._check_exit_only()
+            if self._auto_config.tree_mode:
+                await self._reconcile_winding_down()
             await self._enforce_all_exit_only()
 
             # Persist ledger fill state so restarts don't lose fills
@@ -3259,6 +3262,67 @@ class TradingEngine:
 
         self._persist_active_games()
         return outcomes
+
+    async def _reconcile_winding_down(self) -> None:
+        """Remove winding-down pairs whose ledger has cleared.
+
+        For each cleanly-removed pair, check if it was the last one sharing
+        its kalshi_event_ticker. If so, emit event_fully_removed to all
+        subscribed listeners (TreeScreen uses this to apply deferred [.] flags).
+        """
+        to_check = list(self._winding_down)
+        to_remove: list[str] = []
+        for pt in to_check:
+            ledger = self._adjuster.get_ledger(pt)
+            if ledger is None:
+                continue
+            # Support both ledger API (real) and MagicMock (tests)
+            has_filled = getattr(ledger, "has_filled_positions", None)
+            has_resting = getattr(ledger, "has_resting_orders", None)
+            if callable(has_filled) and callable(has_resting):
+                if has_filled() or has_resting():
+                    continue
+            else:
+                # Real PositionLedger: use count accessors
+                if ledger.filled_count(Side.A) or ledger.filled_count(Side.B):
+                    continue
+                if ledger.resting_count(Side.A) or ledger.resting_count(Side.B):
+                    continue
+            to_remove.append(pt)
+
+        if not to_remove:
+            return
+
+        outcomes = await self.remove_pairs_from_selection(to_remove)
+        for pt in to_remove:
+            self._winding_down.discard(pt)
+
+        # Emit event_fully_removed for any kalshi_event_ticker that no longer
+        # has any pair in GameManager._games. Pairs we just asked to remove in
+        # this pass are excluded from the "still present" check since the real
+        # remove_pairs_from_selection has already popped them from _games (and
+        # tests mock remove_pairs_from_selection directly, so we treat the
+        # pair_tickers we scheduled for removal as already-gone).
+        just_removed_pts = set(to_remove)
+        removed_events = {o.kalshi_event_ticker for o in outcomes if o.status == "removed"}
+        for kalshi_et in removed_events:
+            still_present = any(
+                pt not in just_removed_pts
+                and (p.kalshi_event_ticker or p.event_ticker) == kalshi_et
+                for pt, p in self._game_manager._games.items()
+            )
+            if not still_present:
+                for listener in self._event_fully_removed_listeners:
+                    try:
+                        listener(kalshi_et)
+                    except Exception:
+                        logger.warning(
+                            "event_fully_removed_listener_failed",
+                            exc_info=True,
+                        )
+
+    def add_event_fully_removed_listener(self, fn) -> None:
+        self._event_fully_removed_listeners.append(fn)
 
     def _mark_engine_state(self, pair_ticker: str, state: str) -> None:
         """Set per-pair engine_state on the ArbPair in GameManager._games
