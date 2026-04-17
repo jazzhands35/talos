@@ -148,6 +148,7 @@ class TradingEngine:
         # Dedup for replay log: only write an imbalance-eval row on transition.
         self._last_imbalance_outcome: dict[str, str] = {}
         self._stale_candidates: set[str] = set()  # two-strike stale position cleanup
+        self._log_once_keys: set[tuple[str, str]] = set()
         self._dirty_events: set[str] = set()  # events needing imbalance check (WS-driven)
         self._overcommit_events: set[str] = set()  # unit overcommit — priority
         # Reconciliation-derived overcommit targets: event → {side → target_resting}
@@ -635,6 +636,97 @@ class TradingEngine:
         return (None, None)
 
     def _check_exit_only(self) -> None:
+        """Dispatch to legacy or tree-mode cascade based on automation flag."""
+        if self._auto_config.tree_mode:
+            self._check_exit_only_tree_mode()
+        else:
+            self._check_exit_only_legacy()
+
+    def _check_exit_only_tree_mode(self) -> None:
+        """Resolver-cascade driven auto-trigger per spec §5.2.
+
+        Dedupes by kalshi_event_ticker so multi-market events (e.g., Fed
+        presser with 46 markets) get a single scheduling decision applied
+        to all sibling pairs via _flip_exit_only_for_key.
+        """
+        now = datetime.now(UTC)
+        seen_events: set[str] = set()
+
+        for pair in self._scanner.pairs:
+            key = pair.kalshi_event_ticker or pair.event_ticker
+            if key in seen_events:
+                continue
+            seen_events.add(key)
+
+            if pair.event_ticker in self._exit_only_events:
+                continue
+
+            start_time, source = self._resolve_event_start(key, pair)
+
+            if source == "manual_opt_out":
+                continue
+
+            if source is None:
+                self._log_once("exit_only_no_schedule", key)
+                continue
+
+            # Sports GSR additionally supplies live/post state — flip immediately
+            if source == "sports_gsr" and self._game_status_resolver is not None:
+                gs = self._game_status_resolver.get(pair.event_ticker)
+                if gs and gs.state in ("live", "post"):
+                    self._flip_exit_only_for_key(
+                        key,
+                        reason=f"sports_{gs.state}",
+                    )
+                    continue
+
+            if start_time is None:
+                continue
+
+            lead_min = self._auto_config.exit_only_minutes
+            if (start_time - now).total_seconds() < lead_min * 60:
+                self._flip_exit_only_for_key(
+                    key,
+                    reason=source,
+                    scheduled_start=start_time,
+                )
+
+    def _flip_exit_only_for_key(
+        self,
+        kalshi_event_ticker: str,
+        *,
+        reason: str,
+        scheduled_start: datetime | None = None,
+    ) -> None:
+        """Flip all pairs sharing kalshi_event_ticker into exit-only together.
+
+        For a Fed presser with 46 market-pairs, this ensures all 46 gate
+        simultaneously rather than one per tick.
+        """
+        self._exit_only_events.add(kalshi_event_ticker)
+        self._game_started_events.add(kalshi_event_ticker)
+        name = self._display_name(kalshi_event_ticker)
+        self._notify(
+            f"EXIT-ONLY: {name} — {reason}",
+            "warning",
+            toast=True,
+        )
+        logger.info(
+            "exit_only_auto_trigger",
+            kalshi_event_ticker=kalshi_event_ticker,
+            reason=reason,
+            scheduled_start=(scheduled_start.isoformat() if scheduled_start else None),
+        )
+
+    def _log_once(self, event_key: str, event_ticker: str) -> None:
+        """Emit a structured log at most once per event_ticker per process."""
+        key = (event_key, event_ticker)
+        if key in self._log_once_keys:
+            return
+        self._log_once_keys.add(key)
+        logger.info(event_key, event_ticker=event_ticker)
+
+    def _check_exit_only_legacy(self) -> None:
         """Auto-trigger exit-only based on game status, auto-remove when done.
 
         Called from recompute_positions (runs every refresh cycle).
