@@ -574,36 +574,64 @@ async def on_commit(self):
 
         # 3. Engine add/remove (engine handles full wiring + persistence)
         added: list[ArbPair] = []
-        removed: list[str] = []
+        remove_outcomes: list[RemoveOutcome] = []
         if staged.to_add:
             added = await self._engine.add_pairs_from_selection(staged.to_add)
         if staged.to_remove:
-            removed = await self._engine.remove_pairs_from_selection(staged.to_remove)
+            remove_outcomes = await self._engine.remove_pairs_from_selection(
+                staged.to_remove
+            )
 
-        # 4. Apply untick-state mutations ONLY for pairs the engine actually
-        #    added/removed. This prevents tree_metadata.json from drifting out
-        #    of sync with the monitored set on partial engine failures.
+        # 4. Apply untick-state mutations per §5.1a reconciliation rules.
+        #    - clear_unticked: applied when ALL staged pairs for the event were
+        #      successfully added.
+        #    - set_unticked: applied when ALL staged pairs for the event came
+        #      back as "removed" (none winding_down, none failed).
         added_keys = {p.kalshi_event_ticker or p.event_ticker for p in added}
-        removed_keys = self._keys_for_removed_pairs(removed)
-        applied_set_unticked = [k for k in staged.to_set_unticked if k in removed_keys]
-        applied_clear_unticked = [k for k in staged.to_clear_unticked if k in added_keys]
+        staged_remove_set = set(staged.to_remove)
+        applied_set_unticked = [
+            k for k in staged.to_set_unticked
+            if _should_set_unticked(k, remove_outcomes, staged_remove_set)
+        ]
+        applied_clear_unticked = [
+            k for k in staged.to_clear_unticked if k in added_keys
+        ]
         if applied_set_unticked or applied_clear_unticked:
             self._tree_metadata_store.apply(
                 set_unticked=applied_set_unticked,
                 clear_unticked=applied_clear_unticked,
             )
 
-        # 5. Keep unapplied untick mutations in staged for retry
+        # 5. Reconcile staged state.
+        #
+        # Winding-down pairs are NOT kept in staged.to_remove — the engine
+        # owns their lifecycle via its _winding_down set. When a winding
+        # pair goes flat the engine emits winding_down_completed(kalshi_et),
+        # and the tree applies any deferred [·] at that point (see §5.1b).
+        #
+        # Failed pairs are kept in staged.to_remove for an explicit retry.
+        #
+        # Unapplied untick flags stay in staged until the corresponding
+        # engine events confirm they should fire.
         unapplied_set = set(staged.to_set_unticked) - set(applied_set_unticked)
         unapplied_clear = set(staged.to_clear_unticked) - set(applied_clear_unticked)
-        if unapplied_set or unapplied_clear:
+        failed_removes = [o.pair_ticker for o in remove_outcomes
+                          if o.status == "failed"]
+        if unapplied_set or unapplied_clear or failed_removes:
             self._staged_changes = StagedChanges(
                 to_set_unticked=list(unapplied_set),
                 to_clear_unticked=list(unapplied_clear),
+                to_remove=failed_removes,
             )
-            logger.warning("tree_commit_partial",
-                           unapplied_set=list(unapplied_set),
-                           unapplied_clear=list(unapplied_clear))
+            # Deferred [·] markers tracked separately from staged changes
+            # so they don't appear as "pending edits" in the footer.
+            for k in unapplied_set:
+                if _any_pair_for_event_winding(k, remove_outcomes):
+                    self._deferred_set_unticked.add(k)
+            logger.info("tree_commit_partial",
+                        unapplied_set=list(unapplied_set),
+                        deferred_for_winding=list(self._deferred_set_unticked),
+                        failed_removes=failed_removes)
         else:
             self._staged_changes = StagedChanges.empty()
     except Exception:
@@ -613,79 +641,229 @@ async def on_commit(self):
 
 **Ordering invariant:** metadata writes that represent *pure user intent* (manual_event_start) persist before engine ops; metadata writes that *describe the monitored state* (deliberately_unticked set/clear) persist only after the corresponding engine mutation succeeds. This prevents partial-failure desync where `tree_metadata.json` says an event is deliberately unticked while the engine is still actively monitoring it, or vice versa.
 
-`Engine.add_pairs_from_selection(records)` is a new method that wraps the existing orchestration:
+`Engine.add_pairs_from_selection(records)` mirrors today's `add_games` orchestration exactly (see [engine.py:2839](src/talos/engine.py:2839)). Every step of today's URL-add path is preserved, including the critical `resolve_batch()` call that today populates GSR state for newly-added sports pairs:
 
 ```python
-async def add_pairs_from_selection(self, records: list[ArbPairRecord]) -> list[ArbPair]:
-    """Commit path for tree-selected pairs. Full engine wiring + persistence."""
+async def add_pairs_from_selection(
+    self, records: list[ArbPairRecord]
+) -> list[ArbPair]:
+    """Commit path for tree-selected pairs. Full engine wiring + persistence.
+
+    Mirrors Engine.add_games (engine.py:2839) step-for-step so sports pairs
+    get initial GSR resolution immediately, not on the next periodic refresh.
+    """
     pairs: list[ArbPair] = []
+
+    # Step 1: reconstitute each pair through the existing restore pathway
     for r in records:
         try:
-            # Reconstitute pair through the existing restore pathway, stamping source
             pair = self._game_manager.restore_game({**r, "source": "tree"})
             if pair is None:
                 continue
-            self._adjuster.add_event(pair)
-            if self._game_status_resolver is not None:
-                self._game_status_resolver.set_expiration(
-                    pair.event_ticker, pair.expected_expiration_time
-                )
-            await self._feed.subscribe(pair.ticker_a)
-            if pair.ticker_b != pair.ticker_a:
-                await self._feed.subscribe(pair.ticker_b)
-            if self._data_collector is not None:
-                self._data_collector.log_game_add(
-                    event_ticker=pair.event_ticker,
-                    series_ticker=pair.series_ticker,
-                    source="tree",
-                    ticker_a=pair.ticker_a,
-                    ticker_b=pair.ticker_b,
-                    fee_type=pair.fee_type,
-                    fee_rate=pair.fee_rate,
-                    scheduled_start=self._resolve_event_start_iso(pair),
-                )
             pairs.append(pair)
         except Exception:
             logger.warning("tree_add_failed",
                            pair_ticker=r.get("event_ticker"), exc_info=True)
-    # Persist updated games_full after full batch succeeds
+
+    # Step 2: wire adjuster ledgers
+    for pair in pairs:
+        self._adjuster.add_event(pair)
+
+    # Step 3: wire GameStatusResolver — set_expiration THEN resolve_batch.
+    # resolve_batch() is non-optional. Without it, the sports branch of the
+    # exit-only cascade returns None (no scheduled_start, no live/post state)
+    # until the next periodic GSR refresh, which can be up to an hour later.
+    if self._game_status_resolver is not None and pairs:
+        for pair in pairs:
+            self._game_status_resolver.set_expiration(
+                pair.event_ticker, pair.expected_expiration_time
+            )
+        batch = [
+            (p.event_ticker,
+             self._game_manager.subtitles.get(p.event_ticker, ""))
+            for p in pairs
+        ]
+        await self._game_status_resolver.resolve_batch(batch)
+
+    # Step 4: feed subscriptions
+    for pair in pairs:
+        await self._feed.subscribe(pair.ticker_a)
+        if pair.ticker_b != pair.ticker_a:
+            await self._feed.subscribe(pair.ticker_b)
+
+    # Step 5: data_collector logging — now that GSR has scheduled_start, log it
+    if self._data_collector is not None:
+        for pair in pairs:
+            gs = (self._game_status_resolver.get(pair.event_ticker)
+                  if self._game_status_resolver else None)
+            self._data_collector.log_game_add(
+                event_ticker=pair.event_ticker,
+                series_ticker=pair.series_ticker,
+                source="tree",
+                ticker_a=pair.ticker_a,
+                ticker_b=pair.ticker_b,
+                volume_a=self._game_manager.volumes_24h.get(pair.ticker_a, 0),
+                volume_b=self._game_manager.volumes_24h.get(pair.ticker_b, 0),
+                fee_type=pair.fee_type,
+                fee_rate=pair.fee_rate,
+                scheduled_start=(gs.scheduled_start.isoformat()
+                                 if gs and gs.scheduled_start else None),
+            )
+
+    # Step 6: persist games_full after the full batch succeeds
     self._persist_active_games()
     return pairs
 ```
 
-`Engine.remove_pairs_from_selection(pair_tickers)` mirrors this with inventory awareness:
+**Correspondence with today's code** ([engine.py:2839-2884](src/talos/engine.py:2839)):
+
+| Today's step | Spec step | Preserved? |
+|---|---|---|
+| `game_manager.add_games(urls)` | Step 1 `restore_game` (non-REST path) | ✓ |
+| `adjuster.add_event(pair)` loop | Step 2 | ✓ |
+| `set_expiration` loop + `resolve_batch(batch)` | Step 3 | ✓ |
+| `feed.subscribe(ticker)` per leg | Step 4 | ✓ (today's `add_games` defers to the later bulk subscribe; we inline for clarity) |
+| `data_collector.log_game_add(...)` | Step 5 | ✓ |
+| (new) persistence | Step 6 | (new behavior; today's path doesn't re-persist on every add) |
+
+The only **semantic** change from today's flow is Step 6 — explicit persistence after each batch. Today, persistence happens at shutdown/session-save time; with tree-driven commits being the authoritative source, we persist immediately so a crash between commit and shutdown doesn't lose state.
+
+`Engine.remove_pairs_from_selection(pair_tickers)` returns a structured outcome per pair so the commit reconciliation logic can decide untick metadata correctly for events with many market-pairs:
 
 ```python
-async def remove_pairs_from_selection(self, pair_tickers: list[str]) -> None:
+class RemoveOutcome(BaseModel):
+    pair_ticker: str
+    kalshi_event_ticker: str         # grouping key for event-level decisions
+    status: Literal["removed", "winding_down", "not_found", "failed"]
+    reason: str | None = None        # e.g., "inventory filled=5,3" for winding_down
+
+async def remove_pairs_from_selection(
+    self, pair_tickers: list[str]
+) -> list[RemoveOutcome]:
+    """Commit path for tree-unticked pairs.
+
+    Returns a structured per-pair outcome so the caller can decide per-event
+    whether to mark deliberately_unticked, leave it winding, or retry later.
+    """
+    outcomes: list[RemoveOutcome] = []
     for pt in pair_tickers:
         pair = self._game_manager.get_game(pt)
         if pair is None:
+            outcomes.append(RemoveOutcome(
+                pair_ticker=pt,
+                kalshi_event_ticker="",
+                status="not_found",
+            ))
             continue
+        kalshi_et = pair.kalshi_event_ticker or pair.event_ticker
 
-        # Inventory check — invariant #2 from §1
-        ledger = self._adjuster.get_ledger(pt)
-        if ledger and (ledger.has_filled_positions() or ledger.has_resting_orders()):
-            self._winding_down.add(pt)
-            await self.enforce_exit_only(pt)
-            logger.info("winding_down_started",
-                        pair_ticker=pt,
-                        filled_a=ledger.filled_count(Side.A),
-                        filled_b=ledger.filled_count(Side.B))
-            # Do NOT remove from games_full yet — it comes out when ledger clears.
-            continue
+        try:
+            # Inventory check — invariant #2 from §1
+            ledger = self._adjuster.get_ledger(pt)
+            if ledger and (ledger.has_filled_positions() or ledger.has_resting_orders()):
+                self._winding_down.add(pt)
+                await self.enforce_exit_only(pt)
+                reason = (f"filled={ledger.filled_count(Side.A)},"
+                          f"{ledger.filled_count(Side.B)} "
+                          f"resting={ledger.resting_count(Side.A)},"
+                          f"{ledger.resting_count(Side.B)}")
+                logger.info("winding_down_started",
+                            pair_ticker=pt, reason=reason)
+                outcomes.append(RemoveOutcome(
+                    pair_ticker=pt,
+                    kalshi_event_ticker=kalshi_et,
+                    status="winding_down",
+                    reason=reason,
+                ))
+                continue
 
-        # Clean removal: reverse of add_pairs_from_selection
-        self._exit_only_events.discard(pt)
-        self._stale_candidates.discard(pt)
-        if self._game_status_resolver is not None:
-            self._game_status_resolver.remove(pt)
-        self._adjuster.remove_event(pt)
-        await self._game_manager.remove_game(pt)
+            # Clean removal: reverse of add_pairs_from_selection
+            self._exit_only_events.discard(pt)
+            self._stale_candidates.discard(pt)
+            if self._game_status_resolver is not None:
+                self._game_status_resolver.remove(pt)
+            self._adjuster.remove_event(pt)
+            await self._game_manager.remove_game(pt)
+            outcomes.append(RemoveOutcome(
+                pair_ticker=pt,
+                kalshi_event_ticker=kalshi_et,
+                status="removed",
+            ))
+        except Exception as e:
+            logger.warning("tree_remove_failed",
+                           pair_ticker=pt, exc_info=True)
+            outcomes.append(RemoveOutcome(
+                pair_ticker=pt,
+                kalshi_event_ticker=kalshi_et,
+                status="failed",
+                reason=str(e),
+            ))
 
     self._persist_active_games()
+    return outcomes
 ```
 
-`_winding_down` is checked each engine tick. When a pair's ledger clears, the engine calls `remove_pairs_from_selection` with that single ticker and it proceeds to clean removal + persistence update.
+**Same pattern for when winding-down completes later.** When a pair's ledger clears during a runtime tick, the engine internally calls `remove_pairs_from_selection([pt])` with that single ticker. The outcome returns `"removed"`, and the engine's background reconciliation can flip the pair's tree rendering state from `[W]` to gone.
+
+#### 5.1a Commit reconciliation with multi-market events
+
+For a Kalshi event with N market-pairs (Fed presser = up to 46), untick-at-event-level means the tree fans out to N removal records. Each can independently land in any of four states (`removed`, `winding_down`, `not_found`, `failed`). The `deliberately_unticked` flag at event level should only be set when the user's **entire event-level untick intent** was fully honored — i.e., **every** pair of that `kalshi_event_ticker` that was in the batch came back as `removed`.
+
+Rule for applying `to_set_unticked[kalshi_event_ticker]`:
+
+```python
+def _should_set_unticked(
+    kalshi_event_ticker: str,
+    outcomes: list[RemoveOutcome],
+    staged_pair_tickers: set[str],
+) -> bool:
+    """Apply [·] at event level only when every staged pair for this event
+    was cleanly removed — none winding-down, none failed, none missing."""
+    event_outcomes = [o for o in outcomes
+                      if o.kalshi_event_ticker == kalshi_event_ticker
+                      and o.pair_ticker in staged_pair_tickers]
+    if not event_outcomes:
+        return False  # no staged pairs for this event made it to engine
+    return all(o.status == "removed" for o in event_outcomes)
+```
+
+What the tree renders per case:
+
+| All staged pairs for event | Tree state |
+|---|---|
+| All `removed` | `[·]` event-level |
+| Mix of `removed` + `winding_down` | event shows `[-]` partial, remaining market-pairs render `[W]`. No `[·]` at event level. |
+| All `winding_down` | event shows `[W]` event-level (propagated). No `[·]` at event level. |
+| Any `failed` / `not_found` | Retained in staged_changes for retry. Tree shows `* changes pending`. |
+
+When winding-down pairs later complete (ledger clears), the engine's internal single-pair removal emits `winding_down_completed`, and tree rendering updates: if the remaining pairs of the event all come back `removed`, the tree can promote the event to `[·]`. This promotion is driven by the engine's background reconciliation, not by an explicit user commit.
+
+#### 5.1b Deferred untick application via engine events
+
+When an event-level untick commit produces a mix of `removed` and `winding_down` outcomes, the `[·]` flag cannot be applied yet — the event is still being actively monitored until the winding-down pairs go flat. The tree holds these in a `_deferred_set_unticked: set[str]` (keyed by `kalshi_event_ticker`), separate from `staged.to_set_unticked` so they don't render as "pending edits" to the user.
+
+The engine emits two events the tree subscribes to:
+
+- **`winding_down_completed(pair_ticker, kalshi_event_ticker)`** — fires when a single winding-down pair's ledger clears and it's cleanly removed.
+- **`event_fully_removed(kalshi_event_ticker)`** — fires when the last active pair for a Kalshi event is removed (either via commit or via winding-down completion).
+
+Tree handler for `event_fully_removed`:
+
+```python
+async def _on_event_fully_removed(self, kalshi_event_ticker: str) -> None:
+    if kalshi_event_ticker in self._deferred_set_unticked:
+        self._tree_metadata_store.apply(
+            set_unticked=[kalshi_event_ticker],
+        )
+        self._deferred_set_unticked.discard(kalshi_event_ticker)
+        logger.info("deferred_unticked_applied",
+                    kalshi_event_ticker=kalshi_event_ticker)
+    # Tree row for the event now renders [·] event-level on next refresh
+```
+
+**Symmetry for manual re-tick during winding:** If the user re-ticks a `winding_down` pair before it clears, the engine cancels the winding state (exits exit-only, re-engages trading — with confirmation, per §4.2), and emits `winding_down_cancelled(pair_ticker, kalshi_event_ticker)`. The tree handler removes the event from `_deferred_set_unticked` so the `[·]` is not later applied to an event the user changed their mind about.
+
+Both `_deferred_set_unticked` and the engine's `_winding_down` set are process-local. A restart with winding-down pairs intact reads them out of `games_full.json` (they never left), restores them as normal monitored pairs, and the engine's exit-only state is re-established from `_exit_only_events` persistence (if persisted) or re-derived from the resolver cascade. Deferred `[·]` flags are NOT persisted — user intent to mark an event as deliberately unticked must be re-asserted after restart if the wind-down was still pending. Acceptable: the pair still exists post-restart with its `[W]` state rendering correctly from `games_full.json`; the user can simply re-untick.
 
 `_persist_active_games()` is a small helper that calls `save_games_full(records_from_current_active_pairs)` — reuses the existing persistence function. Persistence happens at the end of each add/remove batch, not per-pair, to minimize disk I/O.
 
