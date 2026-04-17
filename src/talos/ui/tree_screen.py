@@ -303,6 +303,25 @@ class TreeScreen(Screen):
             event_count=len(events),
         )
         node.remove_children()
+
+        # Surface likely fetch failures: if bootstrap said this series had
+        # open events but we got zero back, the /events call almost certainly
+        # failed (rate limit, network). Show a leaf so the user knows to
+        # retry rather than staring at a silently-collapsed node.
+        expected = 0
+        cat_series = None
+        for cat in self._discovery.categories.values():
+            if series_ticker in cat.series:
+                cat_series = cat.series[series_ticker]
+                expected = cat_series.event_count or 0
+                break
+        if expected > 0 and not events:
+            node.add_leaf(
+                f"(fetch failed — {expected} expected; press 'r' to retry)",
+                data={"kind": "fetch_error"},
+            )
+            return
+
         for event_ticker, ev in sorted(events.items()):
             state = self._effective_state(event_ticker)
             glyph = self._glyph_for_state(state)

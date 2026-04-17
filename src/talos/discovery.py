@@ -30,6 +30,50 @@ logger = structlog.get_logger()
 
 _KALSHI_API_BASE = "https://api.elections.kalshi.com/trade-api/v2"
 
+# Max retries for rate-limited (429) discovery calls. Kalshi's /events
+# endpoint throttles around 10 req/s per IP; bulk count fetch can fire 40
+# pages back-to-back, so we need to honor Retry-After and back off.
+_MAX_429_RETRIES = 5
+# Per-page sleep between bulk /events pages. Cheap insurance against the
+# 40-page count fetch tripping the rate limiter on the first place.
+_BULK_PAGE_SLEEP_SEC = 0.15
+
+
+async def _get_with_429_retry(
+    http: httpx.AsyncClient,
+    url: str,
+    *,
+    params: dict[str, str] | None = None,
+) -> httpx.Response:
+    """GET with exponential backoff on 429, honoring Retry-After header.
+
+    Discovery calls bypass the main rate-limited Kalshi client by design
+    (they use a dedicated semaphore so they can't starve trading), so this
+    tiny retry wrapper is all we have for handling Kalshi throttling.
+    """
+    delay = 1.0
+    for attempt in range(_MAX_429_RETRIES):
+        resp = await http.get(url, params=params)
+        if resp.status_code != 429:
+            return resp
+        retry_after_hdr = resp.headers.get("retry-after")
+        try:
+            wait = float(retry_after_hdr) if retry_after_hdr else delay
+        except ValueError:
+            wait = delay
+        # Cap waits so one pathological header can't freeze us for an hour.
+        wait = min(max(wait, 0.5), 10.0)
+        logger.info(
+            "discovery_429_backoff",
+            url=url,
+            attempt=attempt + 1,
+            wait_seconds=wait,
+        )
+        await asyncio.sleep(wait)
+        delay = min(delay * 2, 10.0)
+    # Final attempt — whatever comes back, hand it up.
+    return await http.get(url, params=params)
+
 
 class DiscoveryService:
     """Discovery cache for categories, series, and events.
@@ -64,8 +108,15 @@ class DiscoveryService:
         """
         try:
             all_series = await self._fetch_all_series()
-        except Exception:
-            logger.warning("discovery_bootstrap_failed", exc_info=True)
+        except Exception as exc:
+            # Compact log — the full traceback dumps include ~11 MB of
+            # `all_series` locals and drowns the logfile. Keep the type and
+            # message; that's enough to diagnose 429s, timeouts, DNS, etc.
+            logger.warning(
+                "discovery_bootstrap_failed",
+                exc_type=type(exc).__name__,
+                exc_msg=str(exc),
+            )
             return
 
         # Offload the CPU-bound Pydantic construction loop to a thread so
@@ -81,8 +132,15 @@ class DiscoveryService:
             for cat in self.categories.values():
                 for series in cat.series.values():
                     series.event_count = counts.get(series.ticker, 0)
-        except Exception:
-            logger.warning("discovery_event_counts_failed", exc_info=True)
+        except Exception as exc:
+            # Compact log — this fetch runs after the 9730-series build, and
+            # its traceback locals include `all_series` too. Pin down the
+            # failure with type+msg and move on; event_count stays None.
+            logger.warning(
+                "discovery_event_counts_failed",
+                exc_type=type(exc).__name__,
+                exc_msg=str(exc),
+            )
 
         logger.info(
             "discovery_bootstrap_ok",
@@ -152,7 +210,8 @@ class DiscoveryService:
                     }
                     if cursor:
                         params["cursor"] = cursor
-                    resp = await http.get(
+                    resp = await _get_with_429_retry(
+                        http,
                         f"{_KALSHI_API_BASE}/events",
                         params=params,
                     )
@@ -165,6 +224,11 @@ class DiscoveryService:
                     cursor = data.get("cursor")
                     if not cursor:
                         break
+                    # Small per-page breather — costs ~6s over 40 pages,
+                    # but keeps us comfortably under Kalshi's /events
+                    # throttle so the bulk fetch doesn't starve out the
+                    # subsequent per-series expansions the user triggers.
+                    await asyncio.sleep(_BULK_PAGE_SLEEP_SEC)
                 return counts
             finally:
                 if close_http:
@@ -174,7 +238,7 @@ class DiscoveryService:
         async with self._sem:
             http = self._http or httpx.AsyncClient(timeout=httpx.Timeout(30.0))
             try:
-                resp = await http.get(f"{_KALSHI_API_BASE}/series")
+                resp = await _get_with_429_retry(http, f"{_KALSHI_API_BASE}/series")
                 resp.raise_for_status()
                 # JSON-parsing 11 MB synchronously would block the event loop
                 # for 1-3 seconds. Offload to a thread.
@@ -207,11 +271,12 @@ class DiscoveryService:
 
         try:
             raw = await self._fetch_events_for_series(series_ticker)
-        except Exception:
+        except Exception as exc:
             logger.warning(
                 "discovery_events_fetch_failed",
                 series=series_ticker,
-                exc_info=True,
+                exc_type=type(exc).__name__,
+                exc_msg=str(exc),
             )
             # Keep previous cache (if any), just don't update timestamp
             return series.events or {}
@@ -241,7 +306,8 @@ class DiscoveryService:
         async with self._sem:
             http = self._http or httpx.AsyncClient(timeout=httpx.Timeout(30.0))
             try:
-                resp = await http.get(
+                resp = await _get_with_429_retry(
+                    http,
                     f"{_KALSHI_API_BASE}/events",
                     params={
                         "series_ticker": series_ticker,
@@ -336,8 +402,15 @@ class DiscoveryService:
         try:
             async with self._sem:
                 await resolver.refresh()
-        except Exception:
-            logger.warning("milestone_loop_iteration_failed", exc_info=True)
+        except Exception as exc:
+            # Compact log — rich-rendering the full traceback on every loop
+            # iteration (which may be every 10ms in tests) blocks the loop
+            # and drowns the logfile. Type+msg is enough to diagnose.
+            logger.warning(
+                "milestone_loop_iteration_failed",
+                exc_type=type(exc).__name__,
+                exc_msg=str(exc),
+            )
 
 
 def _to_cents(val: Any) -> int | None:
