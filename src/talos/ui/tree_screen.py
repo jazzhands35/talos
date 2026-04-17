@@ -175,18 +175,39 @@ class TreeScreen(Screen):
         tree.focus()
         self._rebuild_tree()
         self._load_persisted_deferred()
-        # If discovery bootstrap hasn't completed yet (first-open race),
-        # poll every 500ms for up to 30s and rebuild when categories appear.
-        if self._discovery is not None and not self._discovery.categories:
+        # Start the two-stage poll: first watch for categories to appear,
+        # then watch for event counts to backfill. Both can be in-progress
+        # independently since bootstrap returns before the bulk count
+        # fetch completes.
+        self._categories_seen = bool(
+            self._discovery and self._discovery.categories,
+        )
+        self._counts_seen = self._any_counts_populated()
+        if self._discovery is not None and not (self._categories_seen and self._counts_seen):
             self._bootstrap_polls = 0
             self.set_interval(0.5, self._poll_for_bootstrap)
 
-    def _poll_for_bootstrap(self) -> None:
-        """Re-render the tree once discovery.bootstrap() populates categories.
+    def _any_counts_populated(self) -> bool:
+        """Cheap check: has any series got a non-None event_count yet?
+        Used to decide when to rebuild the tree after the async background
+        bulk-count fetch finishes."""
+        if self._discovery is None:
+            return False
+        for cat in self._discovery.categories.values():
+            for s in cat.series.values():
+                if s.event_count is not None:
+                    return True
+        return False
 
-        Runs as a 500ms timer started in on_mount only if the cache was empty
-        at mount time. Sentinel `_bootstrap_done` gates re-runs so we don't
-        rebuild on every tick after bootstrap completes.
+    def _poll_for_bootstrap(self) -> None:
+        """Re-render the tree when discovery populates — in two stages.
+
+        Stage 1: categories appear (fast; the /series fetch finishes).
+        Stage 2: event counts backfill (slow; the bulk /events fetch runs
+        async in the background and may 429 for a minute or more).
+
+        We rebuild once per stage, then stop polling. 60s total cap covers
+        the 45s bulk-fetch timeout with room to spare.
         """
         if getattr(self, "_bootstrap_done", False):
             return
@@ -194,15 +215,28 @@ class TreeScreen(Screen):
         if self._discovery is None:
             self._bootstrap_done = True
             return
-        if self._discovery.categories:
+
+        if not self._categories_seen and self._discovery.categories:
             self._rebuild_tree()
+            self._categories_seen = True
+
+        if not self._counts_seen and self._any_counts_populated():
+            # Counts arrived — rebuild so empty-series filter and sort apply.
+            self._rebuild_tree()
+            self._counts_seen = True
+
+        if self._categories_seen and self._counts_seen:
             self._bootstrap_done = True
             return
-        if self._bootstrap_polls > 60:  # ~30s hard cap
-            self.notify(
-                "Discovery bootstrap didn't complete — check logs.",
-                severity="warning",
-            )
+
+        if self._bootstrap_polls > 120:  # ~60s hard cap
+            if not self._categories_seen:
+                self.notify(
+                    "Discovery bootstrap didn't complete — check logs.",
+                    severity="warning",
+                )
+            # Counts may never arrive if Kalshi stays rate-limited; that's
+            # fine, lazy backfill via drill-ins handles it. Stop polling.
             self._bootstrap_done = True
 
     def _load_persisted_deferred(self) -> None:

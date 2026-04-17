@@ -42,6 +42,14 @@ _MAX_429_RETRIES = 5
 # never waits on it directly.
 _BULK_PAGE_SLEEP_SEC = 0.75
 
+# Hard wall-clock cap on the bulk event-count fetch. If Kalshi's /events
+# bucket is deeply throttled (which happens when the trading client has
+# been running for a while), retries can compound indefinitely. 45s is
+# generous for the happy path (~30s spacing + one or two retries) and
+# short enough that a stuck fetch doesn't keep a background task alive
+# forever while the user is exploring.
+_BULK_FETCH_TOTAL_TIMEOUT_SEC = 45.0
+
 
 async def _get_with_429_retry(
     http: httpx.AsyncClient,
@@ -128,31 +136,56 @@ class DiscoveryService:
         categories = await asyncio.to_thread(self._build_categories, all_series)
         self.categories = categories
 
-        # Populate per-series open-event counts. Uses one paginated /events
-        # call with with_nested_markets=false so the payload is small (event
-        # metadata only; ~300-500 bytes per event vs ~2KB with markets).
+        logger.info(
+            "discovery_bootstrap_ok",
+            category_count=len(categories),
+            series_count=sum(c.series_count for c in categories.values()),
+        )
+
+        # Fire-and-forget the bulk event-count fetch. It shares an IP-level
+        # rate bucket with the main trading client and frequently 429s for
+        # minutes at a time; blocking bootstrap on it made tree-load take
+        # 50-126s in field testing. Instead, bootstrap returns immediately
+        # with categories populated and event_count=None on every series;
+        # counts fill in asynchronously if the bulk fetch succeeds, and
+        # lazily via drill-ins otherwise (see get_events_for_series).
+        asyncio.create_task(self._populate_event_counts_background())
+
+    async def _populate_event_counts_background(self) -> None:
+        """Run the bulk /events count fetch with a hard wall-clock cap.
+
+        Cap protects us from cases where Kalshi's /events bucket is dry for
+        an extended window and the paginated fetch makes no forward
+        progress. Below-cap failures are logged and swallowed; counts stay
+        None and the lazy drill-in path fills them in.
+        """
         try:
-            counts = await self._fetch_event_counts_per_series()
-            for cat in self.categories.values():
-                for series in cat.series.values():
-                    series.event_count = counts.get(series.ticker, 0)
+            counts = await asyncio.wait_for(
+                self._fetch_event_counts_per_series(),
+                timeout=_BULK_FETCH_TOTAL_TIMEOUT_SEC,
+            )
+        except TimeoutError:
+            logger.warning(
+                "discovery_event_counts_timeout",
+                timeout_seconds=_BULK_FETCH_TOTAL_TIMEOUT_SEC,
+            )
+            return
         except Exception as exc:
-            # Compact log — this fetch runs after the 9730-series build, and
-            # its traceback locals include `all_series` too. Pin down the
-            # failure with type+msg and move on; event_count stays None.
             logger.warning(
                 "discovery_event_counts_failed",
                 exc_type=type(exc).__name__,
                 exc_msg=str(exc),
             )
+            return
 
+        for cat in self.categories.values():
+            for series in cat.series.values():
+                series.event_count = counts.get(series.ticker, 0)
         logger.info(
-            "discovery_bootstrap_ok",
-            category_count=len(categories),
-            series_count=sum(c.series_count for c in categories.values()),
+            "discovery_event_counts_populated",
             series_with_events=sum(
                 1
-                for cat in categories.values()
+                for cat in self.categories.values()
                 for s in cat.series.values()
                 if (s.event_count or 0) > 0
             ),
