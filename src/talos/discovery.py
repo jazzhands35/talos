@@ -57,6 +57,9 @@ class DiscoveryService:
         """Pull full series catalog from /series and build the tree skeleton.
 
         On failure: log and leave the cache empty.
+
+        The ~9,700-series Pydantic build loop runs in a background thread via
+        asyncio.to_thread so it does not block the Textual event loop.
         """
         try:
             all_series = await self._fetch_all_series()
@@ -64,6 +67,28 @@ class DiscoveryService:
             logger.warning("discovery_bootstrap_failed", exc_info=True)
             return
 
+        # Offload the CPU-bound Pydantic construction loop to a thread so
+        # the event loop stays responsive during the several-second build.
+        categories = await asyncio.to_thread(self._build_categories, all_series)
+
+        self.categories = categories
+        logger.info(
+            "discovery_bootstrap_ok",
+            category_count=len(categories),
+            series_count=sum(c.series_count for c in categories.values()),
+        )
+
+    # ── Internals ────────────────────────────────────────────────────
+
+    @staticmethod
+    def _build_categories(
+        all_series: list[dict[str, Any]],
+    ) -> dict[str, CategoryNode]:
+        """Synchronous tree builder — run in a thread from bootstrap().
+
+        Contains the only CPU-bound work in the discovery pipeline:
+        ~9,700 Pydantic model instantiations (one SeriesNode per series).
+        """
         categories: dict[str, CategoryNode] = {}
         for raw in all_series:
             cat_name = raw.get("category", "").strip() or "Uncategorized"
@@ -81,19 +106,9 @@ class DiscoveryService:
                 CategoryNode(name=cat_name, series_count=0, series={}),
             )
             node.series[series.ticker] = series
-
-        # Set counts
         for cat in categories.values():
             cat.series_count = len(cat.series)
-
-        self.categories = categories
-        logger.info(
-            "discovery_bootstrap_ok",
-            category_count=len(categories),
-            series_count=sum(c.series_count for c in categories.values()),
-        )
-
-    # ── Internals ────────────────────────────────────────────────────
+        return categories
 
     async def _fetch_all_series(self) -> list[dict[str, Any]]:
         async with self._sem:

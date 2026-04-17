@@ -13,7 +13,7 @@ from typing import TYPE_CHECKING, Any
 
 from textual.app import ComposeResult
 from textual.screen import Screen
-from textual.widgets import Footer, Header, Input, Tree
+from textual.widgets import Footer, Header, Tree
 from textual.widgets.tree import TreeNode
 
 from talos.models.tree import ArbPairRecord, StagedChanges
@@ -124,13 +124,47 @@ class TreeScreen(Screen):
 
     def compose(self) -> ComposeResult:
         yield Header()
-        yield Input(placeholder="filter", id="filter-input")
+        # Filter input deferred — it auto-focuses and swallows space/c/r
+        # keybindings. Re-add later behind a keybinding (e.g. "/").
         yield Tree[dict[str, Any]]("Kalshi", id="tree")
         yield Footer()
 
     def on_mount(self) -> None:
+        # Give the tree widget focus so keybindings (space/c/r) work
+        # immediately without needing to tab into it.
+        tree = self.query_one("#tree", Tree)
+        tree.focus()
         self._rebuild_tree()
         self._load_persisted_deferred()
+        # If discovery bootstrap hasn't completed yet (first-open race),
+        # poll every 500ms for up to 30s and rebuild when categories appear.
+        if self._discovery is not None and not self._discovery.categories:
+            self._bootstrap_polls = 0
+            self.set_interval(0.5, self._poll_for_bootstrap)
+
+    def _poll_for_bootstrap(self) -> None:
+        """Re-render the tree once discovery.bootstrap() populates categories.
+
+        Runs as a 500ms timer started in on_mount only if the cache was empty
+        at mount time. Sentinel `_bootstrap_done` gates re-runs so we don't
+        rebuild on every tick after bootstrap completes.
+        """
+        if getattr(self, "_bootstrap_done", False):
+            return
+        self._bootstrap_polls = getattr(self, "_bootstrap_polls", 0) + 1
+        if self._discovery is None:
+            self._bootstrap_done = True
+            return
+        if self._discovery.categories:
+            self._rebuild_tree()
+            self._bootstrap_done = True
+            return
+        if self._bootstrap_polls > 60:  # ~30s hard cap
+            self.notify(
+                "Discovery bootstrap didn't complete — check logs.",
+                severity="warning",
+            )
+            self._bootstrap_done = True
 
     def _load_persisted_deferred(self) -> None:
         """Rehydrate _deferred_set_unticked from TreeMetadataStore.
