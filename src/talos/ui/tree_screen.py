@@ -248,9 +248,30 @@ class TreeScreen(Screen):
         )
 
     async def _expand_series(self, node: TreeNode, series_ticker: str) -> None:
+        import time as _time
+
+        import structlog as _structlog
+
+        _log = _structlog.get_logger()
+        _t0 = _time.perf_counter()
+        _log.info("tree_series_expand_start", series_ticker=series_ticker)
         if self._discovery is None:
+            _log.info(
+                "tree_series_expand_done",
+                series=series_ticker,
+                elapsed_ms=0,
+                event_count=0,
+                reason="no_discovery",
+            )
             return
         events = await self._discovery.get_events_for_series(series_ticker)
+        fetch_ms = int((_time.perf_counter() - _t0) * 1000)
+        _log.info(
+            "tree_series_expand_fetched",
+            series=series_ticker,
+            elapsed_ms=fetch_ms,
+            event_count=len(events),
+        )
         node.remove_children()
         for event_ticker, ev in sorted(events.items()):
             state = self._effective_state(event_ticker)
@@ -259,6 +280,12 @@ class TreeScreen(Screen):
                 f"{glyph} {event_ticker}   {ev.title[:40]}",
                 data={"kind": "event", "ticker": event_ticker},
             )
+        _log.info(
+            "tree_series_expand_done",
+            series=series_ticker,
+            elapsed_ms=int((_time.perf_counter() - _t0) * 1000),
+            event_count=len(events),
+        )
 
     def _engine_pairs_for_event(self, kalshi_event_ticker: str) -> list[str]:
         """Return pair-level event_tickers currently in GameManager for this event."""
@@ -332,6 +359,16 @@ class TreeScreen(Screen):
         - Winding-down -> stage add (re-engage trading).
         Staged-add / staged-remove get unstaged if toggled again.
         """
+        import structlog as _structlog
+
+        _log = _structlog.get_logger()
+        _log.info(
+            "tree_toggle_called",
+            kalshi_event_ticker=kalshi_event_ticker,
+            current_state=self._current_event_state(kalshi_event_ticker)
+            if self._discovery
+            else "no_discovery",
+        )
         if self._discovery is None:
             return
 
@@ -479,11 +516,23 @@ class TreeScreen(Screen):
         exit-only scheduling) BEFORE the engine is touched. Cancelling the
         popup aborts the commit and preserves staged_changes.
         """
+        import structlog as _structlog
+
+        _log = _structlog.get_logger()
+        _log.info(
+            "tree_commit_start",
+            to_add=len(self.staged_changes.to_add),
+            to_remove=len(self.staged_changes.to_remove),
+            to_set_unticked=len(self.staged_changes.to_set_unticked),
+            to_clear_unticked=len(self.staged_changes.to_clear_unticked),
+        )
         if self._engine is None or self._metadata is None:
+            _log.info("tree_commit_aborted", reason="no_engine_or_metadata")
             return False
 
         # Pre-commit validation: prompt for any uncurated events.
         needs_schedule = self._events_needing_schedule()
+        _log.info("tree_commit_validator", needs_schedule_count=len(needs_schedule))
         if needs_schedule:
             from talos.ui.schedule_popup import SchedulePopup
 
