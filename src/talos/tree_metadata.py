@@ -136,6 +136,11 @@ class TreeMetadataStore:
         self._require_loaded()
         return kalshi_event_ticker in self._unticked_pending()
 
+    def pending_unticked(self) -> list[str]:
+        """Return a copy of the persisted deferred-untick set."""
+        self._require_loaded()
+        return list(self._unticked_pending())
+
     def set_deliberately_unticked_pending(self, kalshi_event_ticker: str) -> None:
         self._require_loaded()
         lst = self._unticked_pending()

@@ -31,6 +31,8 @@ class TreeScreen(Screen):
     BINDINGS = [
         ("escape", "app.pop_screen", "Back"),
         ("r", "manual_refresh", "Refresh"),
+        ("space", "toggle_current_node", "Toggle"),
+        ("c", "commit_changes", "Commit"),
     ]
 
     def __init__(
@@ -57,6 +59,18 @@ class TreeScreen(Screen):
 
     def on_mount(self) -> None:
         self._rebuild_tree()
+        self._load_persisted_deferred()
+
+    def _load_persisted_deferred(self) -> None:
+        """Rehydrate _deferred_set_unticked from TreeMetadataStore.
+
+        Called on mount so that deferred-untick flags set in a prior session
+        survive a Talos restart. The persisted pending list is owned by
+        TreeMetadataStore; this just mirrors it into the in-memory set used
+        by the commit/promote path.
+        """
+        if self._metadata is not None:
+            self._deferred_set_unticked = set(self._metadata.pending_unticked())
 
     def _rebuild_tree(self) -> None:
         tree = self.query_one("#tree", Tree)
@@ -204,8 +218,11 @@ class TreeScreen(Screen):
             if matching and all(o.status == "removed" for o in matching):
                 self._metadata.set_deliberately_unticked(k)
             else:
-                # Some pair(s) went winding_down or failed → defer
+                # Some pair(s) went winding_down or failed → defer.
+                # Persist the pending flag so it survives a restart even if
+                # the winding-down pair is still settling when Talos crashes.
                 self._deferred_set_unticked.add(k)
+                self._metadata.set_deliberately_unticked_pending(k)
 
         added_keys = {(p.kalshi_event_ticker or p.event_ticker) for p in added}
         for k in staged.to_clear_unticked:
@@ -225,3 +242,45 @@ class TreeScreen(Screen):
             if self._metadata is not None:
                 self._metadata.promote_pending_to_applied(kalshi_event_ticker)
             self._deferred_set_unticked.discard(kalshi_event_ticker)
+
+    # ── Keybinding actions ───────────────────────────────────────────────
+
+    def action_toggle_current_node(self) -> None:
+        """Toggle the currently-highlighted tree node.
+
+        For event nodes: stages an add (or unstages if already staged).
+        For series / category nodes: no-op for now (bulk toggle deferred).
+        """
+        tree = self.query_one("#tree", Tree)
+        node = tree.cursor_node
+        if node is None or node.data is None:
+            return
+        data = node.data
+        kind = data.get("kind") if isinstance(data, dict) else None
+        if kind == "event":
+            ticker = data.get("ticker") if isinstance(data, dict) else None
+            if ticker:
+                self.toggle_event_by_ticker(ticker)
+                self._refresh_node_label(node, ticker)
+
+    def _refresh_node_label(self, node: TreeNode, kalshi_event_ticker: str) -> None:
+        """Update the node's glyph to match the current staged state."""
+        is_staged = any(
+            r.kalshi_event_ticker == kalshi_event_ticker for r in self.staged_changes.to_add
+        )
+        glyph = "[x]" if is_staged else "[ ]"
+        data = node.data if isinstance(node.data, dict) else {}
+        ticker = data.get("ticker", kalshi_event_ticker)
+        # First-pass UI: rebuild with glyph + ticker. Title suffix will be
+        # re-rendered on the next full tree rebuild.
+        node.set_label(f"{glyph} {ticker}")
+
+    async def action_commit_changes(self) -> None:
+        """Run the commit flow — pushes staged changes through Engine."""
+        if self.staged_changes.is_empty():
+            self.notify("No staged changes to commit.", severity="information")
+            return
+        await self.commit()
+        self.notify("Commit complete.", severity="information")
+        # Rebuild the tree so node glyphs reflect cleared staging
+        self._rebuild_tree()
