@@ -61,15 +61,22 @@ class MilestoneResolver:
             return
 
         new_index: dict[str, Milestone] = {}
+        parse_failures = 0
+        first_failure_id: str | None = None
+        first_failure_exc: str | None = None
         for raw in items:
             try:
                 ms = self._parse_milestone(raw)
-            except Exception:
-                logger.warning(
-                    "milestone_parse_failed",
-                    milestone_id=raw.get("id"),
-                    exc_info=True,
-                )
+            except Exception as exc:
+                # Expected for records with malformed/missing optional fields
+                # (e.g. sports milestones without end_date). Count + summarize
+                # once at the end — logging each traceback rich-rendered to the
+                # log file was blocking the event loop for tens of seconds
+                # when Kalshi returns hundreds of such records.
+                parse_failures += 1
+                if first_failure_id is None:
+                    first_failure_id = str(raw.get("id", "?"))
+                    first_failure_exc = f"{type(exc).__name__}: {exc}"
                 continue
             for et in ms.related_event_tickers:
                 new_index[et] = ms
@@ -80,6 +87,9 @@ class MilestoneResolver:
             "milestone_refresh_ok",
             milestone_count=len(items),
             event_index_size=len(new_index),
+            parse_failures=parse_failures,
+            first_failure_id=first_failure_id,
+            first_failure_exc=first_failure_exc,
         )
 
     # ── Internals ────────────────────────────────────────────────────
