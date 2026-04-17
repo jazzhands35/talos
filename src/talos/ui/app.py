@@ -175,17 +175,13 @@ class TalosApp(App):
             self._start_watchdog()
             self._poll_balance()  # show cash immediately
             self._refresh_volumes()  # populate 24h volume on startup
-            # Tree-mode background tasks: bootstrap discovery + run milestone
-            # refresh loop. Only launched when tree_mode is enabled and all
-            # collaborators are present.
-            if (
-                self._automation_config is not None
-                and self._automation_config.tree_mode
-                and self._discovery_service is not None
-                and self._milestone_resolver is not None
-            ):
-                self._bootstrap_tree_discovery()
-                self._run_tree_milestone_loop()
+            # Tree-mode: bootstrap is LAZY — kicked off the first time the
+            # user opens TreeScreen (action_push_tree_screen). Running the
+            # 9,700-series catalog pull + milestone refresh at app mount
+            # freezes the Textual event loop for several seconds on Windows
+            # and makes the TUI appear unresponsive at startup.
+            # See action_push_tree_screen for the deferred trigger.
+            self._tree_bootstrap_started = False
 
     # ── Engine callbacks ──────────────────────────────────────────
 
@@ -1030,6 +1026,14 @@ class TalosApp(App):
                 severity="warning",
             )
             return
+        # Lazy bootstrap: only start discovery + milestone loop the first
+        # time the user opens the tree screen. Prevents startup event-loop
+        # block from the 9,700-series /series pull.
+        if not getattr(self, "_tree_bootstrap_started", False):
+            self._tree_bootstrap_started = True
+            self._bootstrap_tree_discovery()
+            self._run_tree_milestone_loop()
+
         screen = TreeScreen(
             discovery=self._discovery_service,
             milestones=self._milestone_resolver,
