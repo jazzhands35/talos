@@ -51,7 +51,7 @@ Structural outcome: it should be impossible for Talos to trade a pinpoint-event 
 - Auto-subscription to new events as they appear in a ticked series. Manual-only selection, as explicit user preference.
 - Replacing `GameStatusResolver` for sports. GSR retains its role for live/post-game state transitions in sports markets.
 - UI work beyond the tree screen and commit-popup (e.g., no monitoring-screen redesign, no settings-screen revamp beyond adding tree-settings access).
-- Migrating historical data. `games_full.json` already exists; schema gains one optional field (`source`). `tree_metadata.json` is created empty on first write.
+- Migrating historical data. `games_full.json` already exists; schema gains two optional fields (`source` and `engine_state`) — both preserved round-trip by the updated legacy writer so flag-off sessions don't strip them. `tree_metadata.json` is new, created empty on first write, and also participates in restart-durability (holds `deliberately_unticked_pending` across restarts). No renames, no data transforms, no destructive migrations.
 
 ## Design
 
@@ -73,7 +73,7 @@ Three new components plus rewires to two existing ones.
 - `Engine` — owns the monitored-pair lifecycle (existing). Gains two new entry points: `add_pairs_from_selection(records)` and `remove_pairs_from_selection(pair_tickers)`. Each handles the full orchestration that today's `add_games` / `remove_game` (at [engine.py:2839](src/talos/engine.py:2839) and [engine.py:2940](src/talos/engine.py:2940)) already performs — GameManager wiring, adjuster ledger creation/removal, GSR wiring, data_collector logging, and persistence via the existing `save_games_full()` ([persistence.py:84](src/talos/persistence.py:84)). Also gains the new resolver cascade in `_check_exit_only` (manual → milestone → sports GSR → nothing). `_expiration_fallback` call is deleted.
 - `GameManager` — loses `scan_events()`, `DEFAULT_NONSPORTS_CATEGORIES`, `_nonsports_max_days`, hardcoded `volume_24h > 0` checks. Engine gains a `_winding_down` set and inventory-aware removal behavior (invoked from Engine entry points, not from direct store events). `GameManager`'s public API is unchanged.
 - `GameStatusResolver` — narrowed to sports live/post signals. Scheduling role transferred to `MilestoneResolver`. `estimate_start_time` retained as a library utility.
-- `persistence.py` — `save_games_full` / `load_saved_games_full` unchanged in shape. The games_full record schema gains an optional `source` field (observability only; engine treats all persisted entries identically). No new persistence file under `brain/` — all runtime state stays under `get_data_dir()`.
+- `persistence.py` — `save_games_full` / `load_saved_games_full` unchanged in shape. The games_full record schema gains two optional fields: `source` (observability) and `engine_state` (restart durability, branched on during restore). The legacy writer in [__main__.py:345](src/talos/__main__.py:345) is updated in Phase 1 to include both in its serialized dict so flag-off sessions preserve them round-trip. No new persistence file under `brain/` — all runtime state stays under `get_data_dir()`.
 - `automation_config.py` — gains startup/discovery settings; keeps `exit_only_minutes` single value.
 
 **Data flow:**
@@ -1130,11 +1130,25 @@ milestone_refresh_seconds: float = 300.0             # 5 min default
 
 #### 6.2 `games_full.json` (runtime persistence, `get_data_dir()`)
 
-**Existing file, unchanged in shape.** Gains optional `source` field (see §2.1). Canonical "what Talos monitors" record. Written whenever the active pair set changes (add/remove batch).
+**Existing file, schema-additive only.** Gains two optional fields on each pair record (see §2.1):
+
+- **`source`** — provenance tag (`"tree"` | `"manual_url"` | `"restore"` | `"migration"`). Observability only; engine does not branch on it.
+- **`engine_state`** — persisted engine state for restart durability (`"active"` default | `"winding_down"` | `"exit_only"`). Engine branches on this during restore — see §5.1b.
+
+Both fields must be preserved round-trip by the legacy `_persist_games` writer (Phase 1 deliverable, see §7.2). Flag-off sessions read, retain, and re-write these fields faithfully even though they don't act on `engine_state`.
+
+Canonical "what Talos monitors" record. Written once per add/remove batch via `_persist_active_games()` (batch atomicity enforced via `GameManager.suppress_on_change()` context manager — see §5.1).
 
 #### 6.3 `tree_metadata.json` (NEW, `get_data_dir()`)
 
-Event-level tracking and overrides. See §2.2. Change cadence: per-commit for `manual_event_start`, per-expand for `event_reviewed_at`, occasional for `deliberately_unticked`.
+Event-level tracking and overrides. Holds four keyed sections (see §2.2):
+
+- `event_first_seen` / `event_reviewed_at` — NEW badge bookkeeping; written per-expand.
+- `manual_event_start` — per-event exit-only override entered via commit popup; written per-commit.
+- `deliberately_unticked` — the applied `[·]` set; written when untick events fully remove.
+- `deliberately_unticked_pending` — the deferred `[·]` set mirroring `_deferred_set_unticked`; **written when a commit produces mixed removed/winding outcomes; cleared when the engine emits `event_fully_removed`**. This participates in restart durability: on restart, pending entries are loaded back into `_deferred_set_unticked` so the `[·]` applies correctly when winding-down pairs finally clear (see §5.1b).
+
+Change cadence: frequent (commit / tick / ledger-clear events). Small file.
 
 #### 6.4 `settings.json` `tree` sub-object (existing file, extended)
 
@@ -1148,13 +1162,15 @@ New principle to be landed alongside Phase 1 scaffold. Working text (to be refin
 
 #### 6.6 File ownership summary
 
-| File | Location | Owner | Change cadence |
-|---|---|---|---|
-| `automation_config.py` | source | code | rare (code review) |
-| `games_full.json` | `get_data_dir()` | Engine (via existing persistence) | per add/remove batch |
-| `tree_metadata.json` | `get_data_dir()` | TreeMetadataStore | per-commit / per-expand |
-| `settings.json` | `get_data_dir()` | existing settings layer | occasional |
-| `brain/principles.md` | repo | human | rare |
+| File | Location | Owner | Schema extensions | Change cadence |
+|---|---|---|---|---|
+| `automation_config.py` | source | code | new fields per §6.1 | rare (code review) |
+| `games_full.json` | `get_data_dir()` | Engine (via existing `_persist_games`, updated Phase 1) | **+ `source`**, **+ `engine_state`** — both round-trip preserved | per add/remove batch (atomic via `suppress_on_change`) |
+| `tree_metadata.json` | `get_data_dir()` | `TreeMetadataStore` | sections: `event_first_seen`, `event_reviewed_at`, `manual_event_start`, `deliberately_unticked`, **`deliberately_unticked_pending`** | per-commit / per-expand / per-ledger-clear |
+| `settings.json` | `get_data_dir()` | existing settings layer | new `tree` sub-object | occasional (user edits filters) |
+| `brain/principles.md` | repo | human | +1 principle ("Safety over speed") | rare |
+
+**Restart durability hinges on two of these.** `games_full.json::engine_state` re-establishes the engine's `_winding_down` / `_exit_only_events` sets on restore before any tick fires (§5.3). `tree_metadata.json::deliberately_unticked_pending` re-populates the tree's `_deferred_set_unticked` so the `[·]` lands correctly when the last winding pair for an event finally clears post-restart (§5.1b). Implementation must not treat either as cosmetic — both are on the SURVIVOR-class safety path.
 
 ### 7. Migration plan
 
@@ -1179,13 +1195,13 @@ New principle to be landed alongside Phase 1 scaffold. Working text (to be refin
 
 #### 7.3 State migration
 
-Talos already persists active pairs via `games_full.json`. The migration is **schema-additive only** — new optional `source` field; no file moves; no data transform.
+Talos already persists active pairs via `games_full.json`. The migration is **schema-additive only** — two new optional fields on pair records (`source`, `engine_state`); one new sidecar file (`tree_metadata.json`); one new sub-object in existing `settings.json` (`tree`). No file moves, no renames, no data transforms.
 
-- **First Phase 2 start with `tree_mode = True`:** existing `games_full.json` records are read unchanged. Engine stamps `source = "migration"` on any record missing the field, so they're distinguishable in logs from new tree-added records. Pairs continue running without interruption.
-- **`tree_metadata.json`:** created empty on first write (first manual override, first tick marking review, or first deliberate untick).
+- **First Phase 2 start with `tree_mode = True`:** existing `games_full.json` records are read unchanged. Engine stamps `source = "migration"` on any record missing the field, so they're distinguishable in logs from new tree-added records. `engine_state` defaults to `"active"` on records without it — i.e., pre-tree-mode pairs are treated as normally-active on first restore, which matches their actual state pre-migration. Pairs continue running without interruption.
+- **`tree_metadata.json`:** created empty on first write. First write triggers on: first manual override entered via commit popup, first tick marking review, first deliberate untick, or first commit that produces a deferred `[·]` (mixed removed/winding outcomes).
 - **`settings.json` `tree` sub-object:** created on first save after a tree-settings edit. Absent → defaults apply.
 
-No existing state is moved, renamed, or reformatted. Rollback is a file-compatible no-op: legacy code paths read games_full.json identically regardless of the `source` field's presence.
+Rollback is file-compatible because the legacy `_persist_games` writer is updated in Phase 1 to include both new fields in its serialized dict. A flag-off session reads `games_full.json` via the same `load_saved_games_full` path (fields simply get set on `ArbPair` but not acted on), and re-writes them faithfully on the next `on_change`. Winding-down pairs persisted with `engine_state = "winding_down"` therefore survive an on→off→on flag-flip with their state intact — critical for Phase 3 validation to be meaningful.
 
 #### 7.4 Rollback
 
