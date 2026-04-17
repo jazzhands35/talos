@@ -47,6 +47,7 @@ class TreeScreen(Screen):
         self._metadata = metadata
         self._engine = engine
         self.staged_changes: StagedChanges = StagedChanges.empty()
+        self._deferred_set_unticked: set[str] = set()
 
     def compose(self) -> ComposeResult:
         yield Header()
@@ -169,3 +170,58 @@ class TreeScreen(Screen):
                     volume_24h_b=mkt.volume_24h,
                 )
             )
+
+    async def commit(self) -> None:
+        """Push staged changes through Engine and reconcile metadata."""
+        if self._engine is None or self._metadata is None:
+            return
+        staged = self.staged_changes
+
+        # 1. Engine add/remove
+        added: list[Any] = []
+        remove_outcomes: list[Any] = []
+        if staged.to_add:
+            added = await self._engine.add_pairs_from_selection(
+                [r.model_dump() for r in staged.to_add]
+            )
+        if staged.to_remove:
+            remove_outcomes = await self._engine.remove_pairs_from_selection(
+                staged.to_remove,
+            )
+
+        # 2. Apply deferred/applied unticked per §5.1a rules.
+        #    - set_unticked applied when ALL staged pairs for the event came
+        #      back "removed". Mixed/winding → defer via _deferred_set_unticked.
+        #    - clear_unticked applied when ALL staged pairs for the event
+        #      were successfully added.
+        staged_remove_set = set(staged.to_remove)
+        for k in staged.to_set_unticked:
+            matching = [
+                o
+                for o in remove_outcomes
+                if o.kalshi_event_ticker == k and o.pair_ticker in staged_remove_set
+            ]
+            if matching and all(o.status == "removed" for o in matching):
+                self._metadata.set_deliberately_unticked(k)
+            else:
+                # Some pair(s) went winding_down or failed → defer
+                self._deferred_set_unticked.add(k)
+
+        added_keys = {(p.kalshi_event_ticker or p.event_ticker) for p in added}
+        for k in staged.to_clear_unticked:
+            if k in added_keys:
+                self._metadata.clear_deliberately_unticked(k)
+
+        # 3. Apply manual_event_start from staged popup
+        for k, v in staged.to_set_manual_start.items():
+            self._metadata.set_manual_event_start(k, v)
+
+        # 4. Clear staged
+        self.staged_changes = StagedChanges.empty()
+
+    def on_event_fully_removed(self, kalshi_event_ticker: str) -> None:
+        """Engine listener callback: promote deferred [·] to applied."""
+        if kalshi_event_ticker in self._deferred_set_unticked:
+            if self._metadata is not None:
+                self._metadata.promote_pending_to_applied(kalshi_event_ticker)
+            self._deferred_set_unticked.discard(kalshi_event_ticker)
