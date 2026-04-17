@@ -121,12 +121,19 @@ class MilestoneResolver:
                 await http.aclose()
 
     def _parse_milestone(self, raw: dict[str, Any]) -> Milestone:
+        start_raw = raw["start_date"]
+        start = datetime.fromisoformat(start_raw.replace("Z", "+00:00"))
+        # end_date is optional — sports milestones routinely omit it.
+        # Default to start_date so downstream consumers always have a
+        # usable value and we don't spuriously fail ~900 records/refresh.
+        end_raw = raw.get("end_date") or start_raw
+        end = datetime.fromisoformat(end_raw.replace("Z", "+00:00"))
         return Milestone(
             id=raw["id"],
             category=raw.get("category", ""),
             type=raw.get("type", ""),
-            start_date=datetime.fromisoformat(raw["start_date"].replace("Z", "+00:00")),
-            end_date=datetime.fromisoformat(raw["end_date"].replace("Z", "+00:00")),
+            start_date=start,
+            end_date=end,
             title=raw.get("title", ""),
             notification_message=raw.get("notification_message", ""),
             related_event_tickers=raw.get("related_event_tickers", []),
