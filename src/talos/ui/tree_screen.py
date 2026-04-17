@@ -196,18 +196,26 @@ class TreeScreen(Screen):
         data = node.data or {}
         kind = data.get("kind")
         if kind == "category":
-            self._expand_category(node, data["name"])
+            # Large categories (Entertainment = 2358 series, Politics = 1828)
+            # must build their children asynchronously with periodic yields;
+            # doing it sync blocks the event loop for several seconds.
+            self.run_worker(self._expand_category_async(node, data["name"]))
         elif kind == "series":
             self.run_worker(self._expand_series(node, data["ticker"]))
 
-    def _expand_category(self, node: TreeNode, category: str) -> None:
+    async def _expand_category_async(self, node: TreeNode, category: str) -> None:
+        """Populate a category's series children, yielding every 100 adds
+        so the event loop stays responsive for categories with thousands
+        of series."""
         node.remove_children()
         if self._discovery is None:
             return
         cat = self._discovery.categories.get(category)
         if not cat:
             return
-        for ticker, series in sorted(cat.series.items()):
+        import asyncio as _asyncio  # local to avoid polluting module namespace
+
+        for i, (ticker, series) in enumerate(sorted(cat.series.items())):
             child = node.add(
                 f"[ ] {ticker}",
                 data={"kind": "series", "ticker": ticker},
@@ -215,6 +223,10 @@ class TreeScreen(Screen):
             )
             child.add("…", data={"kind": "placeholder"})
             _ = series  # reserved for future metadata display
+            # Yield to the event loop every 100 nodes — tight-loop Tree.add
+            # calls otherwise block input handling for multi-thousand series.
+            if (i + 1) % 100 == 0:
+                await _asyncio.sleep(0)
 
     async def _expand_series(self, node: TreeNode, series_ticker: str) -> None:
         if self._discovery is None:
