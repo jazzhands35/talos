@@ -81,9 +81,7 @@ def save_games(tickers: list[str], path: Path | None = None) -> None:
         logger.debug("save_games_failed", path=str(games_file))
 
 
-def save_games_full(
-    games: list[dict[str, str | float | None]], path: Path | None = None
-) -> None:
+def save_games_full(games: list[dict[str, str | float | None]], path: Path | None = None) -> None:
     """Save full game data so startup can skip REST calls."""
     games_file = _games_full_file(path)
     try:
@@ -132,3 +130,63 @@ def save_settings(settings: dict[str, object], path: Path | None = None) -> None
         settings_file.write_text(json.dumps(settings, indent=2) + "\n")
     except Exception:
         logger.debug("save_settings_failed", path=str(settings_file))
+
+
+# ---------------------------------------------------------------------------
+# Tree metadata persistence
+# ---------------------------------------------------------------------------
+def _tree_metadata_file(path: Path | None = None) -> Path:
+    return path or (get_data_dir() / "tree_metadata.json")
+
+
+_TREE_METADATA_DEFAULTS: dict[str, object] = {
+    "version": 1,
+    "event_first_seen": {},
+    "event_reviewed_at": {},
+    "manual_event_start": {},
+    "deliberately_unticked": [],
+    "deliberately_unticked_pending": [],
+}
+
+
+def _default_copy(v: object) -> object:
+    """Copy mutable defaults (dict/list) to avoid shared-reference bugs."""
+    if isinstance(v, dict):
+        return {}
+    if isinstance(v, list):
+        return []
+    return v
+
+
+def load_tree_metadata(path: Path | None = None) -> dict[str, object]:
+    """Load tree_metadata.json. Returns defaults if missing or corrupt.
+
+    Forward-compatible: any missing keys from older versions are backfilled
+    with their default value, so tests / callers can assume all keys exist.
+    """
+    f = _tree_metadata_file(path)
+    if not f.is_file():
+        return {k: _default_copy(v) for k, v in _TREE_METADATA_DEFAULTS.items()}
+    try:
+        parsed = json.loads(f.read_text())
+        if not isinstance(parsed, dict):
+            raise ValueError("tree_metadata must be a JSON object")
+        data: dict[str, object] = parsed
+    except Exception:
+        logger.warning("load_tree_metadata_failed", path=str(f))
+        return {k: _default_copy(v) for k, v in _TREE_METADATA_DEFAULTS.items()}
+
+    # Backfill missing keys
+    for k, default in _TREE_METADATA_DEFAULTS.items():
+        if k not in data:
+            data[k] = _default_copy(default)
+    return data
+
+
+def save_tree_metadata(data: dict[str, object], path: Path | None = None) -> None:
+    """Persist tree_metadata.json."""
+    f = _tree_metadata_file(path)
+    try:
+        f.write_text(json.dumps(data, indent=2) + "\n")
+    except Exception:
+        logger.debug("save_tree_metadata_failed", path=str(f))
