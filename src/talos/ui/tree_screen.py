@@ -332,6 +332,13 @@ class TreeScreen(Screen):
             elapsed_ms=fetch_ms,
             event_count=len(events),
         )
+
+        # Backfill the series label with the fresh count — get_events_for_series
+        # stamped event_count on the SeriesNode; update the tree display so
+        # the user sees "? -> N events" the first time they drill in, even
+        # when the bulk bootstrap count fetch failed.
+        self._relabel_series_node(node, series_ticker)
+
         node.remove_children()
 
         # Surface likely fetch failures: if bootstrap said this series had
@@ -699,6 +706,19 @@ class TreeScreen(Screen):
             if ticker:
                 self.toggle_event_by_ticker(ticker)
                 self._refresh_node_label(node, ticker)
+
+    def _relabel_series_node(self, node: TreeNode, series_ticker: str) -> None:
+        """After a drill-in, update the series node's label to reflect the
+        fresh event count (and its parent category label, which totals
+        those counts). Cheap: just `set_label()` on the two nodes."""
+        if self._discovery is None:
+            return
+        for cat_name, cat in self._discovery.categories.items():
+            if series_ticker in cat.series:
+                node.set_label(self._series_label(series_ticker, cat.series[series_ticker]))
+                if node.parent is not None:
+                    node.parent.set_label(self._category_label(cat_name, cat))
+                return
 
     def _refresh_node_label(self, node: TreeNode, kalshi_event_ticker: str) -> None:
         """Update the node's glyph to match the current (post-toggle) state."""

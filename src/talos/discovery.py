@@ -34,9 +34,13 @@ _KALSHI_API_BASE = "https://api.elections.kalshi.com/trade-api/v2"
 # endpoint throttles around 10 req/s per IP; bulk count fetch can fire 40
 # pages back-to-back, so we need to honor Retry-After and back off.
 _MAX_429_RETRIES = 5
-# Per-page sleep between bulk /events pages. Cheap insurance against the
-# 40-page count fetch tripping the rate limiter on the first place.
-_BULK_PAGE_SLEEP_SEC = 0.15
+# Per-page sleep between bulk /events pages. The public /events bucket is
+# shared with the main trading client at the IP level, so we have to crawl
+# conservatively — 750ms keeps us under ~1.5 req/s for this endpoint. Over
+# the full 40-page safety cap that's ~30s of added latency, but the fetch
+# runs after app boot stabilizes and populates asynchronously, so the user
+# never waits on it directly.
+_BULK_PAGE_SLEEP_SEC = 0.75
 
 
 async def _get_with_429_retry(
@@ -294,6 +298,11 @@ class DiscoveryService:
 
         series.events = events
         series.events_loaded_at = now
+        # Backfill count from the fetch so the tree label can update even
+        # when the bulk bootstrap count fetch 429'd. Drill-in fetches per
+        # series always succeed (or are a cached cache hit), so this is
+        # the reliable path to known counts.
+        series.event_count = len(events)
         return events
 
     def _find_series(self, series_ticker: str) -> SeriesNode | None:
