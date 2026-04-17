@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import json
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
@@ -116,7 +117,10 @@ class DiscoveryService:
             try:
                 resp = await http.get(f"{_KALSHI_API_BASE}/series")
                 resp.raise_for_status()
-                data = resp.json()
+                # JSON-parsing 11 MB synchronously would block the event loop
+                # for 1-3 seconds. Offload to a thread.
+                raw_text = resp.text
+                data = await asyncio.to_thread(json.loads, raw_text)
                 return data.get("series", [])
             finally:
                 if self._owns_http:

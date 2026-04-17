@@ -191,6 +191,11 @@ class TreeScreen(Screen):
             )
             cat_node.add("…", data={"kind": "placeholder"})
 
+        # Re-focus the tree so space/c/r keybindings work. Without this,
+        # after a rebuild triggered by _poll_for_bootstrap, focus may
+        # have landed elsewhere (or nowhere) and key events are eaten.
+        tree.focus()
+
     def on_tree_node_expanded(self, event: Tree.NodeExpanded) -> None:
         node: TreeNode = event.node
         data = node.data or {}
@@ -215,6 +220,7 @@ class TreeScreen(Screen):
             return
         import asyncio as _asyncio  # local to avoid polluting module namespace
 
+        tree = self.query_one("#tree", Tree)
         for i, (ticker, series) in enumerate(sorted(cat.series.items())):
             child = node.add(
                 f"[ ] {ticker}",
@@ -223,10 +229,12 @@ class TreeScreen(Screen):
             )
             child.add("…", data={"kind": "placeholder"})
             _ = series  # reserved for future metadata display
-            # Yield to the event loop every 100 nodes — tight-loop Tree.add
-            # calls otherwise block input handling for multi-thousand series.
+            # Yield to the event loop every 100 nodes so the user sees rows
+            # stream in rather than all appearing at the end.
             if (i + 1) % 100 == 0:
+                tree.refresh()
                 await _asyncio.sleep(0)
+        tree.refresh()
 
     async def _expand_series(self, node: TreeNode, series_ticker: str) -> None:
         if self._discovery is None:
