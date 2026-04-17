@@ -122,11 +122,28 @@ class TreeScreen(Screen):
             suffix = f"  {count} events"
         return f"[ ] {ticker}{suffix}"
 
+    @staticmethod
+    def _is_series_visible(series: SeriesNode) -> bool:
+        """Gate for tree rendering: hide series known to have zero open events.
+
+        Tri-state: None (unknown — bootstrap fetch failed / pending) stays
+        visible so a 429 on the bulk count doesn't blank the whole tree.
+        0 (known-empty) is hidden. >0 is shown.
+        """
+        return series.event_count != 0
+
+    @classmethod
+    def _visible_series(cls, cat: CategoryNode) -> list[SeriesNode]:
+        return [s for s in cat.series.values() if cls._is_series_visible(s)]
+
     def _category_label(self, name: str, cat: CategoryNode) -> str:
-        """Render a category label with the total open-event count across
-        its series (not the series count, which is less useful)."""
-        total_events = sum((s.event_count or 0) for s in cat.series.values())
-        return f"[ ] {name}   {cat.series_count} series · {total_events} open"
+        """Render a category label with the visible-series and total-event
+        counts. `visible series` == series with >0 or unknown event count;
+        known-empty series are hidden from the tree and excluded here too
+        so the label doesn't lie about what you're about to see."""
+        visible = self._visible_series(cat)
+        total_events = sum((s.event_count or 0) for s in visible)
+        return f"[ ] {name}   {len(visible)} series · {total_events} open"
 
     def __init__(
         self,
@@ -206,6 +223,11 @@ class TreeScreen(Screen):
             return
 
         for cat_name, cat in sorted(self._discovery.categories.items()):
+            # Skip categories that have no visible series at all. We only
+            # suppress when we're sure — if any series has an unknown count
+            # (None), _is_series_visible keeps it, so the category stays.
+            if not self._visible_series(cat):
+                continue
             cat_node = tree.root.add(
                 self._category_label(cat_name, cat),
                 data={"kind": "category", "name": cat_name},
@@ -259,14 +281,21 @@ class TreeScreen(Screen):
             # Negate count so bigger first; ticker ascending as tiebreak.
             return (-count, ticker)
 
-        for i, (ticker, series) in enumerate(sorted(cat.series.items(), key=_sort_key)):
+        added = 0
+        for ticker, series in sorted(cat.series.items(), key=_sort_key):
+            # Drop series with known-zero open events. event_count is None
+            # (unknown) stays visible so a bulk-count fetch failure doesn't
+            # empty the tree.
+            if not self._is_series_visible(series):
+                continue
             child = node.add(
                 self._series_label(ticker, series),
                 data={"kind": "series", "ticker": ticker},
                 expand=False,
             )
             child.add("…", data={"kind": "placeholder"})
-            if (i + 1) % 100 == 0:
+            added += 1
+            if added % 100 == 0:
                 tree.refresh()
                 await _asyncio.sleep(0)
         tree.refresh()
@@ -274,7 +303,8 @@ class TreeScreen(Screen):
             "tree_expand_done",
             category=category,
             elapsed_ms=int((_time.perf_counter() - _t0) * 1000),
-            series_added=cat.series_count,
+            series_added=added,
+            series_total=cat.series_count,
         )
 
     async def _expand_series(self, node: TreeNode, series_ticker: str) -> None:
