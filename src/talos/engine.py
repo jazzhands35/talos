@@ -3057,6 +3057,110 @@ class TradingEngine:
             self._notify(f"Added {len(pairs)} market pair(s)", toast=True)
         return pairs
 
+    async def add_pairs_from_selection(self, records: list[dict[str, Any]]) -> list[ArbPair]:
+        """Commit path for tree-selected pairs.
+
+        Mirrors add_games (engine.py:~2839) step-for-step, with:
+          1. restore_game per record (inside suppress_on_change)
+          1.5 seed _volumes_24h from record fields (not populated by restore_game)
+          2. adjuster ledger wiring
+          3. GSR set_expiration + resolve_batch
+          4. feed subscribes
+          5. data_collector.log_game_add
+          6. persist once
+        """
+        pairs: list[ArbPair] = []
+
+        # Steps 1 + 1.5: reconstitute + volume seeding, with on_change suppressed
+        with self._game_manager.suppress_on_change():
+            for r in records:
+                try:
+                    pair = self._game_manager.restore_game(
+                        {**r, "source": r.get("source", "tree")},
+                    )
+                    if pair is None:
+                        continue
+                    vol_a = r.get("volume_24h_a")
+                    vol_b = r.get("volume_24h_b")
+                    if vol_a is not None:
+                        self._game_manager._volumes_24h[pair.ticker_a] = int(vol_a)
+                    if vol_b is not None and pair.ticker_b != pair.ticker_a:
+                        self._game_manager._volumes_24h[pair.ticker_b] = int(vol_b)
+                    pairs.append(pair)
+                except Exception:
+                    logger.warning(
+                        "tree_add_failed",
+                        pair_ticker=r.get("event_ticker"),
+                        exc_info=True,
+                    )
+
+        # Step 2: adjuster
+        for pair in pairs:
+            self._adjuster.add_event(pair)
+
+        # Step 3: GSR wiring + resolve_batch (populates scheduled_start NOW)
+        if self._game_status_resolver is not None and pairs:
+            for pair in pairs:
+                self._game_status_resolver.set_expiration(
+                    pair.event_ticker,
+                    pair.expected_expiration_time,
+                )
+            batch = [
+                (
+                    p.event_ticker,
+                    self._game_manager.subtitles.get(p.event_ticker, ""),
+                )
+                for p in pairs
+            ]
+            await self._game_status_resolver.resolve_batch(batch)
+
+        # Step 4: feed subscribes
+        for pair in pairs:
+            await self._feed.subscribe(pair.ticker_a)
+            if pair.ticker_b != pair.ticker_a:
+                await self._feed.subscribe(pair.ticker_b)
+
+        # Step 5: data_collector
+        if self._data_collector is not None:
+            for pair in pairs:
+                gs = (
+                    self._game_status_resolver.get(pair.event_ticker)
+                    if self._game_status_resolver
+                    else None
+                )
+                scheduled = gs.scheduled_start.isoformat() if gs and gs.scheduled_start else None
+                self._data_collector.log_game_add(
+                    event_ticker=pair.event_ticker,
+                    series_ticker=pair.series_ticker,
+                    sport="",
+                    league="",
+                    source="tree",
+                    ticker_a=pair.ticker_a,
+                    ticker_b=pair.ticker_b,
+                    volume_a=self._game_manager.volumes_24h.get(pair.ticker_a, 0),
+                    volume_b=self._game_manager.volumes_24h.get(pair.ticker_b, 0),
+                    fee_type=pair.fee_type,
+                    fee_rate=pair.fee_rate,
+                    scheduled_start=scheduled,
+                )
+
+        # Step 6: persist once
+        self._persist_active_games()
+        return pairs
+
+    def _persist_active_games(self) -> None:
+        """Single persist point for batch add/remove paths.
+
+        Delegates to GameManager.on_change if it's wired to the legacy
+        _persist_games writer in __main__.py. That writer serializes all
+        pairs in game_manager.active_games to games_full.json.
+        """
+        if self._game_manager.on_change is not None:
+            try:
+                self._game_manager.on_change()
+            except Exception:
+                logger.warning("persist_active_games_failed", exc_info=True)
+
     async def remove_game(self, event_ticker: str) -> None:
         """Remove a game from monitoring."""
         try:
