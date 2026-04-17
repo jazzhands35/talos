@@ -34,6 +34,7 @@ from talos.models.order import Order
 from talos.models.portfolio import EventPosition, Position, Settlement
 from talos.models.position import EventPositionSummary
 from talos.models.proposal import Proposal, ProposalKey, ProposedQueueImprovement
+from talos.models.tree import RemoveOutcome
 from talos.models.ws import FillMessage, TickerMessage, UserOrderMessage
 from talos.opportunity_proposer import OpportunityProposer
 from talos.orderbook import OrderBookManager
@@ -143,6 +144,7 @@ class TradingEngine:
         self._settled_markets: dict[str, dict[str, str]] = {}  # event_ticker -> {ticker: result}
         self._order_placed_at: dict[str, float] = {}  # order_id -> monotonic timestamp
         self._exit_only_events: set[str] = set()  # events in exit-only mode
+        self._winding_down: set[str] = set()  # pairs removed-while-inventory-present
         self._game_started_events: set[str] = set()  # events where game is live/final
         self._last_jump_eval: dict[str, tuple[int, int]] = {}  # ticker -> (book_top, resting)
         # Dedup for replay log: only write an imbalance-eval row on transition.
@@ -3147,6 +3149,122 @@ class TradingEngine:
         # Step 6: persist once
         self._persist_active_games()
         return pairs
+
+    async def remove_pairs_from_selection(
+        self,
+        pair_tickers: list[str],
+    ) -> list[RemoveOutcome]:
+        """Commit path for tree-unticked pairs.
+
+        Returns per-pair RemoveOutcome so TreeScreen can decide per-event
+        whether to set deliberately_unticked, defer, or retry.
+        """
+        outcomes: list[RemoveOutcome] = []
+
+        with self._game_manager.suppress_on_change():
+            for pt in pair_tickers:
+                pair = self._game_manager.get_game(pt)
+                if pair is None:
+                    outcomes.append(
+                        RemoveOutcome(
+                            pair_ticker=pt,
+                            kalshi_event_ticker="",
+                            status="not_found",
+                        )
+                    )
+                    continue
+                kalshi_et = pair.kalshi_event_ticker or pair.event_ticker
+
+                try:
+                    ledger = self._adjuster.get_ledger(pt)
+                    # Tests use MagicMock ledgers with has_filled_positions /
+                    # has_resting_orders; real PositionLedger has neither, so
+                    # derive has_inventory from filled_count / resting_count.
+                    has_inventory = False
+                    if ledger is not None:
+                        has_filled = getattr(ledger, "has_filled_positions", None)
+                        has_resting = getattr(ledger, "has_resting_orders", None)
+                        if callable(has_filled) or callable(has_resting):
+                            has_inventory = bool(
+                                (callable(has_filled) and has_filled())
+                                or (callable(has_resting) and has_resting()),
+                            )
+                        else:
+                            try:
+                                has_inventory = (
+                                    ledger.filled_count(Side.A) > 0
+                                    or ledger.filled_count(Side.B) > 0
+                                    or ledger.resting_count(Side.A) > 0
+                                    or ledger.resting_count(Side.B) > 0
+                                )
+                            except Exception:
+                                has_inventory = False
+
+                    if has_inventory:
+                        self._winding_down.add(pt)
+                        await self.enforce_exit_only(pt)
+                        self._mark_engine_state(pt, "winding_down")
+                        try:
+                            fa = ledger.filled_count(Side.A) if ledger else "?"
+                            fb = ledger.filled_count(Side.B) if ledger else "?"
+                            ra = ledger.resting_count(Side.A) if ledger else "?"
+                            rb = ledger.resting_count(Side.B) if ledger else "?"
+                        except Exception:
+                            fa = fb = ra = rb = "?"
+                        reason = f"filled={fa},{fb} resting={ra},{rb}"
+                        logger.info(
+                            "winding_down_started",
+                            pair_ticker=pt,
+                            reason=reason,
+                        )
+                        outcomes.append(
+                            RemoveOutcome(
+                                pair_ticker=pt,
+                                kalshi_event_ticker=kalshi_et,
+                                status="winding_down",
+                                reason=reason,
+                            )
+                        )
+                        continue
+
+                    # Clean removal (reverse of add flow)
+                    self._exit_only_events.discard(pt)
+                    self._stale_candidates.discard(pt)
+                    if self._game_status_resolver is not None:
+                        self._game_status_resolver.remove(pt)
+                    self._adjuster.remove_event(pt)
+                    await self._game_manager.remove_game(pt)
+                    outcomes.append(
+                        RemoveOutcome(
+                            pair_ticker=pt,
+                            kalshi_event_ticker=kalshi_et,
+                            status="removed",
+                        )
+                    )
+                except Exception as exc:
+                    logger.warning(
+                        "tree_remove_failed",
+                        pair_ticker=pt,
+                        exc_info=True,
+                    )
+                    outcomes.append(
+                        RemoveOutcome(
+                            pair_ticker=pt,
+                            kalshi_event_ticker=kalshi_et,
+                            status="failed",
+                            reason=str(exc),
+                        )
+                    )
+
+        self._persist_active_games()
+        return outcomes
+
+    def _mark_engine_state(self, pair_ticker: str, state: str) -> None:
+        """Set per-pair engine_state on the ArbPair in GameManager._games
+        so the next _persist_games write picks it up."""
+        pair = self._game_manager.get_game(pair_ticker)
+        if pair is not None:
+            pair.engine_state = state
 
     def _persist_active_games(self) -> None:
         """Single persist point for batch add/remove paths.
