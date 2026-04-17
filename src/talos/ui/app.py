@@ -83,6 +83,7 @@ class TalosApp(App):
         ("B", "edit_blacklist", "Edit Blacklist"),
         ("m", "toggle_scan_mode", "Mode"),
         ("v", "toggle_view", "View"),
+        ("t", "push_tree_screen", "Tree"),
         ("q", "quit", "Quit"),
     ]
 
@@ -1004,6 +1005,44 @@ class TalosApp(App):
         table.set_compact(new_compact)
         mode_label = "compact" if new_compact else "full"
         self.notify(f"View: {mode_label}")
+
+    def action_push_tree_screen(self) -> None:
+        """Push the TreeScreen (tree-mode selection surface).
+
+        Gated behind automation_config.tree_mode. If tree mode is off or the
+        collaborators are not initialized, show a warning notification.
+        """
+        from talos.ui.tree_screen import TreeScreen
+
+        if self._automation_config is None or not self._automation_config.tree_mode:
+            self.notify(
+                "Tree mode disabled. Set tree_mode=True in config.",
+                severity="warning",
+            )
+            return
+        if (
+            self._discovery_service is None
+            or self._milestone_resolver is None
+            or self._tree_metadata_store is None
+        ):
+            self.notify(
+                "Tree mode collaborators not initialized.",
+                severity="warning",
+            )
+            return
+        screen = TreeScreen(
+            discovery=self._discovery_service,
+            milestones=self._milestone_resolver,
+            metadata=self._tree_metadata_store,
+            engine=self._engine,
+        )
+        # Wire engine's event_fully_removed emission to the screen callback
+        # so the tree view knows when an event has been reaped end-to-end.
+        if self._engine is not None and hasattr(self._engine, "add_event_fully_removed_listener"):
+            self._engine.add_event_fully_removed_listener(
+                screen.on_event_fully_removed,
+            )
+        self.push_screen(screen)
 
     @work(thread=False)
     async def _show_blacklist_editor(self, current: list[str]) -> None:
