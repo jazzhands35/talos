@@ -132,3 +132,41 @@ class TestBidConfirmation:
         assert bid.ticker_a == "TK-A"
         assert bid.no_a == 45
         assert bid.qty == 10
+
+
+def test_arbpair_has_source_field_default_none():
+    pair = ArbPair(
+        event_ticker="KXFEDMENTION-26APR-YIEL",
+        ticker_a="KXFEDMENTION-26APR-YIEL",
+        ticker_b="KXFEDMENTION-26APR-YIEL",
+    )
+    assert pair.source is None
+
+
+def test_arbpair_source_accepts_tree_value():
+    pair = ArbPair(
+        event_ticker="KXFEDMENTION-26APR-YIEL",
+        ticker_a="KXFEDMENTION-26APR-YIEL",
+        ticker_b="KXFEDMENTION-26APR-YIEL",
+        source="tree",
+    )
+    assert pair.source == "tree"
+
+
+def test_arbpair_engine_state_defaults_to_active():
+    pair = ArbPair(
+        event_ticker="KXFEDMENTION-26APR-YIEL",
+        ticker_a="KXFEDMENTION-26APR-YIEL",
+        ticker_b="KXFEDMENTION-26APR-YIEL",
+    )
+    assert pair.engine_state == "active"
+
+
+def test_arbpair_engine_state_accepts_winding_down():
+    pair = ArbPair(
+        event_ticker="KXFEDMENTION-26APR-YIEL",
+        ticker_a="KXFEDMENTION-26APR-YIEL",
+        ticker_b="KXFEDMENTION-26APR-YIEL",
+        engine_state="winding_down",
+    )
+    assert pair.engine_state == "winding_down"

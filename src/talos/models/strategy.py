@@ -20,6 +20,8 @@ class ArbPair(BaseModel):
     fee_rate: float = 0.0175
     close_time: str | None = None
     expected_expiration_time: str | None = None
+    source: str | None = None  # "tree" | "manual_url" | "restore" | "migration"
+    engine_state: str = "active"  # "active" | "winding_down" | "exit_only"
 
     @property
     def is_same_ticker(self) -> bool:
