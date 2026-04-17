@@ -20,3 +20,19 @@ class AutomationConfig:
     enabled: bool = True
     exit_only_minutes: float = 30.0
     sports_enabled: bool = True
+
+    # Tree-mode feature flag — all new behavior gated on this.
+    tree_mode: bool = False
+
+    # Startup gate — max wait for milestones before engine begins tick loop.
+    startup_milestone_wait_seconds: float = 30.0
+
+    # Schedule conflict threshold — delta between manual override and Kalshi
+    # milestone that triggers a user-resolved conflict prompt.
+    schedule_conflict_threshold_minutes: float = 5.0
+
+    # DiscoveryService semaphore — max concurrent discovery Kalshi calls.
+    discovery_concurrent_limit: int = 5
+
+    # Background milestone refresh interval.
+    milestone_refresh_seconds: float = 300.0

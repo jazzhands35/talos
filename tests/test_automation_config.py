@@ -59,3 +59,18 @@ class TestAutomationConfigCustom:
         assert cfg.stability_seconds == 5.0
         assert cfg.staleness_grace_seconds == 5.0
         assert cfg.rejection_cooldown_seconds == 30.0
+
+
+def test_defaults_include_tree_mode_settings():
+    c = AutomationConfig()
+    assert c.tree_mode is False
+    assert c.startup_milestone_wait_seconds == 30.0
+    assert c.schedule_conflict_threshold_minutes == 5.0
+    assert c.discovery_concurrent_limit == 5
+    assert c.milestone_refresh_seconds == 300.0
+
+
+def test_exit_only_minutes_unchanged():
+    """Regression: single exit_only_minutes setting retained per Q2."""
+    c = AutomationConfig()
+    assert c.exit_only_minutes == 30.0
