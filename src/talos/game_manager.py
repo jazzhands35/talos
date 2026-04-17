@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Callable
+from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
 from urllib.parse import urlparse
 
@@ -214,6 +215,25 @@ class GameManager:
         self._leg_labels: dict[str, tuple[str, str]] = {}
         self._volumes_24h: dict[str, int] = {}  # market_ticker -> 24h volume
         self.on_change: Callable[[], None] | None = None
+
+    @contextmanager
+    def suppress_on_change(self):
+        """Pause on_change emission within a batch.
+
+        Engine batch paths (add_pairs_from_selection, remove_pairs_from_selection)
+        call this to prevent per-pair save_games_full writes during restore/
+        remove loops. A single final persist runs in Engine._persist_active_games
+        at batch end.
+
+        Non-batch callers (URL-add via add_games, clear_all_games, UI
+        re-renders) are unaffected — they keep firing on_change per-pair.
+        """
+        prev = self.on_change
+        self.on_change = None
+        try:
+            yield
+        finally:
+            self.on_change = prev
 
     def is_blacklisted(self, ticker: str) -> bool:
         """Check if a ticker matches any blacklist entry (prefix or exact)."""
