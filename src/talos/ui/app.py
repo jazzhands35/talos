@@ -117,6 +117,23 @@ class TalosApp(App):
         self._milestone_resolver = milestone_resolver
         self._discovery_service = discovery_service
 
+    def notify(self, message: object = "", *args: object, **kwargs: object) -> None:  # type: ignore[override]
+        """Tee every toast notification to structlog so devs tailing the log
+        file see the same messages the user sees as toasts.
+
+        Diagnostic hook — remove (or make opt-in) after bootstrap-lag work
+        is finished.
+        """
+        import contextlib
+
+        with contextlib.suppress(Exception):
+            logger.info(
+                "notify_toast",
+                message=str(message),
+                severity=kwargs.get("severity", "information"),
+            )
+        return super().notify(message, *args, **kwargs)  # type: ignore[no-any-return]
+
     def compose(self) -> ComposeResult:
         yield Header()
         yield Static(
