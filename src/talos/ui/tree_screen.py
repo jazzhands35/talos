@@ -218,7 +218,14 @@ class TreeScreen(Screen):
         cat = self._discovery.categories.get(category)
         if not cat:
             return
-        import asyncio as _asyncio  # local to avoid polluting module namespace
+        import asyncio as _asyncio
+        import time as _time
+
+        import structlog as _structlog
+
+        _log = _structlog.get_logger()
+        _t0 = _time.perf_counter()
+        _log.info("tree_expand_start", category=category, series_count=cat.series_count)
 
         tree = self.query_one("#tree", Tree)
         for i, (ticker, series) in enumerate(sorted(cat.series.items())):
@@ -229,12 +236,16 @@ class TreeScreen(Screen):
             )
             child.add("…", data={"kind": "placeholder"})
             _ = series  # reserved for future metadata display
-            # Yield to the event loop every 100 nodes so the user sees rows
-            # stream in rather than all appearing at the end.
             if (i + 1) % 100 == 0:
                 tree.refresh()
                 await _asyncio.sleep(0)
         tree.refresh()
+        _log.info(
+            "tree_expand_done",
+            category=category,
+            elapsed_ms=int((_time.perf_counter() - _t0) * 1000),
+            series_added=cat.series_count,
+        )
 
     async def _expand_series(self, node: TreeNode, series_ticker: str) -> None:
         if self._discovery is None:

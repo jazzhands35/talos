@@ -449,22 +449,65 @@ class TalosApp(App):
     async def _bootstrap_tree_discovery(self) -> None:
         """Tree-mode: bootstrap discovery + initial milestone refresh, then
         signal the engine that it is ready for trading."""
+        import time as _time
+
         if self._discovery_service is None or self._milestone_resolver is None:
             return
+        t0 = _time.perf_counter()
+        import structlog as _structlog
+
+        _log = _structlog.get_logger()
+        _log.info("tree_bootstrap_start")
+        self.notify("Tree: loading series catalog...", severity="information")
+
+        t_fetch = _time.perf_counter()
         await self._discovery_service.bootstrap()
+        _log.info(
+            "tree_bootstrap_series_done",
+            elapsed_ms=int((_time.perf_counter() - t_fetch) * 1000),
+            series_count=sum(c.series_count for c in self._discovery_service.categories.values()),
+        )
+
+        t_ms = _time.perf_counter()
         await self._milestone_resolver.refresh()
+        _log.info(
+            "tree_bootstrap_milestones_done",
+            elapsed_ms=int((_time.perf_counter() - t_ms) * 1000),
+            milestone_count=self._milestone_resolver.count,
+        )
+
         if self._engine is not None:
             self._engine._ready_for_trading.set()
 
+        total_ms = int((_time.perf_counter() - t0) * 1000)
+        _log.info("tree_bootstrap_complete", total_ms=total_ms)
+        self.notify(f"Tree: loaded in {total_ms} ms", severity="information")
+
     @work(thread=False)
     async def _run_tree_milestone_loop(self) -> None:
-        """Tree-mode: periodic milestone refresh loop (runs until shutdown)."""
+        """Tree-mode: periodic milestone refresh loop (runs until shutdown).
+
+        Delays the first refresh until after bootstrap completes so the two
+        aren't competing for network/CPU during user-visible TreeScreen mount.
+        """
+        import asyncio
+
         if (
             self._discovery_service is None
             or self._milestone_resolver is None
             or self._automation_config is None
         ):
             return
+        # Wait for bootstrap to signal completion — no point refreshing
+        # milestones while the series catalog is still downloading.
+        import contextlib
+
+        if self._engine is not None:
+            with contextlib.suppress(TimeoutError):
+                await asyncio.wait_for(
+                    self._engine._ready_for_trading.wait(),
+                    timeout=60.0,
+                )
         await self._discovery_service.run_milestone_loop(
             self._milestone_resolver,
             interval_seconds=self._automation_config.milestone_refresh_seconds,
