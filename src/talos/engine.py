@@ -1050,6 +1050,7 @@ class TradingEngine:
                         self._game_manager._volumes_24h[pair.ticker_a] = int(vol_a)
                     if vol_b is not None:
                         self._game_manager._volumes_24h[pair.ticker_b] = int(vol_b)
+                    self._apply_persisted_engine_state(pair)
                     pairs.append(pair)
                     cached_tickers.add(pair.event_ticker)
                 except Exception:
@@ -3265,6 +3266,29 @@ class TradingEngine:
         pair = self._game_manager.get_game(pair_ticker)
         if pair is not None:
             pair.engine_state = state
+
+    def _apply_persisted_engine_state(self, pair: ArbPair) -> None:
+        """Apply a pair's persisted engine_state after restore.
+
+        Winding-down pairs re-enter _winding_down + _exit_only_events so the
+        next tick immediately applies exit-only behavior — preventing the
+        SURVIVOR-class failure mode where a crash during wind-down could
+        result in the pair resuming normal trading after restart.
+        """
+        state = getattr(pair, "engine_state", "active")
+        if state == "winding_down":
+            self._winding_down.add(pair.event_ticker)
+            self._exit_only_events.add(pair.event_ticker)
+            logger.info(
+                "winding_down_restored",
+                pair_ticker=pair.event_ticker,
+            )
+        elif state == "exit_only":
+            self._exit_only_events.add(pair.event_ticker)
+            logger.info(
+                "exit_only_restored",
+                pair_ticker=pair.event_ticker,
+            )
 
     def _persist_active_games(self) -> None:
         """Single persist point for batch add/remove paths.
