@@ -96,6 +96,16 @@ class TreeScreen(Screen):
         ("c", "commit_changes", "Commit"),
     ]
 
+    _GLYPHS = {
+        "empty": "[ ]",
+        "checked": "[✓]",
+        "deliberately_unticked": "[·]",
+        "winding": "[W]",
+    }
+
+    def _glyph_for_state(self, state: str) -> str:
+        return self._GLYPHS.get(state, "[ ]")
+
     def __init__(
         self,
         *,
@@ -178,26 +188,89 @@ class TreeScreen(Screen):
         events = await self._discovery.get_events_for_series(series_ticker)
         node.remove_children()
         for event_ticker, ev in sorted(events.items()):
+            state = self._effective_state(event_ticker)
+            glyph = self._glyph_for_state(state)
             node.add_leaf(
-                f"[ ] {event_ticker}   {ev.title[:40]}",
+                f"{glyph} {event_ticker}   {ev.title[:40]}",
                 data={"kind": "event", "ticker": event_ticker},
             )
+
+    def _engine_pairs_for_event(self, kalshi_event_ticker: str) -> list[str]:
+        """Return pair-level event_tickers currently in GameManager for this event."""
+        if self._engine is None:
+            return []
+        gm = getattr(self._engine, "_game_manager", None)
+        if gm is None or not hasattr(gm, "_games"):
+            return []
+        out: list[str] = []
+        for pt, pair in gm._games.items():
+            pair_kalshi = getattr(pair, "kalshi_event_ticker", None) or getattr(
+                pair, "event_ticker", None
+            )
+            if pair_kalshi == kalshi_event_ticker:
+                out.append(pt)
+        return out
+
+    def _current_event_state(self, kalshi_event_ticker: str) -> str:
+        """Return the display state for this event.
+
+        Values: "checked", "deliberately_unticked", "winding", "empty".
+        """
+        # Winding-down takes precedence (user is in the middle of unticking)
+        if self._engine is not None:
+            winding = getattr(self._engine, "_winding_down", set())
+            for pt in self._engine_pairs_for_event(kalshi_event_ticker):
+                if pt in winding:
+                    return "winding"
+
+        # Currently monitored?
+        if self._engine_pairs_for_event(kalshi_event_ticker):
+            return "checked"
+
+        # Deliberately unticked?
+        if self._metadata is not None and self._metadata.is_deliberately_unticked(
+            kalshi_event_ticker
+        ):
+            return "deliberately_unticked"
+
+        return "empty"
+
+    def _effective_state(self, kalshi_event_ticker: str) -> str:
+        """Current state + staged overrides. Used to render the tickbox glyph.
+
+        If the event has a staged add -> overrides to "checked" (pending).
+        If the event has a staged remove -> overrides to "empty" (pending).
+        """
+        current = self._current_event_state(kalshi_event_ticker)
+        staged_add = any(
+            r.kalshi_event_ticker == kalshi_event_ticker for r in self.staged_changes.to_add
+        )
+        if staged_add:
+            return "checked"
+        # staged_remove is a list of pair_tickers; check if any for this event
+        pair_tickers = set(self._engine_pairs_for_event(kalshi_event_ticker))
+        staged_remove_overlap = any(pt in pair_tickers for pt in self.staged_changes.to_remove)
+        if staged_remove_overlap:
+            return "empty"
+        return current
 
     async def action_manual_refresh(self) -> None:
         if self._discovery is not None:
             await self._discovery.bootstrap()
 
     def toggle_event_by_ticker(self, kalshi_event_ticker: str) -> None:
-        """Programmatic toggle used by tests and by keybindings.
+        """State-aware toggle.
 
-        If the event is not currently staged for add, stage it by building
-        an ArbPairRecord per active market. If it IS currently staged, unstage
-        (remove all records for this event from to_add).
+        - Never-ticked -> stage add.
+        - Currently monitored -> stage remove + set_unticked.
+        - Deliberately unticked -> stage add + clear_unticked.
+        - Winding-down -> stage add (re-engage trading).
+        Staged-add / staged-remove get unstaged if toggled again.
         """
         if self._discovery is None:
             return
 
-        # Find the event
+        # Locate the event in the discovery cache so we can build records
         event_node = None
         series_ref = None
         cat_ref = None
@@ -212,15 +285,53 @@ class TreeScreen(Screen):
                     break
             if event_node is not None:
                 break
-        if event_node is None or series_ref is None or cat_ref is None:
-            return
 
-        existing = [
+        # If we can't find it in the discovery cache but it's currently
+        # monitored, we can still untick (we don't need the event metadata
+        # for the remove path).
+        currently_monitored_pairs = self._engine_pairs_for_event(kalshi_event_ticker)
+
+        # Stage-unstage first: if already in to_add, unstage it
+        existing_adds = [
             r for r in self.staged_changes.to_add if r.kalshi_event_ticker == kalshi_event_ticker
         ]
-        if existing:
-            for r in list(existing):
+        if existing_adds:
+            for r in list(existing_adds):
                 self.staged_changes.to_add.remove(r)
+            # Also drop any to_clear_unticked we added alongside
+            if kalshi_event_ticker in self.staged_changes.to_clear_unticked:
+                self.staged_changes.to_clear_unticked.remove(kalshi_event_ticker)
+            return
+
+        # If staged remove, unstage it
+        staged_remove_overlap = [
+            pt for pt in self.staged_changes.to_remove if pt in currently_monitored_pairs
+        ]
+        if staged_remove_overlap:
+            for pt in list(staged_remove_overlap):
+                self.staged_changes.to_remove.remove(pt)
+            # Also drop any to_set_unticked flag
+            if kalshi_event_ticker in self.staged_changes.to_set_unticked:
+                self.staged_changes.to_set_unticked.remove(kalshi_event_ticker)
+            return
+
+        # Fresh toggle — route by current state
+        current_state = self._current_event_state(kalshi_event_ticker)
+
+        if current_state in ("checked", "winding"):
+            # Untick: stage remove for every pair + set_unticked flag
+            for pt in currently_monitored_pairs:
+                if pt not in self.staged_changes.to_remove:
+                    self.staged_changes.to_remove.append(pt)
+            if kalshi_event_ticker not in self.staged_changes.to_set_unticked:
+                self.staged_changes.to_set_unticked.append(kalshi_event_ticker)
+            return
+
+        # current_state in ("empty", "deliberately_unticked") -> stage adds.
+        # We need the event's market list to build ArbPairRecords.
+        if event_node is None or series_ref is None or cat_ref is None:
+            # Can't build records without discovery data (e.g., event aged
+            # out of discovery cache). No-op.
             return
 
         for mkt in event_node.markets:
@@ -245,6 +356,13 @@ class TreeScreen(Screen):
                     volume_24h_b=mkt.volume_24h,
                 )
             )
+
+        # If previously deliberately_unticked, schedule clear on commit
+        if (
+            current_state == "deliberately_unticked"
+            and kalshi_event_ticker not in self.staged_changes.to_clear_unticked
+        ):
+            self.staged_changes.to_clear_unticked.append(kalshi_event_ticker)
 
     def _events_needing_schedule(self) -> list[ArbPairRecord]:
         """Return staged-add records whose event has no known schedule source.
@@ -389,15 +507,11 @@ class TreeScreen(Screen):
                 self._refresh_node_label(node, ticker)
 
     def _refresh_node_label(self, node: TreeNode, kalshi_event_ticker: str) -> None:
-        """Update the node's glyph to match the current staged state."""
-        is_staged = any(
-            r.kalshi_event_ticker == kalshi_event_ticker for r in self.staged_changes.to_add
-        )
-        glyph = "[x]" if is_staged else "[ ]"
+        """Update the node's glyph to match the current (post-toggle) state."""
+        state = self._effective_state(kalshi_event_ticker)
+        glyph = self._glyph_for_state(state)
         data = node.data if isinstance(node.data, dict) else {}
         ticker = data.get("ticker", kalshi_event_ticker)
-        # First-pass UI: rebuild with glyph + ticker. Title suffix will be
-        # re-rendered on the next full tree rebuild.
         node.set_label(f"{glyph} {ticker}")
 
     async def action_commit_changes(self) -> None:
