@@ -1066,14 +1066,25 @@ class TreeScreen(Screen):
         ticker = data.get("ticker", kalshi_event_ticker)
         node.set_label(f"{glyph} {ticker}")
 
-    async def action_commit_changes(self) -> None:
-        """Run the commit flow — pushes staged changes through Engine."""
+    def action_commit_changes(self) -> None:
+        """Run the commit flow — pushes staged changes through Engine.
+
+        Dispatches to a worker because commit() awaits push_screen_wait()
+        for the SchedulePopup, and Textual requires a worker context for
+        wait_for_dismiss=True. Calling await commit() directly from an
+        async action handler raises NoActiveWorker, which Textual swallows
+        internally — leaving the user staring at a broken UI with no
+        toast, no traceback in our logs, and staged changes still
+        pending.
+        """
         if self.staged_changes.is_empty():
             self.notify("No staged changes to commit.", severity="information")
             return
+        self.run_worker(self._commit_worker(), exclusive=True)
+
+    async def _commit_worker(self) -> None:
         completed = await self.commit()
         if not completed:
             return
         self.notify("Commit complete.", severity="information")
-        # Rebuild the tree so node glyphs reflect cleared staging
         self._rebuild_tree()

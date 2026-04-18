@@ -354,7 +354,10 @@ async def test_action_commit_changes_does_not_announce_success_on_cancel():
     )
     screen._rebuild_tree = lambda: rebuilds.append("rebuilt")  # type: ignore[method-assign]
 
-    await screen.action_commit_changes()
+    # action_commit_changes dispatches to a Textual worker; in an unmounted
+    # test context we bypass the wrapper and drive the coroutine it would
+    # schedule. Same logic — just without Textual's runtime.
+    await screen._commit_worker()
 
     assert notifications == []
     assert rebuilds == []
