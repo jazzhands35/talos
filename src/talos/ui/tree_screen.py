@@ -687,6 +687,11 @@ class TreeScreen(Screen):
                     close_time=(
                         event_node.close_time.isoformat() if event_node.close_time else None
                     ),
+                    expected_expiration_time=(
+                        event_node.expected_expiration_time.isoformat()
+                        if event_node.expected_expiration_time
+                        else None
+                    ),
                     volume_24h_a=mkt.volume_24h,
                     volume_24h_b=mkt.volume_24h,
                 )

@@ -121,6 +121,11 @@ class MarketNode(BaseModel):
     open_interest: int = 0
     status: str = "active"
     close_time: datetime | None = None
+    # Kalshi's projected settlement time. For continuous events (hurricane
+    # counts, commodity close prices, annual outcomes), this is meaningful
+    # timing data we can use as the safety-gate default at commit time,
+    # since there is no discrete "event-start" for such markets.
+    expected_expiration_time: datetime | None = None
 
 
 class EventNode(BaseModel):
@@ -131,6 +136,10 @@ class EventNode(BaseModel):
     title: str
     sub_title: str = ""
     close_time: datetime | None = None
+    # Mirrored from the first active market when the event payload omits it
+    # (common for multi-market events where timing is per-market). Used as
+    # the SchedulePopup default when no milestone is available.
+    expected_expiration_time: datetime | None = None
     milestone: Milestone | None = None
     markets: list[MarketNode] = Field(default_factory=list)
     fetched_at: datetime | None = None

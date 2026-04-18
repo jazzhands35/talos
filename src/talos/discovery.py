@@ -8,7 +8,6 @@ Two-level cache:
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import json
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
@@ -425,27 +424,32 @@ class DiscoveryService:
                     ticker=m.get("ticker"),
                     exc_info=True,
                 )
-        close = raw.get("close_time")
-        close_dt = None
-        if close:
-            with contextlib.suppress(ValueError):
-                close_dt = datetime.fromisoformat(close.replace("Z", "+00:00"))
+        # Kalshi's event payload omits close_time / expected_expiration_time
+        # for many event shapes (hurricane counts, commodity panels, etc.) —
+        # the fields live on each market instead. Mirror up from the first
+        # active market when the event-level value is missing, so downstream
+        # consumers (SchedulePopup, safety gates) see a coherent timing for
+        # the event as a whole.
+        close_dt = _parse_iso(raw.get("close_time")) or _first_market_time(
+            markets, "close_time"
+        )
+        exp_dt = _parse_iso(raw.get("expected_expiration_time")) or _first_market_time(
+            markets, "expected_expiration_time"
+        )
         return EventNode(
             ticker=raw["event_ticker"],
             series_ticker=raw.get("series_ticker", ""),
             title=raw.get("title", ""),
             sub_title=raw.get("sub_title", ""),
             close_time=close_dt,
+            expected_expiration_time=exp_dt,
             markets=markets,
             fetched_at=datetime.now(UTC),
         )
 
     def _parse_market(self, raw: dict[str, Any]) -> MarketNode:
-        close = raw.get("close_time")
-        close_dt = None
-        if close:
-            with contextlib.suppress(ValueError):
-                close_dt = datetime.fromisoformat(close.replace("Z", "+00:00"))
+        close_dt = _parse_iso(raw.get("close_time"))
+        exp_dt = _parse_iso(raw.get("expected_expiration_time"))
         # open_interest may arrive as string in some responses
         oi_raw = raw.get("open_interest_fp") or raw.get("open_interest") or 0
         try:
@@ -461,6 +465,7 @@ class DiscoveryService:
             open_interest=oi,
             status=raw.get("status", "active"),
             close_time=close_dt,
+            expected_expiration_time=exp_dt,
         )
 
     # ── Background milestone loop ────────────────────────────────────
@@ -511,3 +516,30 @@ def _to_cents(val: Any) -> int | None:
         return int(round(float(val) * 100))
     except (ValueError, TypeError):
         return None
+
+
+def _parse_iso(raw: Any) -> datetime | None:
+    """Parse a Kalshi ISO-8601 timestamp; return None on empty/invalid input.
+
+    Kalshi uses a trailing 'Z' for UTC (`2026-12-02T04:59:00Z`), which
+    datetime.fromisoformat accepts in 3.11+ but we normalize anyway to
+    '+00:00' for portability.
+    """
+    if not raw:
+        return None
+    try:
+        return datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
+
+def _first_market_time(markets: list[Any], field: str) -> datetime | None:
+    """Return the first active market's value for `field` (close_time or
+    expected_expiration_time). Used to backfill event-level timing when the
+    event payload omits it — true for many multi-market panels on Kalshi.
+    """
+    for m in markets:
+        val = getattr(m, field, None)
+        if val is not None:
+            return val
+    return None

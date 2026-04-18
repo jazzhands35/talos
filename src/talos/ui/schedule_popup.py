@@ -80,7 +80,16 @@ class SchedulePopup(ModalScreen[dict[str, str] | None]):
                         f"{r.kalshi_event_ticker}  ({r.sub_title or r.series_ticker})",
                         classes="event-label",
                     )
+                    # Pre-fill with Kalshi's expected_expiration_time (or
+                    # close_time as fallback) when we have it. The user can
+                    # still edit, opt-out, or clear. For continuous events
+                    # (hurricane counts, commodity panels) this fills in
+                    # the Dec-01 style expiration directly — for discrete
+                    # events without a milestone it at least gives the
+                    # close_time as a starting point.
+                    default = r.expected_expiration_time or r.close_time or ""
                     inp = Input(
+                        value=default,
                         placeholder="YYYY-MM-DDTHH:MM:SS±HH:MM",
                         id=f"input-{r.kalshi_event_ticker}",
                     )
