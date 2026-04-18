@@ -290,13 +290,15 @@ class TreeScreen(Screen):
             # must build their children asynchronously with periodic yields;
             # doing it sync blocks the event loop for several seconds.
             self.run_worker(self._expand_category_async(node, data["name"]))
+        elif kind == "cluster":
+            self.run_worker(self._expand_cluster(node))
         elif kind == "series":
             self.run_worker(self._expand_series(node, data["ticker"]))
 
     async def _expand_category_async(self, node: TreeNode, category: str) -> None:
-        """Populate a category's series children, yielding every 100 adds
-        so the event loop stays responsive for categories with thousands
-        of series."""
+        """Populate a category's children — clusters (if worthwhile) followed
+        by orphan series rows. Large categories are built with periodic
+        yields so the event loop stays responsive."""
         node.remove_children()
         if self._discovery is None:
             return
@@ -308,30 +310,47 @@ class TreeScreen(Screen):
 
         import structlog as _structlog
 
+        from talos.tree_clustering import cluster_series
+
         _log = _structlog.get_logger()
         _t0 = _time.perf_counter()
         _log.info("tree_expand_start", category=category, series_count=cat.series_count)
 
         tree = self.query_one("#tree", Tree)
 
-        # Sort: series WITH events first (descending by count), then alpha.
-        # Makes it easy to see where the action is without scrolling empty series.
-        def _sort_key(item: tuple[str, Any]) -> tuple[int, str]:
-            ticker, s = item
+        visible = [s for s in cat.series.values() if self._is_series_visible(s)]
+        mode, clusters, orphans = cluster_series(visible)
+
+        # Clusters first (sorted by member count desc — cluster_series does
+        # this already), then orphan series under the category directly.
+        for cluster_name, members in clusters:
+            label = self._cluster_label(cluster_name, members)
+            cluster_node = node.add(
+                label,
+                data={
+                    "kind": "cluster",
+                    "category": category,
+                    "cluster_name": cluster_name,
+                    # Store member tickers on the node so we can render
+                    # children lazily without re-running the cluster_series
+                    # function at expand time.
+                    "tickers": [m.ticker for m in members],
+                },
+                expand=False,
+            )
+            cluster_node.add("…", data={"kind": "placeholder"})
+
+        # Orphan series rendered directly under the category, same sort key
+        # as before (events desc, alpha tiebreak).
+        def _series_sort(s: SeriesNode) -> tuple[int, str]:
             count = s.event_count if s.event_count is not None else -1
-            # Negate count so bigger first; ticker ascending as tiebreak.
-            return (-count, ticker)
+            return (-count, s.ticker)
 
         added = 0
-        for ticker, series in sorted(cat.series.items(), key=_sort_key):
-            # Drop series with known-zero open events. event_count is None
-            # (unknown) stays visible so a bulk-count fetch failure doesn't
-            # empty the tree.
-            if not self._is_series_visible(series):
-                continue
+        for series in sorted(orphans, key=_series_sort):
             child = node.add(
-                self._series_label(ticker, series),
-                data={"kind": "series", "ticker": ticker},
+                self._series_label(series.ticker, series),
+                data={"kind": "series", "ticker": series.ticker},
                 expand=False,
             )
             child.add("…", data={"kind": "placeholder"})
@@ -339,14 +358,53 @@ class TreeScreen(Screen):
             if added % 100 == 0:
                 tree.refresh()
                 await _asyncio.sleep(0)
+
         tree.refresh()
         _log.info(
             "tree_expand_done",
             category=category,
+            mode=mode,
+            cluster_count=len(clusters),
+            orphan_count=added,
             elapsed_ms=int((_time.perf_counter() - _t0) * 1000),
-            series_added=added,
             series_total=cat.series_count,
         )
+
+    def _cluster_label(self, cluster_name: str, members: list[SeriesNode]) -> str:
+        """Render a cluster header: "<name>   N series · M open"."""
+        total_events = sum((s.event_count or 0) for s in members)
+        return f"[ ] {cluster_name}   {len(members)} series · {total_events} open"
+
+    async def _expand_cluster(self, node: TreeNode) -> None:
+        """Render a cluster's member series as children. Member tickers are
+        stashed on node.data at cluster-creation time so no re-clustering is
+        needed here — just materialize rows in sort order."""
+        node.remove_children()
+        if self._discovery is None:
+            return
+        data = node.data if isinstance(node.data, dict) else {}
+        tickers = data.get("tickers") or []
+        if not tickers:
+            return
+
+        category = data.get("category", "")
+        cat = self._discovery.categories.get(category)
+        if cat is None:
+            return
+
+        members = [cat.series[t] for t in tickers if t in cat.series]
+
+        def _sort(s: SeriesNode) -> tuple[int, str]:
+            count = s.event_count if s.event_count is not None else -1
+            return (-count, s.ticker)
+
+        for series in sorted(members, key=_sort):
+            child = node.add(
+                self._series_label(series.ticker, series),
+                data={"kind": "series", "ticker": series.ticker},
+                expand=False,
+            )
+            child.add("…", data={"kind": "placeholder"})
 
     async def _expand_series(self, node: TreeNode, series_ticker: str) -> None:
         import time as _time
@@ -753,6 +811,11 @@ class TreeScreen(Screen):
             series_ticker = data.get("ticker")
             if series_ticker:
                 await self._bulk_toggle_series(series_ticker)
+        elif kind == "cluster":
+            tickers = data.get("tickers") or []
+            cluster_name = data.get("cluster_name", "cluster")
+            if tickers:
+                await self._bulk_toggle_series_list(cluster_name, list(tickers))
         elif kind == "category":
             category_name = data.get("name")
             if category_name:
@@ -780,14 +843,7 @@ class TreeScreen(Screen):
         )
 
     async def _bulk_toggle_category(self, category_name: str) -> None:
-        """Stage-tick every active event under every visible series in the
-        category. Fetches any series not yet loaded — in parallel.
-
-        Notifies with a running-count toast since a large category can take
-        several seconds to fan out across its series.
-        """
-        import asyncio as _asyncio
-
+        """Bulk-toggle every visible series in the category."""
         if self._discovery is None:
             return
         cat = self._discovery.categories.get(category_name)
@@ -800,31 +856,45 @@ class TreeScreen(Screen):
                 severity="warning",
             )
             return
+        await self._bulk_toggle_series_list(
+            category_name, [s.ticker for s in visible]
+        )
 
+    async def _bulk_toggle_series_list(
+        self, label: str, series_tickers: list[str]
+    ) -> None:
+        """Bulk-toggle every active event across the given series tickers.
+
+        Fetches events for each series in parallel (authenticated client has
+        a 20-slot semaphore so this saturates without pummeling Kalshi).
+        Used by both category-level and cluster-level space bindings.
+        """
+        import asyncio as _asyncio
+
+        if self._discovery is None or not series_tickers:
+            return
         self.notify(
-            f"{category_name}: fetching events for {len(visible)} series…",
+            f"{label}: fetching events for {len(series_tickers)} series…",
             severity="information",
         )
         results = await _asyncio.gather(
-            *(self._discovery.get_events_for_series(s.ticker) for s in visible),
+            *(self._discovery.get_events_for_series(t) for t in series_tickers),
             return_exceptions=True,
         )
         all_tickers: list[str] = []
         for res in results:
             if isinstance(res, dict):
                 all_tickers.extend(res.keys())
-
         if not all_tickers:
             self.notify(
-                f"No active events found under {category_name}.",
+                f"{label}: no active events found.",
                 severity="warning",
             )
             return
-
         action, toggled = self._apply_bulk_toggle(all_tickers)
         self._find_and_relabel_event_nodes(set(all_tickers))
         self.notify(
-            f"{category_name}: {action} {toggled}/{len(all_tickers)} events.",
+            f"{label}: {action} {toggled}/{len(all_tickers)} events.",
             severity="information",
         )
 

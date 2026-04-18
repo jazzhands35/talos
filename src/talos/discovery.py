@@ -213,11 +213,16 @@ class DiscoveryService:
         categories: dict[str, CategoryNode] = {}
         for raw in all_series:
             cat_name = raw.get("category", "").strip() or "Uncategorized"
+            sources = raw.get("settlement_sources") or []
+            primary_source = (
+                sources[0].get("name", "") if sources and isinstance(sources[0], dict) else ""
+            )
             series = SeriesNode(
                 ticker=raw.get("ticker", ""),
                 title=raw.get("title", ""),
                 category=cat_name,
                 tags=raw.get("tags") or [],
+                primary_source=primary_source,
                 frequency=raw.get("frequency", "custom"),
                 fee_type=raw.get("fee_type", "quadratic_with_maker_fees"),
                 fee_multiplier=float(raw.get("fee_multiplier", 1.0)),

@@ -143,6 +143,10 @@ class SeriesNode(BaseModel):
     title: str
     category: str
     tags: list[str] = Field(default_factory=list)
+    # Name of the first entry in /series.settlement_sources. 100% populated
+    # across all ~9,700 series; used as a grouping fallback for the tree UI
+    # when tag coverage is too sparse (e.g. Social, World).
+    primary_source: str = ""
     frequency: str = "custom"
     fee_type: str = "quadratic_with_maker_fees"
     fee_multiplier: float = 1.0
