@@ -106,6 +106,7 @@ class TreeScreen(Screen):
 
     _GLYPHS = {
         "empty": "[ ]",
+        "partial": "[~]",
         "checked": "[✓]",
         "deliberately_unticked": "[·]",
         "winding": "[W]",
@@ -114,9 +115,45 @@ class TreeScreen(Screen):
     def _glyph_for_state(self, state: str) -> str:
         return self._GLYPHS.get(state, "[ ]")
 
+    def _series_selection_state(self, series: SeriesNode) -> str:
+        """Aggregate tick-state across a series's events.
+
+        Returns 'checked' only when every event is effectively checked;
+        'partial' when some but not all are; 'empty' otherwise. Used to
+        render the series node's parent-of-events glyph so it reflects
+        whether the subtree is fully / partially / not selected.
+
+        If events aren't loaded yet (events is None), we can't know — treat
+        as empty rather than guessing.
+        """
+        if not series.events:
+            return "empty"
+        states = [self._effective_state(et) for et in series.events]
+        if all(s == "checked" for s in states):
+            return "checked"
+        if any(s == "checked" for s in states):
+            return "partial"
+        return "empty"
+
+    def _aggregate_state(self, sub_states: list[str]) -> str:
+        """Combine child states into a parent state.
+
+        All children checked -> checked.
+        Any child checked/partial -> partial.
+        Otherwise -> empty.
+        """
+        if not sub_states:
+            return "empty"
+        if all(s == "checked" for s in sub_states):
+            return "checked"
+        if any(s in ("checked", "partial") for s in sub_states):
+            return "partial"
+        return "empty"
+
     def _series_label(self, ticker: str, series: SeriesNode) -> str:
         """Render a series node's label, including its open-event count if
-        we have one. Dim-dashed count for unknown; numeric count otherwise.
+        we have one, and a glyph reflecting whether any/all of its events
+        are staged/ticked.
         """
         count = series.event_count
         if count is None:
@@ -127,7 +164,8 @@ class TreeScreen(Screen):
             suffix = "  1 event"
         else:
             suffix = f"  {count} events"
-        return f"[ ] {ticker}{suffix}"
+        glyph = self._glyph_for_state(self._series_selection_state(series))
+        return f"{glyph} {ticker}{suffix}"
 
     @staticmethod
     def _is_series_visible(series: SeriesNode) -> bool:
@@ -145,12 +183,16 @@ class TreeScreen(Screen):
 
     def _category_label(self, name: str, cat: CategoryNode) -> str:
         """Render a category label with the visible-series and total-event
-        counts. `visible series` == series with >0 or unknown event count;
-        known-empty series are hidden from the tree and excluded here too
-        so the label doesn't lie about what you're about to see."""
+        counts, plus a glyph aggregating state across every visible series
+        (so a category shows [✓] when everything under it is ticked).
+        """
         visible = self._visible_series(cat)
         total_events = sum((s.event_count or 0) for s in visible)
-        return f"[ ] {name}   {len(visible)} series · {total_events} open"
+        state = self._aggregate_state(
+            [self._series_selection_state(s) for s in visible]
+        )
+        glyph = self._glyph_for_state(state)
+        return f"{glyph} {name}   {len(visible)} series · {total_events} open"
 
     def __init__(
         self,
@@ -371,9 +413,15 @@ class TreeScreen(Screen):
         )
 
     def _cluster_label(self, cluster_name: str, members: list[SeriesNode]) -> str:
-        """Render a cluster header: "<name>   N series · M open"."""
+        """Render a cluster header with an aggregate glyph across its member
+        series, so a fully-ticked cluster shows [✓] and a partially-ticked
+        one shows [~]."""
         total_events = sum((s.event_count or 0) for s in members)
-        return f"[ ] {cluster_name}   {len(members)} series · {total_events} open"
+        state = self._aggregate_state(
+            [self._series_selection_state(s) for s in members]
+        )
+        glyph = self._glyph_for_state(state)
+        return f"{glyph} {cluster_name}   {len(members)} series · {total_events} open"
 
     async def _expand_cluster(self, node: TreeNode) -> None:
         """Render a cluster's member series as children. Member tickers are
@@ -807,6 +855,11 @@ class TreeScreen(Screen):
             if ticker:
                 self.toggle_event_by_ticker(ticker)
                 self._refresh_node_label(node, ticker)
+                # Propagate tick-state up through series → cluster → category
+                p = node.parent
+                while p is not None:
+                    self._relabel_node(p)
+                    p = p.parent
         elif kind == "series":
             series_ticker = data.get("ticker")
             if series_ticker:
@@ -927,9 +980,11 @@ class TreeScreen(Screen):
 
     def _find_and_relabel_event_nodes(self, event_tickers: set[str]) -> None:
         """Walk the tree and refresh labels for any event nodes whose
-        ticker is in the given set. Used after bulk operations so the
-        visible glyphs update without tearing down the whole tree."""
+        ticker is in the given set, then propagate the aggregate state
+        upward by relabeling each changed node's ancestors. Used after
+        bulk operations so glyphs update without tearing down the tree."""
         tree = self.query_one("#tree", Tree)
+        dirty_ancestors: set[int] = set()
 
         def walk(node: TreeNode) -> None:
             data = node.data if isinstance(node.data, dict) else {}
@@ -937,26 +992,74 @@ class TreeScreen(Screen):
                 et = data.get("ticker")
                 if et in event_tickers:
                     self._refresh_node_label(node, et)
+                    p = node.parent
+                    while p is not None and id(p) not in dirty_ancestors:
+                        dirty_ancestors.add(id(p))
+                        self._relabel_node(p)
+                        p = p.parent
             for child in node.children:
                 walk(child)
 
         walk(tree.root)
 
     def _relabel_series_node(self, node: TreeNode, series_ticker: str) -> None:
-        """After a drill-in, update the series node's label to reflect the
-        fresh event count (and its parent category label, which totals
-        those counts). Cheap: just `set_label()` on the two nodes."""
+        """After a drill-in, update the series node's label and propagate
+        the fresh count upward through any cluster → category ancestors.
+        Unlike before, we don't assume parent==category; clusters now sit
+        between them.
+        """
         if self._discovery is None:
             return
-        for cat_name, cat in self._discovery.categories.items():
+        for cat in self._discovery.categories.values():
             if series_ticker in cat.series:
-                node.set_label(self._series_label(series_ticker, cat.series[series_ticker]))
-                if node.parent is not None:
-                    node.parent.set_label(self._category_label(cat_name, cat))
+                node.set_label(
+                    self._series_label(series_ticker, cat.series[series_ticker])
+                )
+                p = node.parent
+                while p is not None:
+                    self._relabel_node(p)
+                    p = p.parent
                 return
 
+    def _relabel_node(self, node: TreeNode) -> None:
+        """Generic relabel for any node based on its kind.
+
+        Category → _category_label; cluster → _cluster_label; series →
+        _series_label; event → _refresh_node_label. Used by both the
+        drill-in and bulk-toggle paths to propagate state upward without
+        each caller having to know what sits above the current row.
+        """
+        if self._discovery is None:
+            return
+        data = node.data if isinstance(node.data, dict) else {}
+        kind = data.get("kind")
+        if kind == "category":
+            cat = self._discovery.categories.get(data.get("name", ""))
+            if cat:
+                node.set_label(self._category_label(cat.name, cat))
+        elif kind == "cluster":
+            cat = self._discovery.categories.get(data.get("category", ""))
+            if cat is None:
+                return
+            tickers = data.get("tickers") or []
+            members = [cat.series[t] for t in tickers if t in cat.series]
+            node.set_label(self._cluster_label(data.get("cluster_name", ""), members))
+        elif kind == "series":
+            ticker = data.get("ticker", "")
+            for cat in self._discovery.categories.values():
+                if ticker in cat.series:
+                    node.set_label(self._series_label(ticker, cat.series[ticker]))
+                    return
+        elif kind == "event":
+            ticker = data.get("ticker", "")
+            if ticker:
+                self._refresh_node_label(node, ticker)
+
     def _refresh_node_label(self, node: TreeNode, kalshi_event_ticker: str) -> None:
-        """Update the node's glyph to match the current (post-toggle) state."""
+        """Update an event leaf's glyph to match the current (post-toggle)
+        state. Ancestor propagation is handled by the caller
+        (_find_and_relabel_event_nodes walks upward from each changed leaf).
+        """
         state = self._effective_state(kalshi_event_ticker)
         glyph = self._glyph_for_state(state)
         data = node.data if isinstance(node.data, dict) else {}
