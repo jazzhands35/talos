@@ -361,3 +361,47 @@ async def test_action_commit_changes_does_not_announce_success_on_cancel():
 
     assert notifications == []
     assert rebuilds == []
+
+
+def test_commit_in_flight_cleared_on_synchronous_run_worker_failure():
+    """Codex round 3: _commit_in_flight is set BEFORE run_worker runs, and
+    only cleared inside the worker's finally. If run_worker raises
+    synchronously (screen unmounted, app shutting down), the worker never
+    runs and the flag stays True forever — every subsequent commit is
+    rejected as 'already in progress'. The fix wraps run_worker in
+    try/except and clears the flag on synchronous failure."""
+    screen = cast(Any, TreeScreen.__new__(TreeScreen))
+    screen.staged_changes = StagedChanges(
+        to_add=[
+            ArbPairRecord(
+                event_ticker="K-1",
+                ticker_a="K-1",
+                ticker_b="K-1",
+                kalshi_event_ticker="K",
+                series_ticker="KX",
+                category="Mentions",
+            )
+        ]
+    )
+    notifications: list[tuple[str, str]] = []
+    screen.notify = lambda msg, severity="information": notifications.append(  # type: ignore[method-assign]
+        (msg, severity)
+    )
+
+    def _failing_run_worker(_coro):
+        # Close the coroutine we'll never await to avoid the
+        # "coroutine was never awaited" RuntimeWarning, then raise.
+        _coro.close()
+        raise RuntimeError("screen unmounted")
+
+    screen.run_worker = _failing_run_worker  # type: ignore[method-assign]
+    screen._commit_in_flight = False
+
+    with pytest.raises(RuntimeError):
+        screen.action_commit_changes()
+
+    # Crucial: flag must be cleared so the next 'c' press isn't permanently
+    # locked out.
+    assert screen._commit_in_flight is False
+    # And the user gets a toast explaining why nothing happened.
+    assert any("could not start" in m for m, _ in notifications)

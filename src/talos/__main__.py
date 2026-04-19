@@ -318,7 +318,9 @@ def main() -> None:
         tree_metadata_store = TreeMetadataStore()
         tree_metadata_store.load()
 
-        milestone_resolver = MilestoneResolver()
+        milestone_resolver = MilestoneResolver(
+            refresh_interval_seconds=auto_config.milestone_refresh_seconds,
+        )
         discovery_service = DiscoveryService(
             concurrent_limit=auto_config.discovery_concurrent_limit,
             rest_client=rest,

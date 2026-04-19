@@ -97,6 +97,37 @@ async def test_multiple_events_in_one_milestone(sample_milestone_response: dict)
     assert r.event_start("KXA-2") is not None
 
 
+def test_is_healthy_uses_configured_refresh_interval():
+    """Codex round 3: the staleness window must scale with the configured
+    milestone_refresh_seconds, not a hardcoded threshold. With a 30-min
+    interval, a 10-min-old refresh should still be considered healthy
+    (3x slack); with the prior hardcoded 15-min threshold it would not."""
+    from datetime import timedelta
+
+    r = MilestoneResolver(refresh_interval_seconds=1800.0)  # 30 min
+    r._last_refresh = datetime.now(UTC) - timedelta(minutes=10)
+    # Index needs to be non-empty for is_healthy
+    r._by_event_ticker = {"any": object()}  # type: ignore[dict-item]
+    assert r.is_healthy()
+
+
+def test_is_healthy_false_past_slack_window():
+    """At 3x the configured refresh interval, declare unhealthy."""
+    from datetime import timedelta
+
+    r = MilestoneResolver(refresh_interval_seconds=300.0)  # 5 min
+    r._last_refresh = datetime.now(UTC) - timedelta(seconds=950)  # > 3 * 300
+    r._by_event_ticker = {"any": object()}  # type: ignore[dict-item]
+    assert not r.is_healthy()
+
+
+def test_is_healthy_false_when_index_empty_even_if_recent():
+    r = MilestoneResolver(refresh_interval_seconds=300.0)
+    r._last_refresh = datetime.now(UTC)
+    # _by_event_ticker stays empty
+    assert not r.is_healthy()
+
+
 @pytest.mark.asyncio
 async def test_unknown_event_returns_none(sample_milestone_response: dict):
     r = MilestoneResolver()

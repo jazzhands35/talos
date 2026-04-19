@@ -3286,44 +3286,55 @@ class TradingEngine:
         subscribed_tickers: list[str],
     ) -> None:
         """Reverse every side effect of add_pairs_from_selection that
-        succeeded before failure. Each step is its own try/except so a
-        secondary failure during cleanup doesn't mask the primary one or
-        prevent later cleanup steps from running.
+        succeeded before failure.
+
+        Each step catches BaseException (not just Exception) because a
+        cancellation that lands inside one cleanup step would otherwise
+        escape the inner try/except, abort the rest of the cleanup, and
+        leak the side effects of all later steps. Catching BaseException
+        per step lets us log the cancellation, continue cleaning up, and
+        let the outer caller decide whether to re-raise.
         """
         for ticker in subscribed_tickers:
             try:
                 await self._feed.unsubscribe(ticker)
-            except Exception:
+            except BaseException as exc:
                 logger.warning(
-                    "rollback_unsubscribe_failed", ticker=ticker, exc_info=True
+                    "rollback_unsubscribe_failed",
+                    ticker=ticker,
+                    exc_type=type(exc).__name__,
+                    exc_msg=str(exc),
                 )
         if self._game_status_resolver is not None:
             for et in gsr_seeded:
                 try:
                     self._game_status_resolver.remove(et)
-                except Exception:
+                except BaseException as exc:
                     logger.warning(
                         "rollback_gsr_failed",
                         event_ticker=et,
-                        exc_info=True,
+                        exc_type=type(exc).__name__,
+                        exc_msg=str(exc),
                     )
         for pair in added_to_adjuster:
             try:
                 self._adjuster.remove_event(pair.event_ticker)
-            except Exception:
+            except BaseException as exc:
                 logger.warning(
                     "rollback_adjuster_failed",
                     event_ticker=pair.event_ticker,
-                    exc_info=True,
+                    exc_type=type(exc).__name__,
+                    exc_msg=str(exc),
                 )
         for pair in pairs:
             try:
                 await self._game_manager.remove_game(pair.event_ticker)
-            except Exception:
+            except BaseException as exc:
                 logger.warning(
                     "rollback_game_manager_failed",
                     event_ticker=pair.event_ticker,
-                    exc_info=True,
+                    exc_type=type(exc).__name__,
+                    exc_msg=str(exc),
                 )
 
     async def remove_pairs_from_selection(
@@ -3403,13 +3414,22 @@ class TradingEngine:
                         )
                         continue
 
-                    # Clean removal (reverse of add flow)
+                    # Clean removal (reverse of add flow). Order matters:
+                    # do the dangerous async work (game_manager.remove_game,
+                    # which awaits feed.unsubscribe) FIRST. If it raises,
+                    # the `except Exception` below records "failed" and the
+                    # cheap engine-state cleanup never runs — so retry
+                    # finds the pair still present on every layer and can
+                    # complete the removal cleanly. The earlier ordering
+                    # cleared exit_only/stale/GSR/adjuster first, so an
+                    # unsubscribe failure left the engine in a half-cleared
+                    # state and the retry returned not_found.
+                    await self._game_manager.remove_game(pt)
                     self._exit_only_events.discard(pt)
                     self._stale_candidates.discard(pt)
                     if self._game_status_resolver is not None:
                         self._game_status_resolver.remove(pt)
                     self._adjuster.remove_event(pt)
-                    await self._game_manager.remove_game(pt)
                     outcomes.append(
                         RemoveOutcome(
                             pair_ticker=pt,

@@ -1132,7 +1132,20 @@ class TreeScreen(Screen):
             )
             return
         self._commit_in_flight = True
-        self.run_worker(self._commit_worker())
+        # If run_worker itself raises synchronously (screen unmounted, app
+        # shutting down, worker creation error), the worker's `finally`
+        # block never runs and _commit_in_flight stays True forever — every
+        # subsequent commit would be rejected as "in progress" until the
+        # screen was recreated. Clear the flag on synchronous failure.
+        try:
+            self.run_worker(self._commit_worker())
+        except Exception as exc:
+            self._commit_in_flight = False
+            self.notify(
+                f"Commit could not start ({type(exc).__name__}): {exc}",
+                severity="error",
+            )
+            raise
 
     async def _commit_worker(self) -> None:
         try:

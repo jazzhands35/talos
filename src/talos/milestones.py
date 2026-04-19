@@ -23,9 +23,21 @@ _KALSHI_API_BASE = "https://api.elections.kalshi.com/trade-api/v2"
 class MilestoneResolver:
     """In-memory milestone index with scheduled refresh."""
 
-    def __init__(self, http: httpx.AsyncClient | None = None) -> None:
+    def __init__(
+        self,
+        http: httpx.AsyncClient | None = None,
+        *,
+        refresh_interval_seconds: float = 300.0,
+    ) -> None:
         self._http = http
         self._owns_http = http is None
+        # Health staleness threshold is derived from the configured refresh
+        # cadence so the two never drift. If the operator raises the
+        # interval to 30 min, the staleness window expands accordingly —
+        # the previous hardcoded 15-min window guaranteed a false-unhealthy
+        # state for any refresh interval > 15 min, which would force-flip
+        # every unscheduled tree-mode pair to exit-only on every cycle.
+        self._refresh_interval_seconds = refresh_interval_seconds
         self._by_event_ticker: dict[str, Milestone] = {}
         self._last_refresh: datetime | None = None
 
@@ -55,16 +67,24 @@ class MilestoneResolver:
     # Engine cascade gates exit-only safety on this — if it returns False,
     # non-sports tree-mode pairs without a manual override should be
     # forced into exit-only.
-    _STALE_AFTER_SECONDS = 900  # 15 min — milestone loop refreshes every 5
+    #
+    # Slack factor — we tolerate up to 3x the configured refresh interval
+    # before declaring the data stale. Picks up "missed one refresh" as
+    # transient (still healthy) but flags "missed two consecutive" as a
+    # real outage. Tunable if needed; not exposed as config because it's
+    # an implementation detail of the health check, not a knob operators
+    # should turn.
+    _STALE_SLACK_FACTOR = 3
 
     def is_healthy(self) -> bool:
         from datetime import timedelta
 
         if self._last_refresh is None or self.count == 0:
             return False
-        return datetime.now(UTC) - self._last_refresh <= timedelta(
-            seconds=self._STALE_AFTER_SECONDS
+        max_age = timedelta(
+            seconds=self._refresh_interval_seconds * self._STALE_SLACK_FACTOR
         )
+        return datetime.now(UTC) - self._last_refresh <= max_age
 
     # ── Refresh ──────────────────────────────────────────────────────
 

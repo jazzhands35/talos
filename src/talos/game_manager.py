@@ -503,6 +503,15 @@ class GameManager:
         series_ticker = str(data.get("series_ticker", ""))
         talos_id = int(data.get("talos_id", 0))
 
+        # Plumb source / engine_state through from the persisted record.
+        # Without this, a crash/restart while a pair was winding_down
+        # silently restored it as engine_state="active" (ArbPair default),
+        # the engine resumed normal trading, and the documented restart-
+        # safety invariant of this branch would be FALSE. _setup_initial_games
+        # calls _apply_persisted_engine_state on each restored pair to
+        # re-arm _winding_down / _exit_only_events from these fields.
+        persisted_source = data.get("source")
+        persisted_engine_state = str(data.get("engine_state", "active"))
         pair = ArbPair(
             talos_id=talos_id,
             event_ticker=event_ticker,
@@ -523,6 +532,8 @@ class GameManager:
                 if data.get("expected_expiration_time")
                 else None
             ),
+            source=str(persisted_source) if persisted_source is not None else None,
+            engine_state=persisted_engine_state,
         )
         self._scanner.add_pair(
             event_ticker,
@@ -600,18 +611,33 @@ class GameManager:
         return pairs
 
     async def remove_game(self, event_ticker: str) -> None:
-        """Remove a game from monitoring."""
-        pair = self._games.pop(event_ticker, None)
+        """Remove a game from monitoring.
+
+        Order matters: unsubscribe FIRST (the only step that can fail
+        with a non-trivial cause — network/WS error), then mutate the
+        local dicts. If unsubscribe raises, _games still contains the
+        pair so a retry can complete the removal cleanly. The previous
+        order popped the pair before unsubscribing, which on failure
+        left the WS subscription orphaned and made the second remove
+        attempt return early (not_found) — silently desynchronizing
+        engine state from live subscriptions.
+        """
+        pair = self._games.get(event_ticker)
         if pair is None:
             return
+        await self._feed.unsubscribe(pair.ticker_a)
+        if pair.ticker_b != pair.ticker_a:
+            await self._feed.unsubscribe(pair.ticker_b)
+
+        # Unsubscribes succeeded — local state mutation below is sync and
+        # cannot fail in any meaningful way (dict.pop is total).
+        self._games.pop(event_ticker, None)
         self._labels.pop(event_ticker, None)
         self._subtitles.pop(event_ticker, None)
         self._leg_labels.pop(event_ticker, None)
         self._volumes_24h.pop(pair.ticker_a, None)
         self._volumes_24h.pop(pair.ticker_b, None)
         self._scanner.remove_pair(event_ticker)
-        await self._feed.unsubscribe(pair.ticker_a)
-        await self._feed.unsubscribe(pair.ticker_b)
         if self.on_change:
             self.on_change()
         logger.info("game_removed", event_ticker=event_ticker)

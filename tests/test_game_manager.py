@@ -594,6 +594,42 @@ class TestSeriesTicker:
         assert result is not None
         assert result.series_ticker == "KXNONSPORT"
 
+    def test_restore_game_plumbs_engine_state_and_source(self) -> None:
+        """Restart durability: persisted engine_state and source MUST flow
+        into the restored ArbPair so _apply_persisted_engine_state can
+        re-arm _winding_down/_exit_only_events. Without this plumbing, a
+        crash mid-wind-down silently restored a pair as 'active' and the
+        engine resumed normal trading on it (Codex round 3 critical)."""
+        rest, feed, scanner = self._make_mock_deps()
+        gm = GameManager(rest, feed, scanner)
+
+        result = gm.restore_game({
+            "event_ticker": "EVT",
+            "ticker_a": "TICK-A",
+            "ticker_b": "TICK-B",
+            "side_a": "yes",
+            "side_b": "no",
+            "engine_state": "winding_down",
+            "source": "tree",
+        })
+        assert result is not None
+        assert result.engine_state == "winding_down"
+        assert result.source == "tree"
+
+    def test_restore_game_engine_state_defaults_to_active(self) -> None:
+        """Backward-compat: cache entries written before engine_state
+        existed should restore as the model default."""
+        rest, feed, scanner = self._make_mock_deps()
+        gm = GameManager(rest, feed, scanner)
+        result = gm.restore_game({
+            "event_ticker": "EVT",
+            "ticker_a": "A",
+            "ticker_b": "B",
+        })
+        assert result is not None
+        assert result.engine_state == "active"
+        assert result.source is None
+
     def test_restore_game_series_ticker_defaults_to_empty(self) -> None:
         """restore_game() defaults series_ticker to '' for old cache entries."""
         rest, feed, scanner = self._make_mock_deps()
