@@ -262,6 +262,45 @@ async def test_add_pairs_rolls_back_on_persistence_failure():
 
 
 @pytest.mark.asyncio
+async def test_persist_active_games_propagates_persistence_error():
+    """Round 6: previously _persist_active_games swallowed every exception
+    at WARNING, including the new PersistenceError, defeating the
+    round-5 plumbing. Now it lets PersistenceError through so callers
+    can roll back.
+
+    Note: _engine_with_collaborators mocks _persist_active_games to
+    keep other tests file-system-free; we delete that override so the
+    real class method runs.
+    """
+    from talos.persistence_errors import PersistenceError
+
+    e = _engine_with_collaborators()
+    del e._persist_active_games  # restore class method
+
+    def _boom():
+        raise PersistenceError("disk full")
+
+    e._game_manager.on_change = _boom
+    with pytest.raises(PersistenceError):
+        e._persist_active_games()
+
+
+@pytest.mark.asyncio
+async def test_persist_active_games_swallows_other_exceptions():
+    """Non-PersistenceError exceptions stay non-fatal — on_change is a
+    fire-and-forget callback for non-safety-critical writers."""
+    e = _engine_with_collaborators()
+    del e._persist_active_games  # restore class method
+
+    def _boom():
+        raise RuntimeError("some other thing")
+
+    e._game_manager.on_change = _boom
+    # Must NOT raise — round 6 only escalates PersistenceError
+    e._persist_active_games()
+
+
+@pytest.mark.asyncio
 async def test_add_pairs_persists_only_once_at_batch_end():
     e = _engine_with_collaborators()
     records = [

@@ -3582,10 +3582,24 @@ class TradingEngine:
         Delegates to GameManager.on_change if it's wired to the legacy
         _persist_games writer in __main__.py. That writer serializes all
         pairs in game_manager.active_games to games_full.json.
+
+        Lets PersistenceError propagate so callers can roll back. The
+        previous broad `except Exception` swallowed PersistenceError
+        too, defeating the round-5 plumbing — add/remove commits would
+        report success while the on-disk snapshot was actually stale.
+        Other exception types are still logged but not raised, since
+        on_change has historically been a fire-and-forget callback for
+        non-safety-critical writers.
         """
+        from talos.persistence_errors import PersistenceError
+
         if self._game_manager.on_change is not None:
             try:
                 self._game_manager.on_change()
+            except PersistenceError:
+                # Re-raise — caller (add_pairs / remove_pairs) catches
+                # this and rolls back in-memory state so it matches disk.
+                raise
             except Exception:
                 logger.warning("persist_active_games_failed", exc_info=True)
 

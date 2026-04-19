@@ -81,3 +81,25 @@ def test_save_on_every_mutation_when_autosave(tmp_path: Path):
     s2 = TreeMetadataStore(path=path)
     s2.load()
     assert s2.manual_event_start("KX-A") is not None
+
+
+def test_save_raises_persistence_error_on_write_failure(tmp_path: Path):
+    """Round 6: TreeMetadataStore.save() must NOT swallow write failures.
+    The store holds safety-relevant state (manual_event_start overrides
+    used by the resolver cascade); a silent failure would let the UI
+    proceed as if the override was recorded while a restart loses it."""
+    import pytest
+
+    from talos.persistence_errors import PersistenceError
+
+    # Point save at an unwriteable path: parent is a regular file, so
+    # mkdir(parents=True, exist_ok=True) inside _atomic_write_text fails.
+    blocker = tmp_path / "blocked"
+    blocker.write_text("blocking file")
+    bad_path = blocker / "child" / "tree_metadata.json"
+
+    store = TreeMetadataStore(path=bad_path, autosave=False)
+    store._loaded = True  # bypass load() which would also fail
+    store._data = {"manual_event_start": {"KX-A": "2026-04-22T20:00:00Z"}}
+    with pytest.raises(PersistenceError):
+        store.save()

@@ -787,8 +787,28 @@ class TreeScreen(Screen):
 
         # 1. Apply manual_event_start FIRST so the resolver cascade sees the
         #    override before the engine ever ticks for the new pairs.
-        for k, v in staged.to_set_manual_start.items():
-            self._metadata.set_manual_event_start(k, v)
+        # Wrap in try/except so a tree_metadata.json write failure (disk
+        # full, file locked) doesn't silently drop the manual override —
+        # that would leave the resolver cascade with no schedule source
+        # for the event and the engine would force-flip to exit-only or
+        # trade unprotected. Preserve staging so user can retry.
+        try:
+            for k, v in staged.to_set_manual_start.items():
+                self._metadata.set_manual_event_start(k, v)
+        except Exception as exc:
+            _log.warning(
+                "tree_commit_metadata_write_failed",
+                phase="set_manual_event_start",
+                exc_type=type(exc).__name__,
+                exc_msg=str(exc),
+            )
+            self.app.notify(
+                f"Could not persist manual event-start ({type(exc).__name__}). "
+                "Staged changes preserved — fix the disk issue and press 'c' "
+                "again.",
+                severity="error",
+            )
+            return False
 
         # 2. Engine add/remove.
         # add_pairs_from_selection now rolls back on partial failure and
@@ -815,35 +835,91 @@ class TreeScreen(Screen):
                 )
                 return False
         if staged.to_remove:
-            remove_outcomes = await self._engine.remove_pairs_from_selection(
-                staged.to_remove,
-            )
+            try:
+                remove_outcomes = await self._engine.remove_pairs_from_selection(
+                    staged.to_remove,
+                )
+            except Exception as exc:
+                # remove_pairs already mutated game_manager state in-memory
+                # before _persist_active_games ran. We can't easily reverse
+                # the removes (they don't keep enough metadata to restore),
+                # so surface a hard warning: in-memory removal succeeded
+                # but on restart the pairs will reappear from the stale
+                # snapshot. User can re-commit after fixing the disk issue.
+                _log.warning(
+                    "tree_commit_remove_failed",
+                    exc_type=type(exc).__name__,
+                    exc_msg=str(exc),
+                )
+                self.app.notify(
+                    f"Remove succeeded in memory but persistence failed "
+                    f"({type(exc).__name__}). On restart removed pairs may "
+                    "reappear from the stale snapshot. Fix the disk issue "
+                    "and re-commit to make the removal durable.",
+                    severity="error",
+                )
+                return False
 
         # 3. Apply deferred/applied unticked per §5.1a rules.
         #    - set_unticked applied when ALL staged pairs for the event came
         #      back "removed". Mixed/winding → defer via _deferred_set_unticked.
         #    - clear_unticked applied when ALL staged pairs for the event
         #      were successfully added.
+        # Engine state has already been mutated at this point — if metadata
+        # writes fail, we surface a hard warning rather than silently
+        # losing the deliberately_unticked flags. Restart would otherwise
+        # show the events as still-eligible-for-trade instead of
+        # deliberately-skipped.
         staged_remove_set = set(staged.to_remove)
-        for k in staged.to_set_unticked:
-            matching = [
-                o
-                for o in remove_outcomes
-                if o.kalshi_event_ticker == k and o.pair_ticker in staged_remove_set
-            ]
-            if matching and all(o.status == "removed" for o in matching):
-                self._metadata.set_deliberately_unticked(k)
-            else:
-                # Some pair(s) went winding_down or failed → defer.
-                # Persist the pending flag so it survives a restart even if
-                # the winding-down pair is still settling when Talos crashes.
-                self._deferred_set_unticked.add(k)
-                self._metadata.set_deliberately_unticked_pending(k)
+        try:
+            for k in staged.to_set_unticked:
+                matching = [
+                    o
+                    for o in remove_outcomes
+                    if o.kalshi_event_ticker == k and o.pair_ticker in staged_remove_set
+                ]
+                if matching and all(o.status == "removed" for o in matching):
+                    self._metadata.set_deliberately_unticked(k)
+                else:
+                    # Some pair(s) went winding_down or failed → defer.
+                    # Persist the pending flag so it survives a restart even if
+                    # the winding-down pair is still settling when Talos crashes.
+                    self._deferred_set_unticked.add(k)
+                    self._metadata.set_deliberately_unticked_pending(k)
+        except Exception as exc:
+            _log.warning(
+                "tree_commit_metadata_write_failed",
+                phase="set_deliberately_unticked",
+                exc_type=type(exc).__name__,
+                exc_msg=str(exc),
+            )
+            self.app.notify(
+                f"Engine state updated but deliberately-unticked flags "
+                f"could not persist ({type(exc).__name__}). On restart "
+                "the affected events may reappear as eligible. Fix the "
+                "disk issue and re-commit to make the unticks durable.",
+                severity="error",
+            )
 
         added_keys = {(p.kalshi_event_ticker or p.event_ticker) for p in added}
-        for k in staged.to_clear_unticked:
-            if k in added_keys:
-                self._metadata.clear_deliberately_unticked(k)
+        try:
+            for k in staged.to_clear_unticked:
+                if k in added_keys:
+                    self._metadata.clear_deliberately_unticked(k)
+        except Exception as exc:
+            _log.warning(
+                "tree_commit_metadata_write_failed",
+                phase="clear_deliberately_unticked",
+                exc_type=type(exc).__name__,
+                exc_msg=str(exc),
+            )
+            self.app.notify(
+                f"Engine state updated but deliberately-unticked clears "
+                f"could not persist ({type(exc).__name__}). Affected events "
+                "may stay marked as deliberately-unticked across restart "
+                "until you re-commit.",
+                severity="error",
+            )
 
         # 4. Clear staged.
         self.staged_changes = StagedChanges.empty()

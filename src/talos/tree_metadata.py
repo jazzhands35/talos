@@ -39,7 +39,22 @@ class TreeMetadataStore:
         self._loaded = True
 
     def save(self) -> None:
-        save_tree_metadata(self._data, self._path)
+        """Persist the in-memory state to tree_metadata.json.
+
+        Raises PersistenceError if the underlying write fails. The store
+        holds safety-relevant state (manual_event_start overrides,
+        deliberately_unticked_pending flags) — silent persistence
+        failures would let the UI proceed as if a manual schedule
+        override had been recorded while a restart would actually lose
+        it. Callers must catch and surface this.
+        """
+        from talos.persistence_errors import PersistenceError
+
+        ok = save_tree_metadata(self._data, self._path)
+        if not ok:
+            raise PersistenceError(
+                "save_tree_metadata() returned failure (see warning log)"
+            )
 
     def _touch(self) -> None:
         if self._autosave:
