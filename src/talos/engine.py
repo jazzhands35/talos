@@ -3369,23 +3369,42 @@ class TradingEngine:
 
     async def remove_pairs_from_selection(
         self,
-        pair_tickers: list[str],
+        pairs: list[tuple[str, str]],
     ) -> list[RemoveOutcome]:
         """Commit path for tree-unticked pairs.
 
+        Input shape (round-7 plan Fix #1): list of (pair_ticker,
+        kalshi_event_ticker) tuples. The kalshi_event_ticker is captured
+        at staging time so retry-after-persist-failure can populate the
+        outcome with the correct event identity even when the pair is
+        already gone from game_manager.
+
         Returns per-pair RemoveOutcome so TreeScreen can decide per-event
         whether to set deliberately_unticked, defer, or retry.
+
+        Per-transition durability: for inventory-bearing pairs that
+        transition to winding_down, an immediate persist runs after the
+        engine state is mutated. On persist failure, the pair's prior
+        engine state is restored (snapshot-and-restore) and a
+        RemoveBatchPersistenceError is raised carrying the count of
+        successfully-persisted transitions.
         """
+        from talos.persistence_errors import (
+            PersistenceError,
+            RemoveBatchPersistenceError,
+        )
+
         outcomes: list[RemoveOutcome] = []
+        successful_winding_count = 0
 
         with self._game_manager.suppress_on_change():
-            for pt in pair_tickers:
+            for pt, input_kalshi_et in pairs:
                 pair = self._game_manager.get_game(pt)
                 if pair is None:
                     outcomes.append(
                         RemoveOutcome(
                             pair_ticker=pt,
-                            kalshi_event_ticker="",
+                            kalshi_event_ticker=input_kalshi_et,
                             status="not_found",
                         )
                     )
@@ -3418,9 +3437,48 @@ class TradingEngine:
                                 has_inventory = False
 
                     if has_inventory:
+                        # Snapshot prior state for accurate rollback if
+                        # the per-transition persist fails. Plan Fix #2
+                        # (round-5 v0.1.1 finding #2): pairs can already
+                        # be in _exit_only_events via other engine paths
+                        # (milestone, sports-game-started, etc.); a
+                        # hardcoded rollback would silently strip those
+                        # safety conditions. Restore exactly the prior
+                        # values, not hardcoded "active".
+                        prior_was_winding = pt in self._winding_down
+                        prior_was_exit_only = pt in self._exit_only_events
+                        prior_engine_state = pair.engine_state
+
                         self._winding_down.add(pt)
                         await self.enforce_exit_only(pt)
                         self._mark_engine_state(pt, "winding_down")
+
+                        # Per-transition durability: persist immediately
+                        # so a crash here doesn't lose the winding_down
+                        # state. force_during_suppress=True bypasses the
+                        # outer suppress_on_change() block.
+                        try:
+                            self._persist_active_games(force_during_suppress=True)
+                        except PersistenceError as exc:
+                            # Restore prior state EXACTLY. Cancelled
+                            # orders stay cancelled (irreversible) but
+                            # idempotent for retry.
+                            if not prior_was_winding:
+                                self._winding_down.discard(pt)
+                            if not prior_was_exit_only:
+                                self._exit_only_events.discard(pt)
+                            self._mark_engine_state(pt, prior_engine_state)
+                            raise RemoveBatchPersistenceError(
+                                persisted_count=successful_winding_count,
+                                message=(
+                                    f"persistence failed after "
+                                    f"{successful_winding_count} winding-down "
+                                    f"transitions (current pair: {pt})"
+                                ),
+                                original=exc,
+                            ) from exc
+                        successful_winding_count += 1
+
                         try:
                             fa = ledger.filled_count(Side.A) if ledger else "?"
                             fb = ledger.filled_count(Side.B) if ledger else "?"
@@ -3467,6 +3525,10 @@ class TradingEngine:
                             status="removed",
                         )
                     )
+                except RemoveBatchPersistenceError:
+                    # Per-transition persist failure already raised; let
+                    # it escape the suppress block to the caller.
+                    raise
                 except Exception as exc:
                     logger.warning(
                         "tree_remove_failed",
@@ -3482,7 +3544,24 @@ class TradingEngine:
                         )
                     )
 
-        self._persist_active_games()
+        # Batch-end persist (covers clean removes; per-transition saves
+        # already covered winding_down transitions). Wrap in the same
+        # RemoveBatchPersistenceError envelope so failures here also
+        # carry the count of successful winding_down transitions for
+        # the user-facing toast.
+        try:
+            self._persist_active_games(force_during_suppress=True)
+        except PersistenceError as exc:
+            if isinstance(exc, RemoveBatchPersistenceError):
+                raise
+            raise RemoveBatchPersistenceError(
+                persisted_count=successful_winding_count,
+                message=(
+                    f"per-transition winding-down saves succeeded for "
+                    f"{successful_winding_count} pairs; final batch save failed"
+                ),
+                original=exc,
+            ) from exc
         return outcomes
 
     async def _reconcile_winding_down(self) -> None:
@@ -3515,7 +3594,16 @@ class TradingEngine:
         if not to_remove:
             return
 
-        outcomes = await self.remove_pairs_from_selection(to_remove)
+        # Build (pair_ticker, kalshi_event_ticker) tuples for the new
+        # remove_pairs_from_selection signature (round-7 plan Fix #1).
+        remove_input: list[tuple[str, str]] = []
+        for pt in to_remove:
+            pair = self._game_manager.get_game(pt)
+            kalshi_et = ""
+            if pair is not None:
+                kalshi_et = pair.kalshi_event_ticker or pair.event_ticker
+            remove_input.append((pt, kalshi_et))
+        outcomes = await self.remove_pairs_from_selection(remove_input)
         for pt in to_remove:
             self._winding_down.discard(pt)
 
@@ -3576,32 +3664,59 @@ class TradingEngine:
                 pair_ticker=pair.event_ticker,
             )
 
-    def _persist_active_games(self) -> None:
+    def _persist_active_games(self, *, force_during_suppress: bool = False) -> None:
         """Single persist point for batch add/remove paths.
 
         Delegates to GameManager.on_change if it's wired to the legacy
         _persist_games writer in __main__.py. That writer serializes all
         pairs in game_manager.active_games to games_full.json.
 
-        Lets PersistenceError propagate so callers can roll back. The
-        previous broad `except Exception` swallowed PersistenceError
-        too, defeating the round-5 plumbing — add/remove commits would
-        report success while the on-disk snapshot was actually stale.
-        Other exception types are still logged but not raised, since
-        on_change has historically been a fire-and-forget callback for
-        non-safety-critical writers.
+        force_during_suppress: bypass the suppress_on_change() null-out
+        and call the saved (suppressed) callback. Used by the per-
+        transition winding_down persist inside remove_pairs_from_selection,
+        which runs INSIDE the suppress block but needs durability NOW.
+
+        Failure semantics:
+        - PersistenceError always propagates so callers can roll back.
+        - Under force_during_suppress=True: ANY callback exception
+          (TypeError, AttributeError from a wiring bug, etc.) is
+          converted to PersistenceError. The caller demanded durability;
+          a silent swallow would break the safety contract.
+        - Under force_during_suppress=False: non-PersistenceError
+          exceptions are logged but not raised (legacy fire-and-forget
+          behavior for non-safety on_change writers).
         """
         from talos.persistence_errors import PersistenceError
 
-        if self._game_manager.on_change is not None:
-            try:
-                self._game_manager.on_change()
-            except PersistenceError:
-                # Re-raise — caller (add_pairs / remove_pairs) catches
-                # this and rolls back in-memory state so it matches disk.
-                raise
-            except Exception:
-                logger.warning("persist_active_games_failed", exc_info=True)
+        cb = self._game_manager.on_change
+        if cb is None and force_during_suppress:
+            cb = self._game_manager.suppressed_on_change
+        if cb is None:
+            if force_during_suppress:
+                # Fail-closed: caller demanded durability and there's no
+                # writer to deliver it. Indicates a wiring bug.
+                raise PersistenceError(
+                    "_persist_active_games(force_during_suppress=True) "
+                    "called but no on_change writer is wired"
+                )
+            return
+        try:
+            cb()
+        except PersistenceError:
+            raise
+        except Exception as exc:
+            if force_during_suppress:
+                # Fail-closed: any unexpected callback exception under
+                # force is converted to PersistenceError to preserve the
+                # writer's exit contract ("raises iff persistence-relevant,
+                # only PersistenceError type"). Silent swallow would
+                # break the durability invariant the same way a swallowed
+                # save_games_full failure would.
+                raise PersistenceError(
+                    f"persistence callback raised {type(exc).__name__}: {exc}"
+                ) from exc
+            # Non-force path: legacy fire-and-forget behavior preserved.
+            logger.warning("persist_active_games_failed", exc_info=True)
 
     async def remove_game(self, event_ticker: str) -> None:
         """Remove a game from monitoring."""

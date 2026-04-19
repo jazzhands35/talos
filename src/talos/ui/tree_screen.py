@@ -218,12 +218,33 @@ class TreeScreen(Screen):
         yield Footer()
 
     def on_mount(self) -> None:
+        # Capture the app's asyncio loop FIRST. on_event_fully_removed
+        # uses this to marshal listener calls onto the right loop via
+        # call_soon_threadsafe regardless of caller context. Round-7
+        # plan Fix #3: capturing here (we're definitely on the Textual
+        # loop during on_mount) avoids private-API access (app._loop)
+        # and the cross-thread-only contract of call_from_thread.
+        import asyncio
+        self._app_loop = asyncio.get_running_loop()
+
         # Give the tree widget focus so keybindings (space/c/r) work
         # immediately without needing to tab into it.
         tree = self.query_one("#tree", Tree)
         tree.focus()
         self._rebuild_tree()
         self._load_persisted_deferred()
+
+        # Listener registration MUST happen AFTER _app_loop capture
+        # (round-7 plan Step 12a). Otherwise on_event_fully_removed
+        # could fire before _app_loop is set and hit the defensive
+        # log-and-drop path, losing real signals.
+        if self._engine is not None and hasattr(
+            self._engine, "add_event_fully_removed_listener"
+        ):
+            self._engine.add_event_fully_removed_listener(
+                self.on_event_fully_removed
+            )
+
         # Start the two-stage poll: first watch for categories to appear,
         # then watch for event counts to backfill. Both can be in-progress
         # independently since bootstrap returns before the bulk count
@@ -572,9 +593,12 @@ class TreeScreen(Screen):
         )
         if staged_add:
             return "checked"
-        # staged_remove is a list of pair_tickers; check if any for this event
+        # staged_remove is now a list of (pair_ticker, kalshi_event_ticker)
+        # tuples; check if any pair_ticker is in our event's pair set.
         pair_tickers = set(self._engine_pairs_for_event(kalshi_event_ticker))
-        staged_remove_overlap = any(pt in pair_tickers for pt in self.staged_changes.to_remove)
+        staged_remove_overlap = any(
+            pt in pair_tickers for pt, _ in self.staged_changes.to_remove
+        )
         if staged_remove_overlap:
             return "empty"
         return current
@@ -639,12 +663,15 @@ class TreeScreen(Screen):
             return
 
         # If staged remove, unstage it
-        staged_remove_overlap = [
-            pt for pt in self.staged_changes.to_remove if pt in currently_monitored_pairs
+        staged_remove_overlap_pts = [
+            pt for pt, _ in self.staged_changes.to_remove
+            if pt in currently_monitored_pairs
         ]
-        if staged_remove_overlap:
-            for pt in list(staged_remove_overlap):
-                self.staged_changes.to_remove.remove(pt)
+        if staged_remove_overlap_pts:
+            self.staged_changes.to_remove = [
+                (pt, ket) for pt, ket in self.staged_changes.to_remove
+                if pt not in staged_remove_overlap_pts
+            ]
             # Also drop any to_set_unticked flag
             if kalshi_event_ticker in self.staged_changes.to_set_unticked:
                 self.staged_changes.to_set_unticked.remove(kalshi_event_ticker)
@@ -654,10 +681,14 @@ class TreeScreen(Screen):
         current_state = self._current_event_state(kalshi_event_ticker)
 
         if current_state in ("checked", "winding"):
-            # Untick: stage remove for every pair + set_unticked flag
+            # Untick: stage (pair_ticker, kalshi_event_ticker) tuples for every
+            # pair + set_unticked flag. The kalshi_event_ticker is captured
+            # at staging time so retry-after-persist-failure can correctly
+            # match already-removed pairs (round-7 plan Fix #1).
+            already_staged_pts = {pt for pt, _ in self.staged_changes.to_remove}
             for pt in currently_monitored_pairs:
-                if pt not in self.staged_changes.to_remove:
-                    self.staged_changes.to_remove.append(pt)
+                if pt not in already_staged_pts:
+                    self.staged_changes.to_remove.append((pt, kalshi_event_ticker))
             if kalshi_event_ticker not in self.staged_changes.to_set_unticked:
                 self.staged_changes.to_set_unticked.append(kalshi_event_ticker)
             return
@@ -756,6 +787,11 @@ class TreeScreen(Screen):
         """
         import structlog as _structlog
 
+        from talos.persistence_errors import (
+            PersistenceError,
+            RemoveBatchPersistenceError,
+        )
+
         _log = _structlog.get_logger()
         _log.info(
             "tree_commit_start",
@@ -795,7 +831,7 @@ class TreeScreen(Screen):
         try:
             for k, v in staged.to_set_manual_start.items():
                 self._metadata.set_manual_event_start(k, v)
-        except Exception as exc:
+        except PersistenceError as exc:
             _log.warning(
                 "tree_commit_metadata_write_failed",
                 phase="set_manual_event_start",
@@ -822,7 +858,11 @@ class TreeScreen(Screen):
                 added = await self._engine.add_pairs_from_selection(
                     [r.model_dump() for r in staged.to_add]
                 )
-            except Exception as exc:
+            except PersistenceError as exc:
+                # Narrow catch (round-4 v0.1.1 finding #4): only catch
+                # PersistenceError. Engine bugs (KeyError, AttributeError,
+                # RuntimeError) propagate as crashes — they MUST NOT be
+                # silently mislabeled as recoverable persistence failures.
                 _log.warning(
                     "tree_commit_add_failed",
                     exc_type=type(exc).__name__,
@@ -839,7 +879,7 @@ class TreeScreen(Screen):
                 remove_outcomes = await self._engine.remove_pairs_from_selection(
                     staged.to_remove,
                 )
-            except Exception as exc:
+            except PersistenceError as exc:
                 # remove_pairs already mutated game_manager state in-memory
                 # before _persist_active_games ran. We can't easily reverse
                 # the removes (they don't keep enough metadata to restore),
@@ -851,13 +891,26 @@ class TreeScreen(Screen):
                     exc_type=type(exc).__name__,
                     exc_msg=str(exc),
                 )
-                self.app.notify(
-                    f"Remove succeeded in memory but persistence failed "
-                    f"({type(exc).__name__}). On restart removed pairs may "
-                    "reappear from the stale snapshot. Fix the disk issue "
-                    "and re-commit to make the removal durable.",
-                    severity="error",
-                )
+                # If RemoveBatchPersistenceError, the message already
+                # carries persisted_count for honest user messaging.
+                if isinstance(exc, RemoveBatchPersistenceError):
+                    self.app.notify(
+                        f"Wind-down committed for {exc.persisted_count} pairs "
+                        "(durable on disk). Final batch save failed; clean "
+                        "removes processed in this batch may or may not be "
+                        "durable. Restart will recover all durable state; "
+                        "re-commit any unfinished changes after fixing the "
+                        "disk issue.",
+                        severity="error",
+                    )
+                else:
+                    self.app.notify(
+                        f"Remove failed and persistence may be partial "
+                        f"({type(exc).__name__}). On restart removed pairs "
+                        "may reappear from the stale snapshot. Fix the disk "
+                        "issue and re-commit.",
+                        severity="error",
+                    )
                 return False
 
         # 3. Apply deferred/applied unticked per §5.1a rules.
@@ -865,20 +918,22 @@ class TreeScreen(Screen):
         #      back "removed". Mixed/winding → defer via _deferred_set_unticked.
         #    - clear_unticked applied when ALL staged pairs for the event
         #      were successfully added.
-        # Engine state has already been mutated at this point — if metadata
-        # writes fail, we surface a hard warning rather than silently
-        # losing the deliberately_unticked flags. Restart would otherwise
-        # show the events as still-eligible-for-trade instead of
-        # deliberately-skipped.
-        staged_remove_set = set(staged.to_remove)
+        # Round-7 plan Fix #1: matched outcomes can be `removed` (fresh)
+        # OR `not_found` (already removed by a prior failed-persist
+        # attempt). Both mean "user's remove intent succeeded in engine"
+        # for the purpose of applying deliberately_unticked.
+        staged_remove_pair_tickers = {pt for pt, _ in staged.to_remove}
         try:
             for k in staged.to_set_unticked:
                 matching = [
                     o
                     for o in remove_outcomes
-                    if o.kalshi_event_ticker == k and o.pair_ticker in staged_remove_set
+                    if o.kalshi_event_ticker == k
+                    and o.pair_ticker in staged_remove_pair_tickers
                 ]
-                if matching and all(o.status == "removed" for o in matching):
+                if matching and all(
+                    o.status in ("removed", "not_found") for o in matching
+                ):
                     self._metadata.set_deliberately_unticked(k)
                 else:
                     # Some pair(s) went winding_down or failed → defer.
@@ -886,7 +941,7 @@ class TreeScreen(Screen):
                     # the winding-down pair is still settling when Talos crashes.
                     self._deferred_set_unticked.add(k)
                     self._metadata.set_deliberately_unticked_pending(k)
-        except Exception as exc:
+        except PersistenceError as exc:
             _log.warning(
                 "tree_commit_metadata_write_failed",
                 phase="set_deliberately_unticked",
@@ -906,7 +961,7 @@ class TreeScreen(Screen):
             for k in staged.to_clear_unticked:
                 if k in added_keys:
                     self._metadata.clear_deliberately_unticked(k)
-        except Exception as exc:
+        except PersistenceError as exc:
             _log.warning(
                 "tree_commit_metadata_write_failed",
                 phase="clear_deliberately_unticked",
@@ -926,11 +981,57 @@ class TreeScreen(Screen):
         return True
 
     def on_event_fully_removed(self, kalshi_event_ticker: str) -> None:
-        """Engine listener callback: promote deferred [·] to applied."""
-        if kalshi_event_ticker in self._deferred_set_unticked:
-            if self._metadata is not None:
+        """Engine listener callback: promote deferred [·] to applied.
+
+        Always marshals the actual work onto the captured Textual loop
+        via call_soon_threadsafe so state mutations and metadata writes
+        happen on the right loop regardless of caller context. Round-7
+        plan Fix #3: pre-mount delivery is structurally impossible per
+        the listener-registration-order constraint (registration is in
+        on_mount AFTER _app_loop capture); the defensive log-and-drop
+        below only fires on a wiring bug.
+        """
+        import structlog as _structlog
+        loop = getattr(self, "_app_loop", None)
+        if loop is None:
+            _structlog.get_logger().warning(
+                "on_event_fully_removed_pre_mount_drop",
+                kalshi_event_ticker=kalshi_event_ticker,
+                reason="listener fired before TreeScreen.on_mount captured "
+                       "_app_loop — wiring bug, dropping event",
+            )
+            return
+        loop.call_soon_threadsafe(
+            self._handle_event_fully_removed, kalshi_event_ticker
+        )
+
+    def _handle_event_fully_removed(self, kalshi_event_ticker: str) -> None:
+        """Actual promotion work, always running on the Textual loop.
+
+        Catches PersistenceError narrowly (round-1 v0.1.1 finding #4)
+        so logic bugs surface as crashes, not user retry toasts. On
+        PersistenceError, the in-memory _deferred_set_unticked is
+        preserved (return before discard) and the metadata layer's
+        snapshot-and-rollback ensures memory and disk stay in sync —
+        so the toast's "pending state preserved" message is accurate.
+        """
+        from talos.persistence_errors import PersistenceError
+
+        if kalshi_event_ticker not in self._deferred_set_unticked:
+            return
+        if self._metadata is not None:
+            try:
                 self._metadata.promote_pending_to_applied(kalshi_event_ticker)
-            self._deferred_set_unticked.discard(kalshi_event_ticker)
+            except PersistenceError as exc:
+                self.app.notify(
+                    f"Could not finalize deliberately-unticked state "
+                    f"for {kalshi_event_ticker} ({type(exc).__name__}). "
+                    "Fix the disk issue; the pending state is preserved "
+                    "and will be retried on restart.",
+                    severity="error",
+                )
+                return  # do NOT discard from _deferred_set_unticked
+        self._deferred_set_unticked.discard(kalshi_event_ticker)
 
     # ── Keybinding actions ───────────────────────────────────────────────
 

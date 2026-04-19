@@ -132,18 +132,36 @@ class TreeMetadataStore:
         return kalshi_event_ticker in self._unticked_applied()
 
     def set_deliberately_unticked(self, kalshi_event_ticker: str) -> None:
-        self._require_loaded()
-        lst = self._unticked_applied()
-        if kalshi_event_ticker not in lst:
-            lst.append(kalshi_event_ticker)
-            self._touch()
+        """Mutate in memory + save; on PersistenceError, rollback the
+        in-memory mutation so memory and disk stay in sync. Round-7
+        plan Fix #4: prevents UI from claiming "deliberately unticked"
+        for an event whose tag is only in memory and not on disk."""
+        from talos.persistence_errors import PersistenceError
 
-    def clear_deliberately_unticked(self, kalshi_event_ticker: str) -> None:
         self._require_loaded()
         lst = self._unticked_applied()
         if kalshi_event_ticker in lst:
-            lst.remove(kalshi_event_ticker)
+            return
+        lst.append(kalshi_event_ticker)
+        try:
             self._touch()
+        except PersistenceError:
+            lst.remove(kalshi_event_ticker)
+            raise
+
+    def clear_deliberately_unticked(self, kalshi_event_ticker: str) -> None:
+        from talos.persistence_errors import PersistenceError
+
+        self._require_loaded()
+        lst = self._unticked_applied()
+        if kalshi_event_ticker not in lst:
+            return
+        lst.remove(kalshi_event_ticker)
+        try:
+            self._touch()
+        except PersistenceError:
+            lst.append(kalshi_event_ticker)
+            raise
 
     # ── Deliberately unticked (pending) ───────────────────────────────
 
@@ -157,24 +175,62 @@ class TreeMetadataStore:
         return list(self._unticked_pending())
 
     def set_deliberately_unticked_pending(self, kalshi_event_ticker: str) -> None:
-        self._require_loaded()
-        lst = self._unticked_pending()
-        if kalshi_event_ticker not in lst:
-            lst.append(kalshi_event_ticker)
-            self._touch()
+        from talos.persistence_errors import PersistenceError
 
-    def clear_deliberately_unticked_pending(self, kalshi_event_ticker: str) -> None:
         self._require_loaded()
         lst = self._unticked_pending()
         if kalshi_event_ticker in lst:
-            lst.remove(kalshi_event_ticker)
+            return
+        lst.append(kalshi_event_ticker)
+        try:
             self._touch()
+        except PersistenceError:
+            lst.remove(kalshi_event_ticker)
+            raise
+
+    def clear_deliberately_unticked_pending(self, kalshi_event_ticker: str) -> None:
+        from talos.persistence_errors import PersistenceError
+
+        self._require_loaded()
+        lst = self._unticked_pending()
+        if kalshi_event_ticker not in lst:
+            return
+        lst.remove(kalshi_event_ticker)
+        try:
+            self._touch()
+        except PersistenceError:
+            lst.append(kalshi_event_ticker)
+            raise
 
     def promote_pending_to_applied(self, kalshi_event_ticker: str) -> None:
-        """Called when engine emits event_fully_removed for a pending event."""
+        """Called when engine emits event_fully_removed for a pending event.
+
+        Atomic: both mutations happen in memory, then ONE save fires.
+        On save failure, both are rolled back so memory matches disk
+        (round-7 plan Fix #3 — without this, the listener's "pending
+        state preserved" message would lie because memory would say
+        "applied" while disk said "pending").
+        """
+        from talos.persistence_errors import PersistenceError
+
         self._require_loaded()
-        self.clear_deliberately_unticked_pending(kalshi_event_ticker)
-        self.set_deliberately_unticked(kalshi_event_ticker)
+        pending = self._unticked_pending()
+        applied = self._unticked_applied()
+        pending_had = kalshi_event_ticker in pending
+        applied_had = kalshi_event_ticker in applied
+        if pending_had:
+            pending.remove(kalshi_event_ticker)
+        if not applied_had:
+            applied.append(kalshi_event_ticker)
+        try:
+            self._touch()
+        except PersistenceError:
+            # Restore exactly so memory ↔ disk consistent.
+            if pending_had and kalshi_event_ticker not in pending:
+                pending.append(kalshi_event_ticker)
+            if not applied_had and kalshi_event_ticker in applied:
+                applied.remove(kalshi_event_ticker)
+            raise
 
     # ── Internal typed accessors ─────────────────────────────────────
 

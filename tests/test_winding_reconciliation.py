@@ -50,7 +50,7 @@ async def test_winding_down_pair_removed_when_flat():
     await e._reconcile_winding_down()
 
     assert "K-1" not in e._winding_down
-    e.remove_pairs_from_selection.assert_awaited_once_with(["K-1"])
+    e.remove_pairs_from_selection.assert_awaited_once_with([("K-1", "K")])
     assert emitted == ["K"]
 
 

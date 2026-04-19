@@ -49,7 +49,7 @@ async def test_commit_winding_down_persists_pending(tmp_path: Path) -> None:
     ]
     screen = _make_screen(engine, md)
     screen.staged_changes = StagedChanges(
-        to_remove=["K-1"],
+        to_remove=[("K-1", "K")],
         to_set_unticked=["K"],
     )
 
@@ -97,7 +97,9 @@ async def test_promote_pending_clears_persisted_state(tmp_path: Path) -> None:
     screen = _make_screen(_FakeEngine(), md)
     screen._deferred_set_unticked = {"K"}
 
-    screen.on_event_fully_removed("K")
+    # Inner handler — public on_event_fully_removed marshals via
+    # _app_loop.call_soon_threadsafe which requires a mounted screen.
+    screen._handle_event_fully_removed("K")
 
     # Fresh load should show K as APPLIED (not pending).
     md2 = TreeMetadataStore(path=path)

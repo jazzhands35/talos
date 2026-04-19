@@ -20,3 +20,26 @@ class PersistenceError(Exception):
     state, those pairs would resurrect as freely tradable — exactly
     the failure mode the safety branch is designed to prevent.
     """
+
+
+class RemoveBatchPersistenceError(PersistenceError):
+    """Persistence failed mid-batch in remove_pairs_from_selection.
+
+    Carries the count of successfully-persisted winding-down transitions
+    so the UI can surface "Wind-down committed for N pairs; persistence
+    failed at pair N+1" instead of a generic failure toast.
+
+    Subclasses PersistenceError so existing `except PersistenceError`
+    handlers catch it; commit() additionally `isinstance` checks to
+    extract `persisted_count` for the toast.
+    """
+
+    def __init__(
+        self,
+        persisted_count: int,
+        message: str,
+        original: BaseException | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.persisted_count = persisted_count
+        self.original = original

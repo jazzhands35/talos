@@ -69,10 +69,16 @@ class RemoveOutcome(BaseModel):
 
 
 class StagedChanges(BaseModel):
-    """In-memory staged tree edits held by TreeScreen until commit."""
+    """In-memory staged tree edits held by TreeScreen until commit.
+
+    `to_remove` carries (pair_ticker, kalshi_event_ticker) tuples. The
+    kalshi_event_ticker is captured at staging time so retry-after-
+    persist-failure can correctly classify already-removed pairs as
+    "removed" instead of "deferred" (see plan Fix #1).
+    """
 
     to_add: list[ArbPairRecord] = Field(default_factory=list)
-    to_remove: list[str] = Field(default_factory=list)
+    to_remove: list[tuple[str, str]] = Field(default_factory=list)
     to_set_unticked: list[str] = Field(default_factory=list)
     to_clear_unticked: list[str] = Field(default_factory=list)
     to_set_manual_start: dict[str, str] = Field(default_factory=dict)

@@ -1123,12 +1123,10 @@ class TalosApp(App):
             metadata=self._tree_metadata_store,
             engine=self._engine,
         )
-        # Wire engine's event_fully_removed emission to the screen callback
-        # so the tree view knows when an event has been reaped end-to-end.
-        if self._engine is not None and hasattr(self._engine, "add_event_fully_removed_listener"):
-            self._engine.add_event_fully_removed_listener(
-                screen.on_event_fully_removed,
-            )
+        # Listener registration moved into TreeScreen.on_mount (round-7
+        # plan Step 12a) so it happens AFTER _app_loop is captured.
+        # Pre-mount delivery would otherwise hit the defensive log-and-
+        # drop path and lose real signals.
         self.push_screen(screen)
 
     @work(thread=False)

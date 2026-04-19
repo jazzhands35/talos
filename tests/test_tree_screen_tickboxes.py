@@ -195,7 +195,10 @@ def test_toggle_checked_event_stages_remove_and_set_unticked():
     screen.toggle_event_by_ticker("KXFEDMENTION-26APR")
 
     assert screen.staged_changes.to_add == []
-    assert "KXFEDMENTION-26APR-YIEL" in screen.staged_changes.to_remove
+    assert any(
+        pt == "KXFEDMENTION-26APR-YIEL"
+        for pt, _ in screen.staged_changes.to_remove
+    )
     assert "KXFEDMENTION-26APR" in screen.staged_changes.to_set_unticked
 
 
@@ -210,10 +213,16 @@ def test_toggle_staged_remove_unstages():
     screen = _make_screen_with_engine(ds, engine, md)
 
     screen.toggle_event_by_ticker("KXFEDMENTION-26APR")  # first tick -> stage remove
-    assert "KXFEDMENTION-26APR-YIEL" in screen.staged_changes.to_remove
+    assert any(
+        pt == "KXFEDMENTION-26APR-YIEL"
+        for pt, _ in screen.staged_changes.to_remove
+    )
 
     screen.toggle_event_by_ticker("KXFEDMENTION-26APR")  # second tick -> unstage
-    assert "KXFEDMENTION-26APR-YIEL" not in screen.staged_changes.to_remove
+    assert not any(
+        pt == "KXFEDMENTION-26APR-YIEL"
+        for pt, _ in screen.staged_changes.to_remove
+    )
     assert "KXFEDMENTION-26APR" not in screen.staged_changes.to_set_unticked
 
 

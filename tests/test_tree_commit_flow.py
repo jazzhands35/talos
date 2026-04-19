@@ -84,7 +84,7 @@ async def test_commit_all_removed_applies_unticked():
     md = _FakeMetadata()
     screen = _make_screen(engine, md)
     screen.staged_changes = StagedChanges(
-        to_remove=["K-1"],
+        to_remove=[("K-1", "K")],
         to_set_unticked=["K"],
     )
 
@@ -108,7 +108,7 @@ async def test_commit_winding_down_defers_unticked():
     md = _FakeMetadata()
     screen = _make_screen(engine, md)
     screen.staged_changes = StagedChanges(
-        to_remove=["K-1"],
+        to_remove=[("K-1", "K")],
         to_set_unticked=["K"],
     )
 
@@ -128,7 +128,11 @@ async def test_event_fully_removed_promotes_deferred():
     screen = _make_screen(_FakeEngine(), md)
     screen._deferred_set_unticked = {"K"}
 
-    screen.on_event_fully_removed("K")
+    # Call the inner handler directly — the public on_event_fully_removed
+    # marshals via _app_loop.call_soon_threadsafe (round-7 plan Fix #3),
+    # which requires a mounted screen. _handle_event_fully_removed has
+    # the same body but skips the marshaling.
+    screen._handle_event_fully_removed("K")
 
     assert md.promoted == ["K"]
     assert "K" not in screen._deferred_set_unticked

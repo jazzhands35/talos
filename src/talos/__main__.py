@@ -388,58 +388,68 @@ def main() -> None:
     saved_games = load_saved_games() if saved_games_full is None else []
 
     def _persist_games() -> None:
-        # Order matters: write the legacy ticker file FIRST. Even if it
-        # fails, the safety-critical games_full.json save below is the
-        # one we propagate as a hard error — the legacy file is a fast-
-        # path optimization and stale legacy state can't resurrect a
-        # winding-down pair (only games_full.json carries engine_state).
-        save_games([p.event_ticker for p in game_mgr.active_games])
-        games_data = []
-        for p in game_mgr.active_games:
-            entry: dict[str, object] = {
-                "event_ticker": p.event_ticker,
-                "ticker_a": p.ticker_a,
-                "ticker_b": p.ticker_b,
-                "fee_type": p.fee_type,
-                "fee_rate": p.fee_rate,
-                "close_time": p.close_time,
-                "expected_expiration_time": p.expected_expiration_time,
-                "label": game_mgr.labels.get(p.event_ticker, ""),
-                "sub_title": game_mgr.subtitles.get(p.event_ticker, ""),
-                "side_a": p.side_a,
-                "side_b": p.side_b,
-                "kalshi_event_ticker": p.kalshi_event_ticker,
-                "series_ticker": p.series_ticker,
-                "talos_id": p.talos_id,
-            }
-            # Phase 1: persist tree-mode durability fields.
-            # - source is observability only; write only when set.
-            # - engine_state is safety-critical; always write (default "active").
-            if p.source is not None:
-                entry["source"] = p.source
-            entry["engine_state"] = p.engine_state
-            # Persist volume data so it's available instantly on restart
-            vol_a = game_mgr.volumes_24h.get(p.ticker_a)
-            vol_b = game_mgr.volumes_24h.get(p.ticker_b)
-            if vol_a is not None:
-                entry["volume_a"] = vol_a
-            if vol_b is not None:
-                entry["volume_b"] = vol_b
-            try:
-                ledger = adjuster.get_ledger(p.event_ticker)
-                entry["ledger"] = ledger.to_save_dict()
-            except KeyError:
-                pass
-            games_data.append(entry)
-        ok = save_games_full(games_data)
-        if not ok:
-            # Persistence failed (disk full, antivirus lock, etc.). The
-            # safety-critical engine_state field never made it to disk —
-            # raise so callers (engine commit path, remove path) can roll
-            # back the in-memory mutation rather than report success.
-            from talos.persistence_errors import PersistenceError
+        # Round-3 (v0.1.1) of the planning loop: normalize ALL persistence-
+        # path failures to PersistenceError. The wrapping try/except
+        # converts data-assembly errors (AttributeError, KeyError on a
+        # malformed pair) AND save_games_full failures to a single
+        # exception type, so the writer's exit contract is uniform:
+        # "raises iff persistence-relevant, only PersistenceError type."
+        from talos.persistence_errors import PersistenceError
 
-            raise PersistenceError("save_games_full() returned failure")
+        try:
+            # Order matters: write the legacy ticker file FIRST. Even if it
+            # fails, the safety-critical games_full.json save below is the
+            # one we propagate as a hard error — the legacy file is a fast-
+            # path optimization and stale legacy state can't resurrect a
+            # winding-down pair (only games_full.json carries engine_state).
+            save_games([p.event_ticker for p in game_mgr.active_games])
+            games_data = []
+            for p in game_mgr.active_games:
+                entry: dict[str, object] = {
+                    "event_ticker": p.event_ticker,
+                    "ticker_a": p.ticker_a,
+                    "ticker_b": p.ticker_b,
+                    "fee_type": p.fee_type,
+                    "fee_rate": p.fee_rate,
+                    "close_time": p.close_time,
+                    "expected_expiration_time": p.expected_expiration_time,
+                    "label": game_mgr.labels.get(p.event_ticker, ""),
+                    "sub_title": game_mgr.subtitles.get(p.event_ticker, ""),
+                    "side_a": p.side_a,
+                    "side_b": p.side_b,
+                    "kalshi_event_ticker": p.kalshi_event_ticker,
+                    "series_ticker": p.series_ticker,
+                    "talos_id": p.talos_id,
+                }
+                # Phase 1: persist tree-mode durability fields.
+                # - source is observability only; write only when set.
+                # - engine_state is safety-critical; always write (default "active").
+                if p.source is not None:
+                    entry["source"] = p.source
+                entry["engine_state"] = p.engine_state
+                # Persist volume data so it's available instantly on restart
+                vol_a = game_mgr.volumes_24h.get(p.ticker_a)
+                vol_b = game_mgr.volumes_24h.get(p.ticker_b)
+                if vol_a is not None:
+                    entry["volume_a"] = vol_a
+                if vol_b is not None:
+                    entry["volume_b"] = vol_b
+                try:
+                    ledger = adjuster.get_ledger(p.event_ticker)
+                    entry["ledger"] = ledger.to_save_dict()
+                except KeyError:
+                    pass
+                games_data.append(entry)
+            ok = save_games_full(games_data)
+            if not ok:
+                raise PersistenceError("save_games_full() returned failure")
+        except PersistenceError:
+            raise
+        except Exception as exc:
+            raise PersistenceError(
+                f"persistence-path failure during _persist_games: "
+                f"{type(exc).__name__}: {exc}"
+            ) from exc
 
     game_mgr.on_change = _persist_games
 

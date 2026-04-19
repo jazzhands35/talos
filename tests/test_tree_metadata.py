@@ -103,3 +103,81 @@ def test_save_raises_persistence_error_on_write_failure(tmp_path: Path):
     store._data = {"manual_event_start": {"KX-A": "2026-04-22T20:00:00Z"}}
     with pytest.raises(PersistenceError):
         store.save()
+
+
+def test_set_deliberately_unticked_save_failure_rolls_back_in_memory(
+    tmp_path: Path,
+):
+    """Round-7 plan Fix #4: when _touch() raises PersistenceError,
+    in-memory state must be rolled back so memory ↔ disk consistent."""
+    import pytest
+
+    from talos.persistence_errors import PersistenceError
+
+    blocker = tmp_path / "blocked"
+    blocker.write_text("blocking file")
+    bad_path = blocker / "child" / "tree_metadata.json"
+
+    store = TreeMetadataStore(path=bad_path, autosave=True)
+    store._loaded = True
+    store._data = {"deliberately_unticked": []}
+
+    with pytest.raises(PersistenceError):
+        store.set_deliberately_unticked("K")
+
+    # In-memory list must NOT contain "K" (rolled back).
+    assert not store.is_deliberately_unticked("K")
+
+
+def test_clear_deliberately_unticked_save_failure_rolls_back_in_memory(
+    tmp_path: Path,
+):
+    import pytest
+
+    from talos.persistence_errors import PersistenceError
+
+    # Successfully populate first.
+    good_path = tmp_path / "tree_metadata.json"
+    store = TreeMetadataStore(path=good_path, autosave=True)
+    store.load()
+    store.set_deliberately_unticked("K")
+    assert store.is_deliberately_unticked("K")
+
+    # Now point at an unwriteable path; clear should fail and rollback.
+    blocker = tmp_path / "blocked"
+    blocker.write_text("blocking")
+    store._path = blocker / "child" / "tree_metadata.json"
+    with pytest.raises(PersistenceError):
+        store.clear_deliberately_unticked("K")
+    # In-memory list must STILL contain "K" (rolled back the removal).
+    assert store.is_deliberately_unticked("K")
+
+
+def test_promote_pending_to_applied_save_failure_rolls_back_in_memory(
+    tmp_path: Path,
+):
+    """Round-7 plan Fix #3: atomic promote with rollback. On save
+    failure, both pending->no-op and applied->no-op must restore."""
+    import pytest
+
+    from talos.persistence_errors import PersistenceError
+
+    good_path = tmp_path / "tree_metadata.json"
+    store = TreeMetadataStore(path=good_path, autosave=True)
+    store.load()
+    store.set_deliberately_unticked_pending("K")
+    assert store.is_deliberately_unticked_pending("K")
+    assert not store.is_deliberately_unticked("K")
+
+    # Force the next save to fail.
+    blocker = tmp_path / "blocked"
+    blocker.write_text("blocking")
+    store._path = blocker / "child" / "tree_metadata.json"
+
+    with pytest.raises(PersistenceError):
+        store.promote_pending_to_applied("K")
+
+    # Both states must reflect the prior snapshot exactly:
+    # pending still contains K, applied does not.
+    assert store.is_deliberately_unticked_pending("K")
+    assert not store.is_deliberately_unticked("K")
