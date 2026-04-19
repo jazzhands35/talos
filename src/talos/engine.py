@@ -696,19 +696,18 @@ class TradingEngine:
                 continue
 
             if source is None:
-                # Defensive degradation: if the resolver cascade has nothing,
-                # check whether the milestone resolver has ever successfully
-                # loaded. If not, the safe assumption is "we don't know if
-                # this event has a discrete start" — force exit-only rather
-                # than trade blind. This protects against the SURVIVOR-class
-                # scenario where milestones haven't bootstrapped yet (network,
-                # 429s, slow /milestones) and a restored pair would otherwise
-                # be freely tradable.
+                # Defensive degradation: if the cascade has nothing, ask
+                # the milestone resolver whether IT considers itself
+                # trustworthy right now. Healthy = last refresh recent AND
+                # index non-empty. The earlier "last_refresh is None" check
+                # only covered the bootstrap window — Kalshi can serve a
+                # 200-OK with zero milestones during partial outages, which
+                # marked last_refresh but left the index empty. is_healthy()
+                # also catches that, so the safety degradation stays armed
+                # past the first successful-but-empty refresh.
                 ms_resolver = self._milestone_resolver
-                ms_unavailable = (
-                    ms_resolver is not None and ms_resolver.last_refresh is None
-                )
-                if ms_unavailable:
+                ms_unhealthy = ms_resolver is not None and not ms_resolver.is_healthy()
+                if ms_unhealthy:
                     self._flip_exit_only_for_key(
                         key,
                         reason="milestones_unavailable",
@@ -3179,6 +3178,7 @@ class TradingEngine:
                         exc_info=True,
                     )
 
+        gsr_seeded: list[str] = []
         try:
             # Step 2: adjuster
             for pair in pairs:
@@ -3192,6 +3192,7 @@ class TradingEngine:
                         pair.event_ticker,
                         pair.expected_expiration_time,
                     )
+                    gsr_seeded.append(pair.event_ticker)
                 batch = [
                     (
                         p.event_ticker,
@@ -3208,44 +3209,47 @@ class TradingEngine:
                 if pair.ticker_b != pair.ticker_a:
                     await self._feed.subscribe(pair.ticker_b)
                     subscribed_tickers.append(pair.ticker_b)
-        except Exception:
+        except BaseException as exc:
+            # BaseException, not Exception — asyncio.CancelledError inherits
+            # from BaseException in Py3.12+. Without this, a cancelled commit
+            # worker (e.g. user mashes 'c' and exclusive=True kills us) would
+            # skip rollback entirely and leave engine state half-mutated.
+            cancelled = isinstance(exc, asyncio.CancelledError)
             logger.warning(
                 "add_pairs_from_selection_rollback",
                 attempted=len(pairs),
                 rolled_back_adjuster=len(added_to_adjuster),
+                rolled_back_gsr=len(gsr_seeded),
                 rolled_back_subscribes=len(subscribed_tickers),
-                exc_info=True,
+                cancelled=cancelled,
+                exc_type=type(exc).__name__,
+                exc_msg=str(exc),
             )
-            # Best-effort rollback. Each step is its own try/except so a
-            # secondary failure during cleanup doesn't mask the primary one.
-            for ticker in subscribed_tickers:
-                try:
-                    await self._feed.unsubscribe(ticker)
-                except Exception:
-                    logger.warning(
-                        "rollback_unsubscribe_failed", ticker=ticker, exc_info=True
+            # Shield rollback so a secondary cancellation can't truncate it
+            # mid-cleanup. asyncio.shield wraps a single coroutine; we need
+            # one task that performs all the awaits.
+            try:
+                await asyncio.shield(
+                    self._rollback_partial_add(
+                        pairs=pairs,
+                        added_to_adjuster=added_to_adjuster,
+                        gsr_seeded=gsr_seeded,
+                        subscribed_tickers=subscribed_tickers,
                     )
-            for pair in added_to_adjuster:
-                try:
-                    self._adjuster.remove_event(pair.event_ticker)
-                except Exception:
-                    logger.warning(
-                        "rollback_adjuster_failed",
-                        event_ticker=pair.event_ticker,
-                        exc_info=True,
-                    )
-            for pair in pairs:
-                try:
-                    await self._game_manager.remove_game(pair.event_ticker)
-                except Exception:
-                    logger.warning(
-                        "rollback_game_manager_failed",
-                        event_ticker=pair.event_ticker,
-                        exc_info=True,
-                    )
+                )
+            except asyncio.CancelledError:
+                # If the shielded rollback itself is cancelled (process
+                # shutdown), let the cancellation propagate after we've at
+                # least logged what was leaked.
+                logger.warning(
+                    "add_pairs_rollback_interrupted",
+                    pairs=len(pairs),
+                )
             raise
 
-        # Step 5: data_collector
+        # Step 5: data_collector — only on the happy path. log_game_add
+        # writes an audit row that has no companion log_game_remove, so on
+        # rollback we simply don't emit it (no phantom audit entry).
         if self._data_collector is not None:
             for pair in pairs:
                 gs = (
@@ -3272,6 +3276,55 @@ class TradingEngine:
         # Step 6: persist once
         self._persist_active_games()
         return pairs
+
+    async def _rollback_partial_add(
+        self,
+        *,
+        pairs: list[ArbPair],
+        added_to_adjuster: list[ArbPair],
+        gsr_seeded: list[str],
+        subscribed_tickers: list[str],
+    ) -> None:
+        """Reverse every side effect of add_pairs_from_selection that
+        succeeded before failure. Each step is its own try/except so a
+        secondary failure during cleanup doesn't mask the primary one or
+        prevent later cleanup steps from running.
+        """
+        for ticker in subscribed_tickers:
+            try:
+                await self._feed.unsubscribe(ticker)
+            except Exception:
+                logger.warning(
+                    "rollback_unsubscribe_failed", ticker=ticker, exc_info=True
+                )
+        if self._game_status_resolver is not None:
+            for et in gsr_seeded:
+                try:
+                    self._game_status_resolver.remove(et)
+                except Exception:
+                    logger.warning(
+                        "rollback_gsr_failed",
+                        event_ticker=et,
+                        exc_info=True,
+                    )
+        for pair in added_to_adjuster:
+            try:
+                self._adjuster.remove_event(pair.event_ticker)
+            except Exception:
+                logger.warning(
+                    "rollback_adjuster_failed",
+                    event_ticker=pair.event_ticker,
+                    exc_info=True,
+                )
+        for pair in pairs:
+            try:
+                await self._game_manager.remove_game(pair.event_ticker)
+            except Exception:
+                logger.warning(
+                    "rollback_game_manager_failed",
+                    event_ticker=pair.event_ticker,
+                    exc_info=True,
+                )
 
     async def remove_pairs_from_selection(
         self,

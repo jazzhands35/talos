@@ -94,10 +94,9 @@ def test_no_schedule_logs_once_and_skips_flip():
     e = _engine_with_scanner([p])
     e._tree_metadata_store.manual_event_start.return_value = None
     e._milestone_resolver.event_start.return_value = None
-    # Pretend milestones HAVE loaded — simulate a successful prior refresh.
-    # Without this, the safety-degradation branch would fire (correctly!) and
-    # this test would no longer match the legacy behavior it asserts.
-    e._milestone_resolver.last_refresh = datetime.now(UTC)
+    # Pretend the resolver is healthy so the safety-degradation branch does
+    # NOT fire, and the legacy log-and-skip path is exercised.
+    e._milestone_resolver.is_healthy.return_value = True
     e._game_status_resolver.get.return_value = None
     e._check_exit_only_tree_mode()
     e._log_once.assert_called_once()
@@ -105,20 +104,34 @@ def test_no_schedule_logs_once_and_skips_flip():
 
 
 def test_milestones_unavailable_forces_exit_only():
-    """Safety degradation: if milestone resolver has never loaded
-    (last_refresh is None) and the cascade has no other source, force
-    exit-only rather than trade blind. Protects restored pairs across
-    a tree-mode restart while milestones are still bootstrapping."""
+    """Safety degradation: if the resolver reports unhealthy (never loaded
+    OR last refresh stale OR index empty) and the cascade has no other
+    source, force exit-only rather than trade blind. Protects restored
+    pairs across a tree-mode restart while milestones are still
+    bootstrapping AND across silent empty-refresh periods."""
     p = _Pair("K-1", "K")
     e = _engine_with_scanner([p])
     e._tree_metadata_store.manual_event_start.return_value = None
     e._milestone_resolver.event_start.return_value = None
-    e._milestone_resolver.last_refresh = None
+    e._milestone_resolver.is_healthy.return_value = False
     e._game_status_resolver.get.return_value = None
     e._check_exit_only_tree_mode()
     e._flip_exit_only_for_key.assert_called_once()
     args, kwargs = e._flip_exit_only_for_key.call_args
     assert kwargs.get("reason") == "milestones_unavailable"
+
+
+def test_empty_index_after_refresh_still_forces_exit_only():
+    """Regression: previously the guard checked `last_refresh is None` only,
+    so a successful-but-empty refresh would mark last_refresh and let the
+    cascade fall through to "no schedule" → tradable. is_healthy() now
+    catches this case too."""
+    from talos.milestones import MilestoneResolver
+
+    real_resolver = MilestoneResolver()
+    real_resolver._last_refresh = datetime.now(UTC)  # fresh
+    # _by_event_ticker stays empty → count == 0 → not healthy
+    assert not real_resolver.is_healthy()
 
 
 def test_tree_mode_flip_adds_all_sibling_pair_event_tickers():

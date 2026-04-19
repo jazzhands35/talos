@@ -940,9 +940,12 @@ class TreeScreen(Screen):
     ) -> None:
         """Bulk-toggle every active event across the given series tickers.
 
-        Fetches events for each series in parallel (authenticated client has
-        a 20-slot semaphore so this saturates without pummeling Kalshi).
-        Used by both category-level and cluster-level space bindings.
+        Fail-closed: if ANY per-series fetch fails (rate limit, network
+        blip, parse error), the whole bulk toggle is aborted with a
+        user-visible warning. Partial success would otherwise persist as
+        "you ticked 18 of 25 series silently" which the user couldn't
+        detect until commit time. Retry surfaces transient failures
+        without changing engine state.
         """
         import asyncio as _asyncio
 
@@ -956,16 +959,35 @@ class TreeScreen(Screen):
             *(self._discovery.get_events_for_series(t) for t in series_tickers),
             return_exceptions=True,
         )
+
+        # Identify failures BEFORE staging any toggles. Collecting per-ticker
+        # results lets us point to specific series in the failure toast so
+        # the user knows which to retry rather than just "something failed".
+        failures: list[tuple[str, BaseException]] = []
         all_tickers: list[str] = []
-        for res in results:
-            if isinstance(res, dict):
+        for series_ticker, res in zip(series_tickers, results, strict=True):
+            if isinstance(res, BaseException):
+                failures.append((series_ticker, res))
+            elif isinstance(res, dict):
                 all_tickers.extend(res.keys())
+
+        if failures:
+            sample = ", ".join(f"{t} ({type(e).__name__})" for t, e in failures[:3])
+            extra = f" +{len(failures) - 3} more" if len(failures) > 3 else ""
+            self.notify(
+                f"{label}: aborted — {len(failures)} series failed to fetch "
+                f"({sample}{extra}). Press space again to retry.",
+                severity="error",
+            )
+            return
+
         if not all_tickers:
             self.notify(
                 f"{label}: no active events found.",
                 severity="warning",
             )
             return
+
         action, toggled = self._apply_bulk_toggle(all_tickers)
         self._find_and_relabel_event_nodes(set(all_tickers))
         self.notify(
@@ -1092,21 +1114,32 @@ class TreeScreen(Screen):
         """Run the commit flow — pushes staged changes through Engine.
 
         Dispatches to a worker because commit() awaits push_screen_wait()
-        for the SchedulePopup, and Textual requires a worker context for
-        wait_for_dismiss=True. Calling await commit() directly from an
-        async action handler raises NoActiveWorker, which Textual swallows
-        internally — leaving the user staring at a broken UI with no
-        toast, no traceback in our logs, and staged changes still
-        pending.
+        for the SchedulePopup. The earlier `exclusive=True` would cancel
+        an in-flight commit on a second `c` press; cancellation through
+        an async commit chain (restore_game → adjuster → resolve_batch →
+        feed.subscribe) leaves engine state half-mutated unless every
+        layer's rollback catches BaseException, which is fragile. Instead
+        we make commit non-reentrant: a second `c` while a commit is in
+        flight is rejected with a toast.
         """
         if self.staged_changes.is_empty():
             self.notify("No staged changes to commit.", severity="information")
             return
-        self.run_worker(self._commit_worker(), exclusive=True)
+        if getattr(self, "_commit_in_flight", False):
+            self.notify(
+                "Commit already in progress — wait for it to finish.",
+                severity="warning",
+            )
+            return
+        self._commit_in_flight = True
+        self.run_worker(self._commit_worker())
 
     async def _commit_worker(self) -> None:
-        completed = await self.commit()
-        if not completed:
-            return
-        self.notify("Commit complete.", severity="information")
-        self._rebuild_tree()
+        try:
+            completed = await self.commit()
+            if not completed:
+                return
+            self.notify("Commit complete.", severity="information")
+            self._rebuild_tree()
+        finally:
+            self._commit_in_flight = False

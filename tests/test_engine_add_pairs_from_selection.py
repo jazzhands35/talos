@@ -170,6 +170,69 @@ async def test_add_pairs_rolls_back_subscribed_tickers_on_subscribe_failure():
 
 
 @pytest.mark.asyncio
+async def test_add_pairs_rollback_includes_game_status_resolver():
+    """GSR.set_expiration was called during step 3 — on failure, rollback
+    must call GSR.remove for each seeded ticker so the resolver doesn't
+    keep stale entries pointing at non-existent pairs."""
+    e = _engine_with_collaborators()
+    e._game_status_resolver.resolve_batch = AsyncMock(
+        side_effect=RuntimeError("boom")
+    )
+    r = ArbPairRecord(
+        event_ticker="KX-A",
+        ticker_a="KX-A",
+        ticker_b="KX-A",
+        kalshi_event_ticker="KX-A",
+        series_ticker="KX",
+        category="Mentions",
+    )
+    with pytest.raises(RuntimeError):
+        await e.add_pairs_from_selection([r.model_dump()])
+    e._game_status_resolver.remove.assert_called_once_with("KX-A")
+
+
+@pytest.mark.asyncio
+async def test_add_pairs_rollback_runs_on_cancellation():
+    """asyncio.CancelledError inherits from BaseException, not Exception.
+    Rollback must use `except BaseException:` (or equivalent) so
+    cancellation through a worker doesn't skip cleanup. Simulates the
+    'mash c twice' scenario at the engine layer."""
+    import asyncio
+
+    cancel_event = asyncio.Event()
+
+    async def _resolve(_batch):
+        cancel_event.set()
+        # Block forever; outer task will cancel us
+        await asyncio.sleep(60)
+
+    e = _engine_with_collaborators()
+    e._game_status_resolver.resolve_batch = AsyncMock(side_effect=_resolve)
+    r = ArbPairRecord(
+        event_ticker="KX-CANCEL",
+        ticker_a="KX-CANCEL",
+        ticker_b="KX-CANCEL",
+        kalshi_event_ticker="KX-CANCEL",
+        series_ticker="KX",
+        category="Mentions",
+    )
+
+    task = asyncio.create_task(e.add_pairs_from_selection([r.model_dump()]))
+    await cancel_event.wait()
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    # Cancellation must have triggered rollback even though the rollback
+    # path in code uses `except BaseException:`. All four side-effect
+    # primitives that ran before the cancel point should have been undone.
+    e._adjuster.remove_event.assert_called_with("KX-CANCEL")
+    e._game_status_resolver.remove.assert_called_with("KX-CANCEL")
+    e._game_manager.remove_game.assert_awaited_with("KX-CANCEL")
+    e._persist_active_games.assert_not_called()
+
+
+@pytest.mark.asyncio
 async def test_add_pairs_persists_only_once_at_batch_end():
     e = _engine_with_collaborators()
     records = [

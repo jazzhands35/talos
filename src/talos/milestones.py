@@ -47,6 +47,25 @@ class MilestoneResolver:
     def count(self) -> int:
         return len(self._by_event_ticker)
 
+    # Resolver is "healthy" iff the most recent refresh succeeded with a
+    # non-empty index AND that refresh isn't ancient. The empty-but-recent
+    # case is a real failure mode: Kalshi sometimes returns 200 OK with
+    # zero milestones during partial outages, which used to silently mark
+    # last_refresh and let the engine treat the resolver as trustworthy.
+    # Engine cascade gates exit-only safety on this — if it returns False,
+    # non-sports tree-mode pairs without a manual override should be
+    # forced into exit-only.
+    _STALE_AFTER_SECONDS = 900  # 15 min — milestone loop refreshes every 5
+
+    def is_healthy(self) -> bool:
+        from datetime import timedelta
+
+        if self._last_refresh is None or self.count == 0:
+            return False
+        return datetime.now(UTC) - self._last_refresh <= timedelta(
+            seconds=self._STALE_AFTER_SECONDS
+        )
+
     # ── Refresh ──────────────────────────────────────────────────────
 
     async def refresh(self) -> None:
