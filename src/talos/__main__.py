@@ -364,8 +364,27 @@ def main() -> None:
 
     feed.on_book_update = on_book_update
 
-    # Wire game persistence — save full pair data for instant startup
-    saved_games_full = load_saved_games_full()
+    # Wire game persistence — save full pair data for instant startup.
+    # If games_full.json exists but is corrupt, fail-closed: refuse to
+    # silently fall back to the ticker-only legacy file (which would
+    # lose engine_state and resurrect winding-down pairs as freely
+    # tradable). User has to inspect / repair / delete the file before
+    # restarting.
+    from talos.persistence import GamesFullCorrupt
+
+    try:
+        saved_games_full = load_saved_games_full()
+    except GamesFullCorrupt as exc:
+        sys.stderr.write(
+            f"\nFATAL: persisted game state at games_full.json is corrupt:\n"
+            f"  {exc}\n\n"
+            "Refusing to start to avoid resurrecting winding-down pairs as\n"
+            "freely tradable. Inspect or back up the file, then either:\n"
+            "  (a) repair the JSON manually if you know the schema, or\n"
+            "  (b) delete games_full.json to start fresh (you will lose\n"
+            "      restart durability for any in-flight winding-down pairs).\n"
+        )
+        sys.exit(2)
     saved_games = load_saved_games() if saved_games_full is None else []
 
     def _persist_games() -> None:
