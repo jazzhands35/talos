@@ -3152,6 +3152,18 @@ class TradingEngine:
         would double-add.
         """
         pairs: list[ArbPair] = []
+        # Round-3 review fix #1: Track which pairs were already present
+        # BEFORE this call so we can skip re-wiring them in steps 2-4.
+        # Without this, retrying a preserved-staging commit (e.g. add
+        # succeeded but a later metadata write failed) would call
+        # adjuster.add_event / feed.subscribe / GSR.set_expiration a
+        # second time, producing duplicate ticker_map entries, duplicate
+        # subscribes, and duplicate _resolve_batch wiring. The retry
+        # contract that the round-1 toast advertises ("adds become
+        # no-ops on retry") only holds if we genuinely no-op here.
+        pre_existing_event_tickers: set[str] = set(
+            self._game_manager._games.keys()
+        )
         added_to_adjuster: list[ArbPair] = []
         subscribed_tickers: list[str] = []
 
@@ -3178,16 +3190,24 @@ class TradingEngine:
                         exc_info=True,
                     )
 
+        # Filter to genuinely-new pairs for downstream wiring. Pre-existing
+        # pairs were already wired by the prior successful add — their
+        # adjuster ledger, GSR registration, and feed subscribes are
+        # already in place. Re-wiring would duplicate side effects.
+        new_pairs: list[ArbPair] = [
+            p for p in pairs if p.event_ticker not in pre_existing_event_tickers
+        ]
+
         gsr_seeded: list[str] = []
         try:
-            # Step 2: adjuster
-            for pair in pairs:
+            # Step 2: adjuster (only for genuinely-new pairs)
+            for pair in new_pairs:
                 self._adjuster.add_event(pair)
                 added_to_adjuster.append(pair)
 
-            # Step 3: GSR wiring + resolve_batch (populates scheduled_start NOW)
-            if self._game_status_resolver is not None and pairs:
-                for pair in pairs:
+            # Step 3: GSR wiring + resolve_batch (only for genuinely-new pairs)
+            if self._game_status_resolver is not None and new_pairs:
+                for pair in new_pairs:
                     self._game_status_resolver.set_expiration(
                         pair.event_ticker,
                         pair.expected_expiration_time,
@@ -3198,12 +3218,12 @@ class TradingEngine:
                         p.event_ticker,
                         self._game_manager.subtitles.get(p.event_ticker, ""),
                     )
-                    for p in pairs
+                    for p in new_pairs
                 ]
                 await self._game_status_resolver.resolve_batch(batch)
 
-            # Step 4: feed subscribes
-            for pair in pairs:
+            # Step 4: feed subscribes (only for genuinely-new pairs)
+            for pair in new_pairs:
                 await self._feed.subscribe(pair.ticker_a)
                 subscribed_tickers.append(pair.ticker_a)
                 if pair.ticker_b != pair.ticker_a:
@@ -3604,7 +3624,19 @@ class TradingEngine:
                 kalshi_et = pair.kalshi_event_ticker or pair.event_ticker
             remove_input.append((pt, kalshi_et))
         outcomes = await self.remove_pairs_from_selection(remove_input)
-        for pt in to_remove:
+        # Round-3 review fix #2: only discard pairs from _winding_down when
+        # the outcome is actually terminal for that pair. A `failed`
+        # outcome (e.g. unsubscribe raised) leaves the pair still present
+        # in GameManager; if we discarded it from _winding_down, the next
+        # reconciliation cycle wouldn't retry the removal and any deferred
+        # untick would stay stuck pending forever (until restart). Only
+        # `removed` (clean removal completed) and `not_found` (pair already
+        # gone — idempotency case) are terminal.
+        terminal_statuses = {"removed", "not_found"}
+        terminal_pts = {
+            o.pair_ticker for o in outcomes if o.status in terminal_statuses
+        }
+        for pt in terminal_pts:
             self._winding_down.discard(pt)
 
         # Emit event_fully_removed for any kalshi_event_ticker that no longer
@@ -3613,7 +3645,12 @@ class TradingEngine:
         # remove_pairs_from_selection has already popped them from _games (and
         # tests mock remove_pairs_from_selection directly, so we treat the
         # pair_tickers we scheduled for removal as already-gone).
-        just_removed_pts = set(to_remove)
+        # Round-3 review fix #2 (paired): only count actually-terminal pairs
+        # as "just removed". Otherwise a partial-failure batch where event K
+        # had P1 (removed) + P2 (failed) would treat both as gone and emit
+        # event_fully_removed(K) prematurely, promoting the deferred untick
+        # while P2 was still alive in _games and _winding_down.
+        just_removed_pts = terminal_pts
         removed_events = {o.kalshi_event_ticker for o in outcomes if o.status == "removed"}
         for kalshi_et in removed_events:
             still_present = any(

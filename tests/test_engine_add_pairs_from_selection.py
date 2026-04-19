@@ -316,3 +316,78 @@ async def test_add_pairs_persists_only_once_at_batch_end():
     ]
     await e.add_pairs_from_selection(records)
     e._persist_active_games.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_add_pairs_retry_is_idempotent_for_already_present_pairs():
+    """Round-3 review fix #1: when commit() preserves staging across a
+    later failure (e.g. metadata write fails after engine add succeeded),
+    re-running add_pairs_from_selection must NOT duplicate side effects:
+    no second adjuster.add_event, no second feed.subscribe, no second
+    GSR.set_expiration, no second log_game_add. Otherwise the round-1
+    toast claim that "adds become no-ops on retry" is false.
+
+    Test: stub _games with a real dict so duplicate-check logic actually
+    works (the simpler MagicMock fixture would let restore_game return a
+    fresh pair each time, masking the bug). Run add twice on the same
+    record. Assert second-call side effects are zero."""
+    e = _engine_with_collaborators()
+    # Override restore_game to mimic real behavior: the first call adds
+    # to _games and returns the pair; the second call finds it present
+    # and returns the existing pair without re-adding.
+    real_games: dict[str, ArbPair] = {}
+
+    def _restore(record):
+        et = record["event_ticker"]
+        if et in real_games:
+            return real_games[et]
+        pair = ArbPair(
+            event_ticker=et,
+            ticker_a=record["ticker_a"],
+            ticker_b=record["ticker_b"],
+            side_a=record.get("side_a", "yes"),
+            side_b=record.get("side_b", "no"),
+            source=record.get("source"),
+        )
+        real_games[et] = pair
+        return pair
+
+    e._game_manager.restore_game = MagicMock(side_effect=_restore)
+    e._game_manager._games = real_games
+
+    r = ArbPairRecord(
+        event_ticker="KXFEDMENTION-26APR-YIEL",
+        ticker_a="KXFEDMENTION-26APR-YIEL",
+        ticker_b="KXFEDMENTION-26APR-YIEL",
+        kalshi_event_ticker="KXFEDMENTION-26APR",
+        series_ticker="KXFEDMENTION",
+        category="Mentions",
+    ).model_dump()
+
+    # First call — full wiring expected.
+    pairs1 = await e.add_pairs_from_selection([r])
+    assert len(pairs1) == 1
+    add_event_after_first = e._adjuster.add_event.call_count
+    subscribe_after_first = e._feed.subscribe.await_count
+    set_expiration_after_first = e._game_status_resolver.set_expiration.call_count
+    resolve_batch_after_first = e._game_status_resolver.resolve_batch.await_count
+
+    assert add_event_after_first >= 1
+    assert subscribe_after_first >= 1
+    assert set_expiration_after_first >= 1
+
+    # Second call (the retry) — the pair is already in _games so step-2/3/4
+    # wiring MUST be skipped entirely.
+    pairs2 = await e.add_pairs_from_selection([r])
+    # Returned pair list still includes it (UI accounting), but no new wiring.
+    assert len(pairs2) == 1
+    assert e._adjuster.add_event.call_count == add_event_after_first
+    assert e._feed.subscribe.await_count == subscribe_after_first
+    assert e._game_status_resolver.set_expiration.call_count == (
+        set_expiration_after_first
+    )
+    # resolve_batch is gated on `if ... and new_pairs`, so a second call
+    # with no new_pairs must not invoke it.
+    assert e._game_status_resolver.resolve_batch.await_count == (
+        resolve_batch_after_first
+    )

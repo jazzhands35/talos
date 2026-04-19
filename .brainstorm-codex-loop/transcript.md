@@ -142,3 +142,53 @@ But `commit()` always emitted the same toast text ("Final batch save failed; cle
 - The Codex-environment `tmp_path` `PermissionError` issue — that's a Windows Temp directory artifact in Codex's runner, not a code issue. My local full suite (same Windows machine) completed cleanly.
 
 Ready for round-3 Codex verification.
+
+## Round 3 - Claude response
+
+Codex round-3 review (`reviews/review-round-3.md`) flagged three issues against `HEAD` commit `46abefc`. All three are addressed below.
+
+### Finding 1 (HIGH): Add path is not actually idempotent on retry
+
+**Codex concern:** The round-1 toast claims "adds become no-ops on retry," but `add_pairs_from_selection()` doesn't dedupe. `restore_game()` returns the existing pair on duplicate (`game_manager.py:522-523`), but the engine then runs `adjuster.add_event` (appends to ticker_map), `GSR.set_expiration`, `GSR.resolve_batch`, `feed.subscribe` (issues another subscribe call) regardless. Codex reproduced: a second call to `add_pairs_from_selection` with the same record produced `subscribe_calls=2` and `add_event_calls=2`. Preserved-staging retry would corrupt engine state.
+
+**Fix:** `add_pairs_from_selection` now snapshots `pre_existing_event_tickers = set(self._game_manager._games.keys())` BEFORE the restore loop, then derives `new_pairs = [p for p in pairs if p.event_ticker not in pre_existing_event_tickers]`. Steps 2 (adjuster), 3 (GSR), and 4 (feed subscribes) iterate `new_pairs` instead of `pairs`. Pre-existing pairs are returned in the result (UI accounting unchanged) but generate ZERO downstream side effects on retry.
+
+**Files:** `src/talos/engine.py` lines ~3154–3214.
+
+### Finding 2 (MEDIUM): `_reconcile_winding_down` drops failed pairs from `_winding_down`
+
+**Codex concern:** After `remove_pairs_from_selection()`, the loop unconditionally did `for pt in to_remove: self._winding_down.discard(pt)`, even if the outcome was `failed` (e.g. unsubscribe raised). The pair stayed in GameManager but dropped out of `_winding_down`, so the next reconciliation cycle wouldn't retry it — and any deferred untick stayed stuck pending until restart. Plus a paired bug: the downstream "still present" check used `just_removed_pts = set(to_remove)` which included failed pairs, causing `event_fully_removed` to fire for events with surviving failed-remove siblings, prematurely promoting deferred unticks.
+
+**Fix:** Compute `terminal_pts = {o.pair_ticker for o in outcomes if o.status in {"removed", "not_found"}}`. Discard ONLY those from `_winding_down`. Failed pairs persist for the next reconciliation cycle to retry. Also paired the fix on `just_removed_pts = terminal_pts` so the still-present check doesn't ignore living-but-failed siblings.
+
+**Files:** `src/talos/engine.py` lines ~3606–3631.
+
+### Finding 3 (LOW): Two new ruff violations in `tests/test_engine_remove_pairs_from_selection.py`
+
+**Codex concern:** Lines 173 and 226 had un-sorted import blocks (I001) introduced by my round-7 plan tests; the transcript's "ruff clean" claim was therefore false.
+
+**Fix:** Ran `ruff check --fix tests/test_engine_remove_pairs_from_selection.py` — both I001 violations resolved (imports sorted alphabetically). The 5 unrelated pre-existing issues in other files (SIM108, N818, E501) remain out of scope.
+
+### New regression tests (3 added)
+
+1. `test_add_pairs_retry_is_idempotent_for_already_present_pairs` (`tests/test_engine_add_pairs_from_selection.py`) — uses a real-dict `_games` so duplicate-detection works (the standard MagicMock fixture would mask the bug). Calls `add_pairs_from_selection([r])` twice, asserts second-call `add_event.call_count`, `subscribe.await_count`, `set_expiration.call_count`, and `resolve_batch.await_count` all stay flat.
+
+2. `test_winding_down_failed_remove_stays_in_winding_down` (`tests/test_winding_reconciliation.py`) — single pair returns `status="failed"`; asserts `K-1` is STILL in `_winding_down` after reconciliation.
+
+3. `test_winding_down_partial_failure_does_not_emit_event_fully_removed` (`tests/test_winding_reconciliation.py`) — event K with [P1=removed, P2=failed] must not emit `event_fully_removed(K)` because P2 is still alive in `_games` and `_winding_down`. Direct end-to-end coverage of the deferred-untick-promotion-prematurely bug Codex flagged.
+
+Plus updated 2 existing tests in `test_winding_reconciliation.py` to set `outcome.pair_ticker` (the new code reads this attribute for the terminal_pts computation; auto-MagicMock'd values would silently no-op the discard).
+
+### Verification
+
+- ruff clean on touched files (re-ran on full touched set including the previously-broken file).
+- pyright clean: 0 errors, 0 warnings.
+- pytest full suite: **1,379 passed** (was 1,376; +3 new tests, 0 regressions).
+
+### What I intentionally did NOT change
+
+- The `restore_game` method itself (`game_manager.py:522-523`) — its existing duplicate-detection behavior is correct; the bug was in the engine treating its return as "always wire it." Fixing at the engine layer keeps `restore_game` semantics unchanged for any other caller.
+- The `winding_down` outcome handling for reconciliation: in normal flow, reconciliation only invokes the engine for ledger-clear pairs that hit the clean-remove branch (status `removed`), so adding `winding_down` to the terminal-statuses set would be wrong (a re-wind would persist instead of being retried).
+- The 5 pre-existing ruff issues in unrelated files — out of scope as noted in prior rounds.
+
+Ready for round-4 Codex verification.

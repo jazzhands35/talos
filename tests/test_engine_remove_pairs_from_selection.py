@@ -170,7 +170,7 @@ async def test_winding_down_persist_failure_raises_remove_batch_persistence_erro
     """Round-7 plan: per-transition persist failure raises
     RemoveBatchPersistenceError carrying persisted_count, AND rolls back
     the failing pair's in-memory state to its prior snapshot."""
-    from talos.persistence_errors import RemoveBatchPersistenceError, PersistenceError
+    from talos.persistence_errors import PersistenceError, RemoveBatchPersistenceError
 
     e = _engine()
     p1 = MagicMock()
@@ -223,7 +223,7 @@ async def test_winding_down_persist_failure_preserves_pre_existing_exit_only():
     already be there via other engine paths (milestone, sports-game-
     started). A hardcoded discard would silently strip the safety
     condition."""
-    from talos.persistence_errors import RemoveBatchPersistenceError, PersistenceError
+    from talos.persistence_errors import PersistenceError, RemoveBatchPersistenceError
 
     e = _engine()
     p1 = MagicMock()
