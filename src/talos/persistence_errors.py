@@ -29,9 +29,20 @@ class RemoveBatchPersistenceError(PersistenceError):
     so the UI can surface "Wind-down committed for N pairs; persistence
     failed at pair N+1" instead of a generic failure toast.
 
+    `phase` distinguishes which save failed:
+      - "transition": a per-transition save failed mid-batch. Pairs
+        before this point are durable on disk; the failing pair was
+        rolled back to its prior state. Clean removes processed before
+        this point may NOT yet be durable (they only get persisted by
+        the batch-end save, which never ran).
+      - "batch_end": all per-transition saves succeeded but the
+        final batch-end save failed. Winding-down transitions are
+        durable, but clean removes in this batch are NOT durable on
+        disk and will reappear from the stale snapshot on restart.
+
     Subclasses PersistenceError so existing `except PersistenceError`
     handlers catch it; commit() additionally `isinstance` checks to
-    extract `persisted_count` for the toast.
+    extract `persisted_count` and `phase` for the toast.
     """
 
     def __init__(
@@ -39,7 +50,9 @@ class RemoveBatchPersistenceError(PersistenceError):
         persisted_count: int,
         message: str,
         original: BaseException | None = None,
+        phase: str = "transition",
     ) -> None:
         super().__init__(message)
         self.persisted_count = persisted_count
         self.original = original
+        self.phase = phase

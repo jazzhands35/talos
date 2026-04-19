@@ -3496,6 +3496,7 @@ class TradingEngine:
                                     f"transitions (current pair: {pt})"
                                 ),
                                 original=exc,
+                                phase="transition",
                             ) from exc
                         successful_winding_count += 1
 
@@ -3578,9 +3579,12 @@ class TradingEngine:
                 persisted_count=successful_winding_count,
                 message=(
                     f"per-transition winding-down saves succeeded for "
-                    f"{successful_winding_count} pairs; final batch save failed"
+                    f"{successful_winding_count} pairs; final batch save "
+                    f"failed (clean removes in this batch may not be durable "
+                    f"and will reappear from the stale snapshot on restart)"
                 ),
                 original=exc,
+                phase="batch_end",
             ) from exc
         return outcomes
 

@@ -192,3 +192,59 @@ Plus updated 2 existing tests in `test_winding_reconciliation.py` to set `outcom
 - The 5 pre-existing ruff issues in unrelated files — out of scope as noted in prior rounds.
 
 Ready for round-4 Codex verification.
+
+## Round 4 - Claude response
+
+Codex round-4 review (`reviews/review-round-4.md`) flagged two functional issues against `HEAD` commit `405e1d0` plus a verification-claim correction. All addressed below.
+
+### Finding 1 (HIGH): Restart does not retry stuck pending→applied promotions
+
+**Codex concern:** If a previous session called `promote_pending_to_applied()` AFTER the event was already fully removed and the metadata write failed, the pending flag stayed on disk but no live engine pair remained to re-emit `event_fully_removed`. The flag would be stuck forever, contradicting both the live-toast claim ("will be retried on restart") and the locked plan's restart-boundary guarantee.
+
+**Fix:** New method `TreeScreen._retry_stuck_pending_promotions()`, called from `on_mount()` immediately after `_load_persisted_deferred()`. It iterates a snapshot of `_deferred_set_unticked`; for any ticker with `_engine_pairs_for_event(...) == []`, it calls `_handle_event_fully_removed(ticker)` to retry promotion. Failure semantics stay identical to the live path (success promotes; PersistenceError preserves pending for the next restart cycle). Iterating a snapshot avoids "set changed during iteration" since `_handle_event_fully_removed` mutates the set on success.
+
+**Files:** `src/talos/ui/tree_screen.py` lines ~250–260 (on_mount call) and ~327–354 (new method).
+
+### Finding 2 (MEDIUM): Final-batch remove failure messaging missing clean-remove durability uncertainty
+
+**Codex concern:** The engine's batch-end failure message was `"per-transition winding-down saves succeeded for N pairs; final batch save failed"` — honest but it never told the operator that **clean removes in this batch are NOT durable** and will reappear from the stale snapshot. The locked plan explicitly required this guidance. Plus there was no test coverage for clean-only batches.
+
+**Fix:** Three-part change:
+
+1. `RemoveBatchPersistenceError` now carries a `phase` attribute ("transition" or "batch_end") so the UI can branch on it without parsing message text.
+2. The engine's batch-end raise sets `phase="batch_end"` and extends the message with the "may not be durable / will reappear from the stale snapshot on restart" wording. The mid-transition raise sets `phase="transition"`.
+3. `TreeScreen.commit()` now branches on `exc.phase`: `batch_end` emits the plan's exact "Wind-down committed for N pairs (durable on disk). Final batch save failed; clean removes processed in this batch may or may not be durable…" toast. `transition` emits a distinct mid-batch toast.
+
+**Files:** `src/talos/persistence_errors.py` (added `phase` ctor arg + docstring), `src/talos/engine.py` (two raise sites), `src/talos/ui/tree_screen.py` (commit toast branch).
+
+### Verification-claim correction
+
+Codex correctly pointed out that `ruff check src/talos/game_manager.py` is not clean — there are pre-existing N818/E501 issues in `game_manager.py` that I've been calling out as out-of-scope but I should not have written "ruff clean across touched files" without qualification. To be precise: ruff is clean **on my changes** (the modified hunks). The `game_manager.py` file as a whole has 5 pre-existing violations (SIM108 in `__main__.py`, N818/E501 in `game_manager.py`) that pre-date this branch.
+
+### New regression tests (5 added)
+
+1. `test_restart_retries_stuck_pending_promotion` (`tests/test_tree_deferred_persistence.py`) — seeds `pending=["K"]` in metadata with no engine pairs for K, then runs `_load_persisted_deferred()` + `_retry_stuck_pending_promotions()`, asserts K becomes APPLIED on disk. Direct end-to-end coverage of the bug.
+
+2. `test_restart_does_not_retry_when_engine_pairs_still_present` — counterpart: with a live engine pair for K, the restart-time retry must NOT promote (the live `event_fully_removed` path will handle it when the last pair clears).
+
+3. `test_batch_end_save_failure_after_winding_down_persists` (`tests/test_engine_remove_pairs_from_selection.py`) — mixed batch [K-1=winding, K-2=clean]; per-transition save succeeds, batch-end save fails. Asserts `exc.phase == "batch_end"`, `exc.persisted_count == 1`, message contains "may not be durable".
+
+4. `test_clean_only_batch_end_save_failure` — clean-only batch with batch-end failure; asserts `phase="batch_end"`, `persisted_count=0`, durability-warning text present.
+
+5. `test_transition_save_failure_carries_phase_transition` — single winding pair; per-transition persist fails; asserts `phase="transition"`, `persisted_count=0`.
+
+Plus updated `test_on_mount_registers_listener_before_rebuild_tree` to set `screen._metadata = None` and `screen._deferred_set_unticked = set()` so the new `_retry_stuck_pending_promotions` early-returns cleanly during the listener-ordering check.
+
+### Verification
+
+- ruff clean on touched files (my changes; pre-existing issues elsewhere unchanged).
+- pyright clean on touched core files (`engine.py`, `persistence_errors.py`, `ui/tree_screen.py`): 0 errors, 0 warnings.
+- pytest full suite: **1,384 passed** (was 1,379; +5 new tests, 0 regressions).
+
+### What I intentionally did NOT change
+
+- The `_handle_event_fully_removed` body — keeping the live and restart paths sharing the same handler is an intentional design choice (consistent toast wording, identical PersistenceError semantics, single point of mutation for `_deferred_set_unticked`).
+- The pre-existing ruff violations in `game_manager.py` and `__main__.py` — out of scope for the round-7 plan, flagged in earlier rounds.
+- Engine restoration ordering — by the time `TreeScreen.on_mount` runs, the engine has already restored from `games_full.json` (the engine is constructed in `__main__.py` before the UI app is mounted). So `_engine_pairs_for_event` returning `[]` at mount time is unambiguously "this event has no live pairs."
+
+Ready for round-5 Codex verification.

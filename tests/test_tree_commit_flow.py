@@ -643,6 +643,11 @@ def test_on_mount_registers_listener_before_rebuild_tree():
     screen._categories_seen = True
     screen._counts_seen = True
     screen._bootstrap_polls = 0
+    # _retry_stuck_pending_promotions early-returns when _metadata is None
+    # (round-4 review fix #1). Setting it here keeps this ordering test
+    # focused on listener registration without dragging in metadata setup.
+    screen._metadata = None
+    screen._deferred_set_unticked = set()
     screen._rebuild_tree = lambda: order.append("rebuild")  # type: ignore[method-assign]
     screen._load_persisted_deferred = lambda: order.append("load_deferred")  # type: ignore[method-assign]
     screen._any_counts_populated = lambda: True  # type: ignore[method-assign]

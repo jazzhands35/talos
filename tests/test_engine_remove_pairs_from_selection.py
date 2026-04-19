@@ -336,3 +336,144 @@ async def test_unexpected_engine_exception_during_remove_propagates_not_toasted(
     outcomes = await e.remove_pairs_from_selection([("K-1", "K")])
     assert outcomes[0].status == "failed"
     assert "engine bug" in (outcomes[0].reason or "")
+
+
+@pytest.mark.asyncio
+async def test_batch_end_save_failure_after_winding_down_persists():
+    """Round-4 review fix #2: a mixed batch where per-transition saves
+    succeeded but the batch-end save failed must raise
+    RemoveBatchPersistenceError(phase='batch_end'). This is the case
+    where winding-down transitions ARE durable but clean removes are
+    NOT yet on disk. Operator messaging needs the phase distinction
+    so the toast can correctly warn about clean-remove durability."""
+    from talos.persistence_errors import (
+        PersistenceError,
+        RemoveBatchPersistenceError,
+    )
+
+    e = _engine()
+    # Two pairs sharing event K: P1 has inventory (winding), P2 is
+    # flat (clean remove). The batch-end save covers P2; its failure
+    # makes the clean remove non-durable.
+    p1 = MagicMock()
+    p1.kalshi_event_ticker = "K"
+    p1.engine_state = "active"
+    p2 = MagicMock()
+    p2.kalshi_event_ticker = "K"
+    p2.engine_state = "active"
+    e._game_manager._games["K-1"] = p1
+    e._game_manager._games["K-2"] = p2
+
+    # Per-pair ledger: K-1 has filled positions, K-2 is flat.
+    def _get_ledger(pt):
+        ledger = MagicMock()
+        if pt == "K-1":
+            ledger.has_filled_positions.return_value = True
+            ledger.has_resting_orders.return_value = False
+            ledger.filled_count.return_value = 5
+            ledger.resting_count.return_value = 0
+        else:
+            ledger.has_filled_positions.return_value = False
+            ledger.has_resting_orders.return_value = False
+            ledger.filled_count.return_value = 0
+            ledger.resting_count.return_value = 0
+        return ledger
+
+    e._adjuster.get_ledger.side_effect = _get_ledger
+
+    # First persist (winding-down transition for K-1) succeeds; the
+    # batch-end save (after K-2 clean remove) fails.
+    call_count = [0]
+
+    def _persist(*, force_during_suppress=False):
+        call_count[0] += 1
+        if call_count[0] == 2:  # batch-end save
+            raise PersistenceError("disk full at batch end")
+
+    e._persist_active_games = MagicMock(side_effect=_persist)
+
+    with pytest.raises(RemoveBatchPersistenceError) as exc_info:
+        await e.remove_pairs_from_selection([("K-1", "K"), ("K-2", "K")])
+
+    # Phase MUST be batch_end so the UI can warn about clean removes.
+    assert exc_info.value.phase == "batch_end"
+    # Winding-down transition for K-1 was durably persisted.
+    assert exc_info.value.persisted_count == 1
+    # Message text references the durability-uncertainty wording.
+    assert "may not be durable" in str(exc_info.value)
+
+
+@pytest.mark.asyncio
+async def test_clean_only_batch_end_save_failure():
+    """Round-4 review fix #2: clean-only remove batch (no winding
+    transitions) where the batch-end save fails. persisted_count=0
+    (no winding transitions), phase='batch_end'. Operator must be
+    told the clean removes are not durable on disk."""
+    from talos.persistence_errors import (
+        PersistenceError,
+        RemoveBatchPersistenceError,
+    )
+
+    e = _engine()
+    p1 = MagicMock()
+    p1.kalshi_event_ticker = "K"
+    p1.engine_state = "active"
+    e._game_manager._games["K-1"] = p1
+
+    # Flat pair → clean remove path (no per-transition save).
+    ledger = MagicMock()
+    ledger.has_filled_positions.return_value = False
+    ledger.has_resting_orders.return_value = False
+    ledger.filled_count.return_value = 0
+    ledger.resting_count.return_value = 0
+    e._adjuster.get_ledger.return_value = ledger
+
+    # Only one persist call happens (the batch-end one) — make it fail.
+    def _persist(*, force_during_suppress=False):
+        raise PersistenceError("disk full")
+
+    e._persist_active_games = MagicMock(side_effect=_persist)
+
+    with pytest.raises(RemoveBatchPersistenceError) as exc_info:
+        await e.remove_pairs_from_selection([("K-1", "K")])
+
+    assert exc_info.value.phase == "batch_end"
+    # No winding-down transitions in a clean-only batch.
+    assert exc_info.value.persisted_count == 0
+    assert "may not be durable" in str(exc_info.value)
+
+
+@pytest.mark.asyncio
+async def test_transition_save_failure_carries_phase_transition():
+    """Round-4 review fix #2: per-transition save failure carries
+    phase='transition' so the UI emits the mid-batch toast (different
+    durability semantics from batch_end)."""
+    from talos.persistence_errors import (
+        PersistenceError,
+        RemoveBatchPersistenceError,
+    )
+
+    e = _engine()
+    p1 = MagicMock()
+    p1.kalshi_event_ticker = "K"
+    p1.engine_state = "active"
+    e._game_manager._games["K-1"] = p1
+
+    # Inventory → winding-down path → per-transition save.
+    ledger = MagicMock()
+    ledger.has_filled_positions.return_value = True
+    ledger.has_resting_orders.return_value = False
+    ledger.filled_count.return_value = 5
+    ledger.resting_count.return_value = 0
+    e._adjuster.get_ledger.return_value = ledger
+
+    def _persist(*, force_during_suppress=False):
+        raise PersistenceError("disk full at transition")
+
+    e._persist_active_games = MagicMock(side_effect=_persist)
+
+    with pytest.raises(RemoveBatchPersistenceError) as exc_info:
+        await e.remove_pairs_from_selection([("K-1", "K")])
+
+    assert exc_info.value.phase == "transition"
+    assert exc_info.value.persisted_count == 0

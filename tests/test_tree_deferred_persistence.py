@@ -106,3 +106,107 @@ async def test_promote_pending_clears_persisted_state(tmp_path: Path) -> None:
     md2.load()
     assert not md2.is_deliberately_unticked_pending("K")
     assert md2.is_deliberately_unticked("K")
+
+
+@pytest.mark.asyncio
+async def test_restart_retries_stuck_pending_promotion(tmp_path: Path) -> None:
+    """Round-4 review fix #1: simulates the bug Codex identified.
+
+    Scenario:
+    1. Prior session: user unticked, pair wound down, event emitted
+       event_fully_removed, promotion was attempted but the metadata
+       write FAILED. The pending flag stayed in the JSON file; pair
+       was already removed from games_full.json.
+    2. Talos crashes / restarts.
+    3. On mount, the engine has restored from games_full.json. The
+       event has zero engine pairs. Without restart-time reconciliation,
+       no live pair would ever fire event_fully_removed again, so the
+       pending flag would stay stuck forever.
+
+    Fix: TreeScreen._retry_stuck_pending_promotions() runs on mount
+    after _load_persisted_deferred(). It walks the rehydrated pending
+    set and, for any ticker with no live engine pairs, calls
+    _handle_event_fully_removed() to retry promotion.
+
+    Verifies: after the simulated restart, K is APPLIED on disk."""
+    path = tmp_path / "tree_metadata.json"
+
+    # Seed the prior session's stuck state: pending=["K"] but no engine
+    # pairs for K (i.e. event already fully removed before the failed
+    # promotion attempt).
+    md1 = TreeMetadataStore(path=path)
+    md1.load()
+    md1.set_deliberately_unticked_pending("K")
+    md1.save()
+    assert md1.is_deliberately_unticked_pending("K")
+    assert not md1.is_deliberately_unticked("K")
+
+    # New session — fresh metadata, fresh screen, engine has no pairs.
+    md2 = TreeMetadataStore(path=path)
+    md2.load()
+    engine = _FakeEngine()
+
+    # Important: the engine's _game_manager._games is empty (no pairs
+    # for K), so _engine_pairs_for_event("K") returns []. Build a
+    # minimal stub that satisfies the helper's hasattr check.
+    class _FakeGM:
+        _games: dict = {}
+
+    engine._game_manager = _FakeGM()  # type: ignore[attr-defined]
+    screen = _make_screen(engine, md2)
+
+    # Simulate the on_mount flow: load deferred, then retry stuck.
+    screen._load_persisted_deferred()
+    assert "K" in screen._deferred_set_unticked
+    screen._retry_stuck_pending_promotions()
+
+    # Promotion should have run because event K has zero pairs.
+    assert "K" not in screen._deferred_set_unticked
+
+    # Persisted on disk now: APPLIED, pending cleared.
+    md3 = TreeMetadataStore(path=path)
+    md3.load()
+    assert not md3.is_deliberately_unticked_pending("K")
+    assert md3.is_deliberately_unticked("K")
+
+
+@pytest.mark.asyncio
+async def test_restart_does_not_retry_when_engine_pairs_still_present(
+    tmp_path: Path,
+) -> None:
+    """Counterpart to the retry test: if the event STILL has live engine
+    pairs (the wind-down hasn't completed yet), _retry_stuck_pending_promotions
+    must NOT promote — the live event_fully_removed path will handle
+    promotion when the last pair clears. Otherwise restart would
+    prematurely promote pending unticks for events that are still trading."""
+    path = tmp_path / "tree_metadata.json"
+    md = TreeMetadataStore(path=path)
+    md.load()
+    md.set_deliberately_unticked_pending("K")
+    md.save()
+
+    md2 = TreeMetadataStore(path=path)
+    md2.load()
+    engine = _FakeEngine()
+
+    # Engine still has a live pair for K → reconciliation must skip.
+    class _FakePair:
+        kalshi_event_ticker = "K"
+        event_ticker = "K-1"
+
+    class _FakeGM:
+        _games = {"K-1": _FakePair()}
+
+    engine._game_manager = _FakeGM()  # type: ignore[attr-defined]
+    screen = _make_screen(engine, md2)
+
+    screen._load_persisted_deferred()
+    screen._retry_stuck_pending_promotions()
+
+    # K stays pending because the event has live pairs — promotion
+    # will happen later when the last pair fires event_fully_removed.
+    assert "K" in screen._deferred_set_unticked
+    md3 = TreeMetadataStore(path=path)
+    md3.load()
+    assert md3.is_deliberately_unticked_pending("K")
+    assert not md3.is_deliberately_unticked("K")

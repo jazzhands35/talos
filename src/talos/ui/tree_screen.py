@@ -248,6 +248,16 @@ class TreeScreen(Screen):
         tree.focus()
         self._rebuild_tree()
         self._load_persisted_deferred()
+        # Round-4 review fix #1: retry any pending→applied promotion
+        # whose event has no surviving engine pairs. Without this, a
+        # promotion that failed AFTER the event was already fully
+        # removed (e.g. disk write race during the live promote) would
+        # leave the pending flag stuck forever — there's no remaining
+        # pair to emit another event_fully_removed and trigger retry.
+        # Restart is the natural reconciliation point: by mount time the
+        # engine has restored from games_full.json, so zero-pairs +
+        # pending-flag is a definitive "should be applied" signal.
+        self._retry_stuck_pending_promotions()
 
         # Start the two-stage poll: first watch for categories to appear,
         # then watch for event counts to backfill. Both can be in-progress
@@ -323,6 +333,29 @@ class TreeScreen(Screen):
         """
         if self._metadata is not None:
             self._deferred_set_unticked = set(self._metadata.pending_unticked())
+
+    def _retry_stuck_pending_promotions(self) -> None:
+        """Restart-time reconciliation for stuck pending unticks.
+
+        Round-4 review fix #1: if a previous session called
+        promote_pending_to_applied() AFTER the event was fully removed
+        and the metadata write failed, there is no live pair left to
+        re-emit event_fully_removed — so the pending flag would stay
+        stuck forever. On mount (post-engine-restore), any pending
+        ticker whose event has zero engine pairs is unambiguously a
+        finished-but-unpromoted state. Reuse _handle_event_fully_removed
+        so failure semantics stay identical to the live path: success
+        promotes pending→applied; PersistenceError logs/toasts and
+        leaves the pending flag preserved for the next restart cycle.
+
+        Iterate over a snapshot because _handle_event_fully_removed
+        mutates _deferred_set_unticked.
+        """
+        if self._metadata is None:
+            return
+        for kalshi_event_ticker in list(self._deferred_set_unticked):
+            if not self._engine_pairs_for_event(kalshi_event_ticker):
+                self._handle_event_fully_removed(kalshi_event_ticker)
 
     def _rebuild_tree(self) -> None:
         tree = self.query_one("#tree", Tree)
@@ -895,27 +928,43 @@ class TreeScreen(Screen):
                     exc_type=type(exc).__name__,
                     exc_msg=str(exc),
                 )
-                # If RemoveBatchPersistenceError, surface the engine's
-                # phase-specific message verbatim so mid-transition vs
-                # batch-end failures aren't both reported as "final batch
-                # save failed". Round-2 review fix #2: previously this
-                # branch hard-coded the batch-end wording for both phases.
-                # The engine raises:
-                #   mid-transition: "persistence failed after N
-                #                    winding-down transitions
-                #                    (current pair: pt)"
-                #   batch-end:      "per-transition winding-down saves
-                #                    succeeded for N pairs; final batch
-                #                    save failed"
+                # If RemoveBatchPersistenceError, branch on `phase` so
+                # mid-transition vs batch-end failures get distinct
+                # operator-actionable wording. Round-4 review fix #2:
+                # the previous "use str(exc) verbatim" approach was
+                # honest about which phase failed but never explicitly
+                # told the operator that clean-only batches can't be
+                # trusted on restart for a batch-end failure. The plan's
+                # locked toast wording requires "clean removes may or
+                # may not be durable" guidance for batch-end failures.
                 if isinstance(exc, RemoveBatchPersistenceError):
-                    self.app.notify(
-                        f"Remove failed: {exc} "
-                        f"({exc.persisted_count} winding-down transitions are "
-                        "durable on disk). Restart will recover all durable "
-                        "state; re-commit any unfinished changes after fixing "
-                        "the disk issue.",
-                        severity="error",
-                    )
+                    if exc.phase == "batch_end":
+                        # All per-transition saves succeeded; the final
+                        # save covering clean removes failed. Winding-
+                        # down transitions ARE durable; clean removes
+                        # are NOT and will reappear on restart.
+                        self.app.notify(
+                            f"Wind-down committed for {exc.persisted_count} "
+                            "pairs (durable on disk). Final batch save failed; "
+                            "clean removes processed in this batch may or may "
+                            "not be durable and may reappear from the stale "
+                            "snapshot on restart. Fix the disk issue and "
+                            "re-commit.",
+                            severity="error",
+                        )
+                    else:
+                        # Mid-transition: pairs before persisted_count are
+                        # durable winding-down; the failing pair was rolled
+                        # back; clean removes from this batch never reached
+                        # disk (batch-end save never ran).
+                        self.app.notify(
+                            f"Remove failed mid-batch: {exc} "
+                            f"({exc.persisted_count} winding-down transitions "
+                            "are durable; remaining pairs were not processed "
+                            "and any clean removes in this batch are not yet "
+                            "durable). Fix the disk issue and re-commit.",
+                            severity="error",
+                        )
                 else:
                     self.app.notify(
                         f"Remove failed and persistence may be partial "
