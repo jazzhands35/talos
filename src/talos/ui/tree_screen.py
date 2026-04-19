@@ -895,16 +895,25 @@ class TreeScreen(Screen):
                     exc_type=type(exc).__name__,
                     exc_msg=str(exc),
                 )
-                # If RemoveBatchPersistenceError, the message already
-                # carries persisted_count for honest user messaging.
+                # If RemoveBatchPersistenceError, surface the engine's
+                # phase-specific message verbatim so mid-transition vs
+                # batch-end failures aren't both reported as "final batch
+                # save failed". Round-2 review fix #2: previously this
+                # branch hard-coded the batch-end wording for both phases.
+                # The engine raises:
+                #   mid-transition: "persistence failed after N
+                #                    winding-down transitions
+                #                    (current pair: pt)"
+                #   batch-end:      "per-transition winding-down saves
+                #                    succeeded for N pairs; final batch
+                #                    save failed"
                 if isinstance(exc, RemoveBatchPersistenceError):
                     self.app.notify(
-                        f"Wind-down committed for {exc.persisted_count} pairs "
-                        "(durable on disk). Final batch save failed; clean "
-                        "removes processed in this batch may or may not be "
-                        "durable. Restart will recover all durable state; "
-                        "re-commit any unfinished changes after fixing the "
-                        "disk issue.",
+                        f"Remove failed: {exc} "
+                        f"({exc.persisted_count} winding-down transitions are "
+                        "durable on disk). Restart will recover all durable "
+                        "state; re-commit any unfinished changes after fixing "
+                        "the disk issue.",
                         severity="error",
                     )
                 else:
@@ -941,10 +950,17 @@ class TreeScreen(Screen):
                     self._metadata.set_deliberately_unticked(k)
                 else:
                     # Some pair(s) went winding_down or failed → defer.
-                    # Persist the pending flag so it survives a restart even if
-                    # the winding-down pair is still settling when Talos crashes.
-                    self._deferred_set_unticked.add(k)
+                    # Persist the pending flag FIRST so it survives a restart
+                    # even if the winding-down pair is still settling when
+                    # Talos crashes. Round-2 review fix #1: only add to the
+                    # in-memory deferred set AFTER the metadata write
+                    # succeeds. Otherwise a PersistenceError leaves a leaked
+                    # in-memory marker, and a subsequent event_fully_removed
+                    # would promote the event to applied even though the
+                    # pending flag never made it to disk — violating the
+                    # memory↔disk consistency contract.
                     self._metadata.set_deliberately_unticked_pending(k)
+                    self._deferred_set_unticked.add(k)
         except PersistenceError as exc:
             # Round-1 review fix: metadata-write failures MUST preserve
             # staging and return False so the user can retry. Returning

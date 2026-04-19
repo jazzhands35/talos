@@ -525,6 +525,65 @@ async def test_commit_clear_deliberately_unticked_failure_preserves_staging(
 
 
 @pytest.mark.asyncio
+async def test_commit_pending_write_failure_does_not_leak_in_memory_marker(
+    monkeypatch,
+):
+    """Round-2 review fix #1: when set_deliberately_unticked_pending()
+    raises PersistenceError during commit() (winding_down branch), the
+    in-memory _deferred_set_unticked must NOT contain the event ticker.
+    Otherwise a subsequent event_fully_removed would promote the event
+    to applied even though the pending flag never made it to disk —
+    violating memory↔disk consistency.
+
+    The fix orders the writes disk-first: set_deliberately_unticked_pending(k)
+    is called BEFORE _deferred_set_unticked.add(k). If the metadata
+    write raises, the in-memory mutation never happens.
+
+    Then we also assert that on_event_fully_removed() is a no-op for K
+    after the failure — proving the integrity gate holds end-to-end."""
+    from talos.persistence_errors import PersistenceError
+
+    engine = _FakeEngine()
+    # winding_down outcome → triggers the deferred branch, not the
+    # immediate set_deliberately_unticked branch.
+    engine.remove_pairs_from_selection.return_value = [
+        RemoveOutcome(
+            pair_ticker="K-1",
+            kalshi_event_ticker="K",
+            status="winding_down",
+            reason="filled=5,3",
+        ),
+    ]
+    md = _FakeMetadata()
+
+    def _boom_pending(_k: str) -> None:
+        raise PersistenceError("disk full")
+
+    md.set_deliberately_unticked_pending = _boom_pending  # type: ignore[method-assign]
+    screen = _make_screen(engine, md)
+    app_stub = _AppStub()
+    monkeypatch.setattr(TreeScreen, "app", property(lambda _self: app_stub))
+    screen.staged_changes = StagedChanges(
+        to_remove=[("K-1", "K")],
+        to_set_unticked=["K"],
+    )
+
+    completed = await screen.commit()
+
+    # Contract 1: commit() returns False, staging preserved.
+    assert completed is False
+    assert not screen.staged_changes.is_empty()
+    # Contract 2: _deferred_set_unticked must NOT contain "K".
+    # This is the bug Codex found — pre-fix, the in-memory add ran
+    # BEFORE the metadata write, leaking the marker on failure.
+    assert "K" not in screen._deferred_set_unticked
+    # Contract 3: end-to-end integrity — on_event_fully_removed for K
+    # must NOT promote anything because nothing is deferred.
+    screen._handle_event_fully_removed("K")
+    assert md.promoted == []
+
+
+@pytest.mark.asyncio
 async def test_on_event_fully_removed_marshals_via_call_soon_threadsafe():
     """Round-1 review fix #2 + plan Fix #3: the public listener must
     marshal onto the captured loop via call_soon_threadsafe rather than

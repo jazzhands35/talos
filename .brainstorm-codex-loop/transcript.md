@@ -91,3 +91,54 @@ Codex round-1 review (`reviews/review-round-1.md`) flagged three issues against 
 - The `DONE_WITH_CONCERNS`-style finding about test coverage is now resolved by the four new tests; no test deletions or restructuring needed.
 
 Ready for round-2 Codex verification.
+
+## Round 2 - Claude response
+
+Codex round-2 review (`reviews/review-round-2.md`) flagged three issues against `HEAD` commit `8e68ead`. All three are addressed below.
+
+### Finding 1 (HIGH): `_deferred_set_unticked` leaks on `set_deliberately_unticked_pending` failure
+
+**Codex concern:** In `commit()`, the deferred-untick branch did `self._deferred_set_unticked.add(k)` BEFORE `self._metadata.set_deliberately_unticked_pending(k)`. If the metadata write raised `PersistenceError`, the in-memory marker was already set but the disk flag was not. A subsequent `event_fully_removed` for `K` would call `promote_pending_to_applied(K)` because `_handle_event_fully_removed` only checks `_deferred_set_unticked`. Codex reproduced this bug: after forcing the failure, `_deferred_set_unticked == {"K"}` and a later `on_event_fully_removed("K")` still promoted.
+
+**Fix:** Swapped the order — `set_deliberately_unticked_pending(k)` is now called FIRST. If it raises, the in-memory `add()` never executes, so `_deferred_set_unticked` stays clean. The fix preserves memory↔disk consistency: either both sides record the deferred state, or neither does. (No rollback needed because the in-memory mutation is gated by the metadata write succeeding.)
+
+**Files:** `src/talos/ui/tree_screen.py` lines ~942–955.
+
+### Finding 2 (MEDIUM): `RemoveBatchPersistenceError` toast is not phase-specific
+
+**Codex concern:** `TradingEngine.remove_pairs_from_selection` raises with two different messages depending on the phase:
+- Mid-transition: `"persistence failed after N winding-down transitions (current pair: pt)"`
+- Batch-end: `"per-transition winding-down saves succeeded for N pairs; final batch save failed"`
+
+But `commit()` always emitted the same toast text ("Final batch save failed; clean removes … may or may not be durable"), regardless of phase. The transcript claimed "honest user toasts" but mid-transition failures were mis-reported as batch-end.
+
+**Fix:** Toast now uses `str(exc)` (the engine's phase-specific message) directly, plus the existing `persisted_count` for context. Reads as e.g. "Remove failed: persistence failed after 3 winding-down transitions (current pair: K-7) (3 winding-down transitions are durable on disk). Restart will recover all durable state…"
+
+**Files:** `src/talos/ui/tree_screen.py` lines ~898–917.
+
+### Finding 3 (MEDIUM): Missing test for the pending-write failure path
+
+**Codex concern:** The new round-1 tests covered `set_deliberately_unticked` and `clear_deliberately_unticked` failures, but not `set_deliberately_unticked_pending`. That gap let the round-1 fix regress.
+
+**Fix:** New regression test `test_commit_pending_write_failure_does_not_leak_in_memory_marker` in `tests/test_tree_commit_flow.py`:
+
+1. Forces `_FakeMetadata.set_deliberately_unticked_pending` to raise `PersistenceError`.
+2. Constructs a `winding_down` outcome (the only path that triggers the deferred branch).
+3. Asserts:
+   - `commit()` returns `False` (preserves staging),
+   - `"K" not in screen._deferred_set_unticked` (the actual bug Codex found),
+   - End-to-end: `_handle_event_fully_removed("K")` does NOT call `promote_pending_to_applied("K")` afterward (proves the integrity gate holds).
+
+### Verification
+
+- ruff clean on touched files.
+- pyright clean on touched files: 0 errors, 0 warnings.
+- pytest full suite: **1,376 passed** (was 1,375 before; +1 new test, 0 regressions).
+
+### What I intentionally did NOT change
+
+- The engine messages themselves (`engine.py:3471-3478` and `engine.py:3557-3564`) — they're already phase-specific and the UI now uses them directly via `str(exc)`. No need to introduce a separate phase enum.
+- The 5 pre-existing ruff errors in unrelated files — not in scope.
+- The Codex-environment `tmp_path` `PermissionError` issue — that's a Windows Temp directory artifact in Codex's runner, not a code issue. My local full suite (same Windows machine) completed cleanly.
+
+Ready for round-3 Codex verification.
