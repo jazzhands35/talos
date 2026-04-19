@@ -227,23 +227,27 @@ class TreeScreen(Screen):
         import asyncio
         self._app_loop = asyncio.get_running_loop()
 
-        # Give the tree widget focus so keybindings (space/c/r) work
-        # immediately without needing to tab into it.
-        tree = self.query_one("#tree", Tree)
-        tree.focus()
-        self._rebuild_tree()
-        self._load_persisted_deferred()
-
-        # Listener registration MUST happen AFTER _app_loop capture
-        # (round-7 plan Step 12a). Otherwise on_event_fully_removed
-        # could fire before _app_loop is set and hit the defensive
-        # log-and-drop path, losing real signals.
+        # Listener registration MUST happen IMMEDIATELY after _app_loop
+        # capture and BEFORE any code path that could trigger
+        # _reconcile_winding_down (which fires event_fully_removed).
+        # Round-1 review fix: previously this ran after _rebuild_tree()
+        # and _load_persisted_deferred(), creating a drop window where
+        # an event finishing winding-down during mount would be lost
+        # because no listener was wired yet. The persisted pending flag
+        # would then stick until a later restart.
         if self._engine is not None and hasattr(
             self._engine, "add_event_fully_removed_listener"
         ):
             self._engine.add_event_fully_removed_listener(
                 self.on_event_fully_removed
             )
+
+        # Give the tree widget focus so keybindings (space/c/r) work
+        # immediately without needing to tab into it.
+        tree = self.query_one("#tree", Tree)
+        tree.focus()
+        self._rebuild_tree()
+        self._load_persisted_deferred()
 
         # Start the two-stage poll: first watch for categories to appear,
         # then watch for event counts to backfill. Both can be in-progress
@@ -942,6 +946,10 @@ class TreeScreen(Screen):
                     self._deferred_set_unticked.add(k)
                     self._metadata.set_deliberately_unticked_pending(k)
         except PersistenceError as exc:
+            # Round-1 review fix: metadata-write failures MUST preserve
+            # staging and return False so the user can retry. Returning
+            # True with empty staging silently loses the user's intent
+            # while the engine state and disk are inconsistent.
             _log.warning(
                 "tree_commit_metadata_write_failed",
                 phase="set_deliberately_unticked",
@@ -950,11 +958,13 @@ class TreeScreen(Screen):
             )
             self.app.notify(
                 f"Engine state updated but deliberately-unticked flags "
-                f"could not persist ({type(exc).__name__}). On restart "
-                "the affected events may reappear as eligible. Fix the "
-                "disk issue and re-commit to make the unticks durable.",
+                f"could not persist ({type(exc).__name__}). Staged changes "
+                "preserved — fix the disk issue and press 'c' again to "
+                "make the unticks durable. (Engine ops are idempotent on "
+                "retry: removed pairs return not_found, adds are no-ops.)",
                 severity="error",
             )
+            return False
 
         added_keys = {(p.kalshi_event_ticker or p.event_ticker) for p in added}
         try:
@@ -962,6 +972,8 @@ class TreeScreen(Screen):
                 if k in added_keys:
                     self._metadata.clear_deliberately_unticked(k)
         except PersistenceError as exc:
+            # Round-1 review fix: same contract as set_deliberately_unticked
+            # above — preserve staging, return False, let user retry.
             _log.warning(
                 "tree_commit_metadata_write_failed",
                 phase="clear_deliberately_unticked",
@@ -970,11 +982,12 @@ class TreeScreen(Screen):
             )
             self.app.notify(
                 f"Engine state updated but deliberately-unticked clears "
-                f"could not persist ({type(exc).__name__}). Affected events "
-                "may stay marked as deliberately-unticked across restart "
-                "until you re-commit.",
+                f"could not persist ({type(exc).__name__}). Staged changes "
+                "preserved — fix the disk issue and press 'c' again. "
+                "(Engine ops are idempotent on retry.)",
                 severity="error",
             )
+            return False
 
         # 4. Clear staged.
         self.staged_changes = StagedChanges.empty()

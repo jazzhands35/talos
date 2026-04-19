@@ -409,3 +409,201 @@ def test_commit_in_flight_cleared_on_synchronous_run_worker_failure():
     assert screen._commit_in_flight is False
     # And the user gets a toast explaining why nothing happened.
     assert any("could not start" in m for m, _ in notifications)
+
+
+# ─── Round-1 review fix: metadata-failure preserves staging ───────────────
+# Codex round-1 finding #1 (HIGH): commit() metadata-write failures used
+# to clear staging and return True, silently losing the user's intent.
+# The fix is return False and preserve staging on PersistenceError so the
+# user can retry (engine ops are idempotent — removed pairs return
+# not_found, adds become no-ops).
+
+
+class _AppStub:
+    """Minimal stub for screen.app — Textual's MessagePump.app is a
+    read-only property, so tests patch it via monkeypatch on the class."""
+
+    def __init__(self) -> None:
+        self.notifications: list[tuple[str, str]] = []
+
+    def notify(self, msg: str, severity: str = "information") -> None:
+        self.notifications.append((msg, severity))
+
+
+@pytest.mark.asyncio
+async def test_commit_set_deliberately_unticked_failure_preserves_staging(
+    monkeypatch,
+):
+    """Round-1 review fix: when set_deliberately_unticked raises
+    PersistenceError, commit() must return False AND keep staged_changes
+    intact. Returning True with empty staging would silently drop the
+    user's untick intent while engine state was already mutated."""
+    from talos.persistence_errors import PersistenceError
+
+    engine = _FakeEngine()
+    engine.remove_pairs_from_selection.return_value = [
+        RemoveOutcome(
+            pair_ticker="K-1",
+            kalshi_event_ticker="K",
+            status="removed",
+            reason="clean",
+        ),
+    ]
+    md = _FakeMetadata()
+
+    def _boom(_k: str) -> None:
+        raise PersistenceError("disk full")
+
+    md.set_deliberately_unticked = _boom  # type: ignore[method-assign]
+    screen = _make_screen(engine, md)
+    app_stub = _AppStub()
+    monkeypatch.setattr(TreeScreen, "app", property(lambda _self: app_stub))
+    original = StagedChanges(
+        to_remove=[("K-1", "K")],
+        to_set_unticked=["K"],
+    )
+    screen.staged_changes = original
+
+    completed = await screen.commit()
+
+    # Contract: return False AND preserve staging.
+    assert completed is False
+    assert not screen.staged_changes.is_empty()
+    assert screen.staged_changes.to_set_unticked == ["K"]
+    # User must see a retry-instructive toast.
+    assert any(
+        "press 'c' again" in m or "re-commit" in m
+        for m, _ in app_stub.notifications
+    )
+
+
+@pytest.mark.asyncio
+async def test_commit_clear_deliberately_unticked_failure_preserves_staging(
+    monkeypatch,
+):
+    """Symmetric to the set_deliberately_unticked test: clear failures
+    must also return False + preserve staging so re-commit re-attempts
+    the metadata write after the disk issue is fixed."""
+    from talos.persistence_errors import PersistenceError
+
+    engine = _FakeEngine()
+    # Engine-add succeeds → triggers the clear_deliberately_unticked branch.
+    added_record = ArbPairRecord(
+        event_ticker="K-1",
+        ticker_a="K-1",
+        ticker_b="K-1",
+        kalshi_event_ticker="K",
+        series_ticker="KX",
+        category="Mentions",
+    )
+    engine.add_pairs_from_selection.return_value = [added_record]
+    md = _FakeMetadata()
+    md.manual_event_start = lambda _et: "none"  # type: ignore[method-assign]
+
+    def _boom(_k: str) -> None:
+        raise PersistenceError("disk full")
+
+    md.clear_deliberately_unticked = _boom  # type: ignore[method-assign]
+    screen = _make_screen(engine, md)
+    app_stub = _AppStub()
+    monkeypatch.setattr(TreeScreen, "app", property(lambda _self: app_stub))
+    original = StagedChanges(
+        to_add=[added_record],
+        to_clear_unticked=["K"],
+    )
+    screen.staged_changes = original
+
+    completed = await screen.commit()
+
+    assert completed is False
+    assert not screen.staged_changes.is_empty()
+    assert screen.staged_changes.to_clear_unticked == ["K"]
+    assert any(
+        "press 'c' again" in m or "re-commit" in m
+        for m, _ in app_stub.notifications
+    )
+
+
+@pytest.mark.asyncio
+async def test_on_event_fully_removed_marshals_via_call_soon_threadsafe():
+    """Round-1 review fix #2 + plan Fix #3: the public listener must
+    marshal onto the captured loop via call_soon_threadsafe rather than
+    invoking _handle_event_fully_removed inline. Otherwise an engine
+    callback originating off the Textual loop would mutate UI state on
+    the wrong thread.
+
+    Test technique: install a fake _app_loop with a recording
+    call_soon_threadsafe; assert the inner handler is enqueued, not run
+    inline."""
+    md = _FakeMetadata()
+    screen = _make_screen(_FakeEngine(), md)
+    screen._deferred_set_unticked = {"K"}
+
+    enqueued: list[tuple[Any, tuple[Any, ...]]] = []
+
+    class _FakeLoop:
+        def call_soon_threadsafe(self, fn, *args):
+            enqueued.append((fn, args))
+
+    screen._app_loop = _FakeLoop()
+
+    # Public entry point — must enqueue, not call inline.
+    screen.on_event_fully_removed("K")
+
+    # Enqueued exactly once with the inner handler + ticker.
+    assert len(enqueued) == 1
+    fn, args = enqueued[0]
+    assert fn == screen._handle_event_fully_removed
+    assert args == ("K",)
+    # Crucially: NOT promoted yet (inner handler hasn't run).
+    assert md.promoted == []
+    assert "K" in screen._deferred_set_unticked
+
+
+def test_on_mount_registers_listener_before_rebuild_tree():
+    """Round-1 review fix #2: listener registration must happen
+    immediately after _app_loop capture and BEFORE _rebuild_tree() /
+    _load_persisted_deferred(). Otherwise _reconcile_winding_down
+    triggered during mount could fire event_fully_removed before any
+    listener exists, leaving a persisted pending flag stuck.
+
+    Strategy: instrument _rebuild_tree and _load_persisted_deferred so
+    we record the order of (register-listener vs rebuild). Listener
+    registration must come first."""
+    import asyncio
+
+    screen = cast(Any, TreeScreen.__new__(TreeScreen))
+    order: list[str] = []
+
+    class _FakeEngineRecording:
+        def add_event_fully_removed_listener(self, _cb):
+            order.append("register")
+
+    screen._engine = _FakeEngineRecording()
+    screen._discovery = None
+    screen._categories_seen = True
+    screen._counts_seen = True
+    screen._bootstrap_polls = 0
+    screen._rebuild_tree = lambda: order.append("rebuild")  # type: ignore[method-assign]
+    screen._load_persisted_deferred = lambda: order.append("load_deferred")  # type: ignore[method-assign]
+    screen._any_counts_populated = lambda: True  # type: ignore[method-assign]
+    screen.set_interval = lambda *_a, **_kw: None  # type: ignore[method-assign]
+
+    # query_one(...).focus() — return a stub with a no-op focus.
+    class _FakeTree:
+        def focus(self):
+            order.append("focus")
+
+    screen.query_one = lambda *_a, **_kw: _FakeTree()  # type: ignore[method-assign]
+
+    # on_mount uses asyncio.get_running_loop() — needs a real loop.
+    async def _runner() -> None:
+        screen.on_mount()
+
+    asyncio.run(_runner())
+
+    # Listener must register BEFORE rebuild_tree and load_persisted_deferred.
+    assert "register" in order
+    register_idx = order.index("register")
+    assert register_idx < order.index("rebuild")
+    assert register_idx < order.index("load_deferred")
