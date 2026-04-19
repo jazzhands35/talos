@@ -15,8 +15,10 @@ def sample_milestone_response() -> dict:
                 "id": "c8bb4f46-eb47-4f84-9723-ad9b1961d2b5",
                 "category": "mentions",
                 "type": "one_off_milestone",
-                "start_date": "2026-04-16T23:00:00Z",
-                "end_date": "2026-04-17T01:00:00Z",
+                # Far-future dates so stale-milestone filter (end_date < now)
+                # doesn't skip these fixtures as the calendar advances.
+                "start_date": "2099-04-16T23:00:00Z",
+                "end_date": "2099-04-17T01:00:00Z",
                 "title": "Trump holds a roundtable on No Tax on Tips",
                 "notification_message": "What will Trump say?",
                 "related_event_tickers": ["KXTRUMPMENTION-26APR16"],
@@ -47,7 +49,7 @@ async def test_refresh_builds_index(sample_milestone_response: dict):
     ):
         await r.refresh()
     start = r.event_start("KXTRUMPMENTION-26APR16")
-    assert start == datetime(2026, 4, 16, 23, 0, tzinfo=UTC)
+    assert start == datetime(2099, 4, 16, 23, 0, tzinfo=UTC)
 
 
 @pytest.mark.asyncio

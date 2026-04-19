@@ -60,8 +60,13 @@ class MilestoneResolver:
             logger.warning("milestone_refresh_failed", exc_info=True)
             return
 
+        # Drop milestones whose end_date is already in the past — they have
+        # no exit-only signal value left. The fetch lookback brings them in,
+        # but they shouldn't pollute the live index.
+        now = datetime.now(UTC)
         new_index: dict[str, Milestone] = {}
         parse_failures = 0
+        dropped_stale = 0
         first_failure_id: str | None = None
         first_failure_exc: str | None = None
         for raw in items:
@@ -78,6 +83,9 @@ class MilestoneResolver:
                     first_failure_id = str(raw.get("id", "?"))
                     first_failure_exc = f"{type(exc).__name__}: {exc}"
                 continue
+            if ms.end_date < now:
+                dropped_stale += 1
+                continue
             for et in ms.related_event_tickers:
                 new_index[et] = ms
 
@@ -88,15 +96,28 @@ class MilestoneResolver:
             milestone_count=len(items),
             event_index_size=len(new_index),
             parse_failures=parse_failures,
+            dropped_stale=dropped_stale,
             first_failure_id=first_failure_id,
             first_failure_exc=first_failure_exc,
         )
 
     # ── Internals ────────────────────────────────────────────────────
 
+    # Lookback for milestone fetch. With minimum_start_date=now, any event
+    # whose milestone started before "now" is excluded from the index — so a
+    # restart 5 minutes after a Trump speech began would lose the milestone
+    # and let the engine think the event has no schedule. 30 days is a
+    # generous superset of every short-lived event class we care about
+    # (speeches, sports, scheduled releases) without bloating the payload.
+    _FETCH_LOOKBACK_DAYS = 30
+
     async def _paginated_fetch(self) -> list[dict[str, Any]]:
-        """Paginate /milestones?minimum_start_date=<now>&limit=200."""
-        now_iso = datetime.now(UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+        """Paginate /milestones with a backward lookback window so events
+        already in progress remain in the index after a restart."""
+        from datetime import timedelta
+
+        lookback = datetime.now(UTC) - timedelta(days=self._FETCH_LOOKBACK_DAYS)
+        since_iso = lookback.replace(microsecond=0).isoformat().replace("+00:00", "Z")
         http = self._http or httpx.AsyncClient(timeout=httpx.Timeout(15.0))
         try:
             out: list[dict[str, Any]] = []
@@ -104,7 +125,7 @@ class MilestoneResolver:
             for _ in range(40):  # safety cap — 40 * 200 = 8000 milestones
                 params: dict[str, str] = {
                     "limit": "200",
-                    "minimum_start_date": now_iso,
+                    "minimum_start_date": since_iso,
                 }
                 if cursor:
                     params["cursor"] = cursor

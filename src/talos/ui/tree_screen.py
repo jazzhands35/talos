@@ -791,12 +791,29 @@ class TreeScreen(Screen):
             self._metadata.set_manual_event_start(k, v)
 
         # 2. Engine add/remove.
+        # add_pairs_from_selection now rolls back on partial failure and
+        # re-raises. Catch here so the user gets a toast and staged_changes
+        # are preserved for retry — propagating to the worker would log the
+        # exception silently inside Textual and look like a hang.
         added: list[Any] = []
         remove_outcomes: list[Any] = []
         if staged.to_add:
-            added = await self._engine.add_pairs_from_selection(
-                [r.model_dump() for r in staged.to_add]
-            )
+            try:
+                added = await self._engine.add_pairs_from_selection(
+                    [r.model_dump() for r in staged.to_add]
+                )
+            except Exception as exc:
+                _log.warning(
+                    "tree_commit_add_failed",
+                    exc_type=type(exc).__name__,
+                    exc_msg=str(exc),
+                )
+                self.app.notify(
+                    f"Add failed and was rolled back ({type(exc).__name__}). "
+                    "Staged changes preserved — press 'c' again to retry.",
+                    severity="error",
+                )
+                return False
         if staged.to_remove:
             remove_outcomes = await self._engine.remove_pairs_from_selection(
                 staged.to_remove,

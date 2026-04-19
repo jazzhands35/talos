@@ -42,8 +42,10 @@ def _engine_with_collaborators():
     e._game_status_resolver.get = MagicMock(return_value=None)
     e._feed = MagicMock()
     e._feed.subscribe = AsyncMock()
+    e._feed.unsubscribe = AsyncMock()
     e._data_collector = None
     e._persist_active_games = MagicMock()
+    gm.remove_game = AsyncMock()
     return e
 
 
@@ -101,6 +103,70 @@ async def test_add_pairs_sports_calls_resolve_batch_with_subtitles():
     args, _ = e._game_status_resolver.resolve_batch.call_args
     batch = args[0]
     assert batch == [("KXNBAGAME-26APR20BOSNYR", "BOS at NYR")]
+
+
+@pytest.mark.asyncio
+async def test_add_pairs_rolls_back_on_resolve_batch_failure():
+    """If resolve_batch raises mid-commit, every partially-applied side
+    effect (game_manager restore, adjuster wiring) must be reverted before
+    the exception propagates. Without rollback, retries would double-add."""
+    e = _engine_with_collaborators()
+    e._game_status_resolver.resolve_batch = AsyncMock(
+        side_effect=RuntimeError("kalshi 5xx")
+    )
+    r = ArbPairRecord(
+        event_ticker="KX-1",
+        ticker_a="KX-1",
+        ticker_b="KX-1",
+        kalshi_event_ticker="KX-1",
+        series_ticker="KX",
+        category="Mentions",
+    )
+    with pytest.raises(RuntimeError, match="kalshi 5xx"):
+        await e.add_pairs_from_selection([r.model_dump()])
+
+    # Adjuster.add_event happened — must be reverted via remove_event.
+    e._adjuster.add_event.assert_called_once()
+    e._adjuster.remove_event.assert_called_once_with("KX-1")
+    # Game was restored — must be removed from GameManager too.
+    e._game_manager.remove_game.assert_awaited_once_with("KX-1")
+    # No persist on failure — staging should remain in TreeScreen for retry.
+    e._persist_active_games.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_add_pairs_rolls_back_subscribed_tickers_on_subscribe_failure():
+    """If a feed subscribe raises mid-batch, prior successful subscribes
+    must be unsubscribed during rollback."""
+    e = _engine_with_collaborators()
+
+    # First subscribe succeeds; second raises.
+    calls: list[str] = []
+
+    async def _subscribe(ticker: str) -> None:
+        calls.append(ticker)
+        if len(calls) >= 2:
+            raise ConnectionError("ws gone")
+
+    e._feed.subscribe = AsyncMock(side_effect=_subscribe)
+    records = [
+        ArbPairRecord(
+            event_ticker=f"KX-{i}",
+            ticker_a=f"KX-{i}",
+            ticker_b=f"KX-{i}",
+            kalshi_event_ticker=f"KX-{i}",
+            series_ticker="KX",
+            category="Mentions",
+        ).model_dump()
+        for i in range(2)
+    ]
+    with pytest.raises(ConnectionError):
+        await e.add_pairs_from_selection(records)
+
+    # The first subscribed ticker (calls[0]) should be unsubscribed.
+    unsub_args = [c.args[0] for c in e._feed.unsubscribe.await_args_list]
+    assert calls[0] in unsub_args
+    e._persist_active_games.assert_not_called()
 
 
 @pytest.mark.asyncio

@@ -94,10 +94,31 @@ def test_no_schedule_logs_once_and_skips_flip():
     e = _engine_with_scanner([p])
     e._tree_metadata_store.manual_event_start.return_value = None
     e._milestone_resolver.event_start.return_value = None
+    # Pretend milestones HAVE loaded — simulate a successful prior refresh.
+    # Without this, the safety-degradation branch would fire (correctly!) and
+    # this test would no longer match the legacy behavior it asserts.
+    e._milestone_resolver.last_refresh = datetime.now(UTC)
     e._game_status_resolver.get.return_value = None
     e._check_exit_only_tree_mode()
     e._log_once.assert_called_once()
     e._flip_exit_only_for_key.assert_not_called()
+
+
+def test_milestones_unavailable_forces_exit_only():
+    """Safety degradation: if milestone resolver has never loaded
+    (last_refresh is None) and the cascade has no other source, force
+    exit-only rather than trade blind. Protects restored pairs across
+    a tree-mode restart while milestones are still bootstrapping."""
+    p = _Pair("K-1", "K")
+    e = _engine_with_scanner([p])
+    e._tree_metadata_store.manual_event_start.return_value = None
+    e._milestone_resolver.event_start.return_value = None
+    e._milestone_resolver.last_refresh = None
+    e._game_status_resolver.get.return_value = None
+    e._check_exit_only_tree_mode()
+    e._flip_exit_only_for_key.assert_called_once()
+    args, kwargs = e._flip_exit_only_for_key.call_args
+    assert kwargs.get("reason") == "milestones_unavailable"
 
 
 def test_tree_mode_flip_adds_all_sibling_pair_event_tickers():

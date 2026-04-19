@@ -696,6 +696,24 @@ class TradingEngine:
                 continue
 
             if source is None:
+                # Defensive degradation: if the resolver cascade has nothing,
+                # check whether the milestone resolver has ever successfully
+                # loaded. If not, the safe assumption is "we don't know if
+                # this event has a discrete start" — force exit-only rather
+                # than trade blind. This protects against the SURVIVOR-class
+                # scenario where milestones haven't bootstrapped yet (network,
+                # 429s, slow /milestones) and a restored pair would otherwise
+                # be freely tradable.
+                ms_resolver = self._milestone_resolver
+                ms_unavailable = (
+                    ms_resolver is not None and ms_resolver.last_refresh is None
+                )
+                if ms_unavailable:
+                    self._flip_exit_only_for_key(
+                        key,
+                        reason="milestones_unavailable",
+                    )
+                    continue
                 self._log_once("exit_only_no_schedule", key)
                 continue
 
@@ -3126,8 +3144,17 @@ class TradingEngine:
           4. feed subscribes
           5. data_collector.log_game_add
           6. persist once
+
+        If steps 3 or 4 raise (resolver / subscribe failure), every pair
+        added so far in this call is rolled back: GameManager, adjuster, and
+        any open feed subscriptions are reverted, and the exception is
+        re-raised so the UI commit path can leave staging intact for retry.
+        Without rollback, partial state would persist invisibly and a retry
+        would double-add.
         """
         pairs: list[ArbPair] = []
+        added_to_adjuster: list[ArbPair] = []
+        subscribed_tickers: list[str] = []
 
         # Steps 1 + 1.5: reconstitute + volume seeding, with on_change suppressed
         with self._game_manager.suppress_on_change():
@@ -3152,31 +3179,71 @@ class TradingEngine:
                         exc_info=True,
                     )
 
-        # Step 2: adjuster
-        for pair in pairs:
-            self._adjuster.add_event(pair)
-
-        # Step 3: GSR wiring + resolve_batch (populates scheduled_start NOW)
-        if self._game_status_resolver is not None and pairs:
+        try:
+            # Step 2: adjuster
             for pair in pairs:
-                self._game_status_resolver.set_expiration(
-                    pair.event_ticker,
-                    pair.expected_expiration_time,
-                )
-            batch = [
-                (
-                    p.event_ticker,
-                    self._game_manager.subtitles.get(p.event_ticker, ""),
-                )
-                for p in pairs
-            ]
-            await self._game_status_resolver.resolve_batch(batch)
+                self._adjuster.add_event(pair)
+                added_to_adjuster.append(pair)
 
-        # Step 4: feed subscribes
-        for pair in pairs:
-            await self._feed.subscribe(pair.ticker_a)
-            if pair.ticker_b != pair.ticker_a:
-                await self._feed.subscribe(pair.ticker_b)
+            # Step 3: GSR wiring + resolve_batch (populates scheduled_start NOW)
+            if self._game_status_resolver is not None and pairs:
+                for pair in pairs:
+                    self._game_status_resolver.set_expiration(
+                        pair.event_ticker,
+                        pair.expected_expiration_time,
+                    )
+                batch = [
+                    (
+                        p.event_ticker,
+                        self._game_manager.subtitles.get(p.event_ticker, ""),
+                    )
+                    for p in pairs
+                ]
+                await self._game_status_resolver.resolve_batch(batch)
+
+            # Step 4: feed subscribes
+            for pair in pairs:
+                await self._feed.subscribe(pair.ticker_a)
+                subscribed_tickers.append(pair.ticker_a)
+                if pair.ticker_b != pair.ticker_a:
+                    await self._feed.subscribe(pair.ticker_b)
+                    subscribed_tickers.append(pair.ticker_b)
+        except Exception:
+            logger.warning(
+                "add_pairs_from_selection_rollback",
+                attempted=len(pairs),
+                rolled_back_adjuster=len(added_to_adjuster),
+                rolled_back_subscribes=len(subscribed_tickers),
+                exc_info=True,
+            )
+            # Best-effort rollback. Each step is its own try/except so a
+            # secondary failure during cleanup doesn't mask the primary one.
+            for ticker in subscribed_tickers:
+                try:
+                    await self._feed.unsubscribe(ticker)
+                except Exception:
+                    logger.warning(
+                        "rollback_unsubscribe_failed", ticker=ticker, exc_info=True
+                    )
+            for pair in added_to_adjuster:
+                try:
+                    self._adjuster.remove_event(pair.event_ticker)
+                except Exception:
+                    logger.warning(
+                        "rollback_adjuster_failed",
+                        event_ticker=pair.event_ticker,
+                        exc_info=True,
+                    )
+            for pair in pairs:
+                try:
+                    await self._game_manager.remove_game(pair.event_ticker)
+                except Exception:
+                    logger.warning(
+                        "rollback_game_manager_failed",
+                        event_ticker=pair.event_ticker,
+                        exc_info=True,
+                    )
+            raise
 
         # Step 5: data_collector
         if self._data_collector is not None:
