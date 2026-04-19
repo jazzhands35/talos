@@ -100,6 +100,64 @@ class TestGamesFullSchemaAndDurability:
         with pytest.raises(GamesFullCorruptError):
             load_saved_games_full(path=path)
 
+    def test_v1_invalid_engine_state_value_raises(self, tmp_path: Path) -> None:
+        """Round 5: presence is not enough — value must be in the enum.
+        A typo or null bypasses _apply_persisted_engine_state and silently
+        downgrades to active, resurrecting winding-down pairs."""
+        path = tmp_path / "games_full.json"
+        path.write_text(
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "games": [
+                        {
+                            "event_ticker": "K",
+                            "ticker_a": "K",
+                            "ticker_b": "K",
+                            "engine_state": "windng_down",  # typo
+                        }
+                    ],
+                }
+            )
+        )
+        with pytest.raises(GamesFullCorruptError, match="windng_down"):
+            load_saved_games_full(path=path)
+
+    def test_v1_null_engine_state_raises(self, tmp_path: Path) -> None:
+        path = tmp_path / "games_full.json"
+        path.write_text(
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "games": [
+                        {
+                            "event_ticker": "K",
+                            "ticker_a": "K",
+                            "ticker_b": "K",
+                            "engine_state": None,
+                        }
+                    ],
+                }
+            )
+        )
+        with pytest.raises(GamesFullCorruptError):
+            load_saved_games_full(path=path)
+
+    def test_save_returns_false_on_failure(self, tmp_path: Path) -> None:
+        """Round 5: save_games_full must return False (not silently swallow)
+        when the underlying write raises. Without the boolean signal,
+        callers can't tell a failed save from a success and would let
+        commit() report 'commit complete' while the snapshot is stale."""
+        # Point the save at a path that can't be written to (a file path
+        # whose parent doesn't exist and can't be created as a file)
+        bad_path = tmp_path / "nonexistent_dir" / "child" / "f.json"
+        # Make the intermediate directory unwritable by creating a file
+        # with the same name as the directory we'd try to mkdir.
+        blocker = tmp_path / "nonexistent_dir"
+        blocker.write_text("blocking file")
+        ok = save_games_full([{"event_ticker": "K", "engine_state": "active"}], path=bad_path)
+        assert ok is False
+
     def test_v1_missing_engine_state_raises(self, tmp_path: Path) -> None:
         """A v1 save without engine_state on a game entry is corrupt — we
         can't infer winding_down vs active and silently defaulting would

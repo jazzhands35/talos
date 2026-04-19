@@ -3273,8 +3273,38 @@ class TradingEngine:
                     scheduled_start=scheduled,
                 )
 
-        # Step 6: persist once
-        self._persist_active_games()
+        # Step 6: persist once. If persistence fails (disk full, antivirus
+        # lock on games_full.json, etc.), the in-memory engine state has
+        # already been mutated but the on-disk snapshot is stale. A restart
+        # at that point would lose engine_state for any newly-added pair —
+        # exactly the SURVIVOR-class bug the durability work prevents. So
+        # we run the same rollback as a step-3/4 failure: undo every side
+        # effect, then re-raise so the UI sees a hard commit failure and
+        # preserves staged_changes.
+        try:
+            self._persist_active_games()
+        except Exception as exc:
+            logger.warning(
+                "add_pairs_persistence_failed_rolling_back",
+                attempted=len(pairs),
+                exc_type=type(exc).__name__,
+                exc_msg=str(exc),
+            )
+            try:
+                await asyncio.shield(
+                    self._rollback_partial_add(
+                        pairs=pairs,
+                        added_to_adjuster=added_to_adjuster,
+                        gsr_seeded=gsr_seeded,
+                        subscribed_tickers=subscribed_tickers,
+                    )
+                )
+            except asyncio.CancelledError:
+                logger.warning(
+                    "add_pairs_rollback_interrupted",
+                    pairs=len(pairs),
+                )
+            raise
         return pairs
 
     async def _rollback_partial_add(

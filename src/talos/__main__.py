@@ -388,6 +388,11 @@ def main() -> None:
     saved_games = load_saved_games() if saved_games_full is None else []
 
     def _persist_games() -> None:
+        # Order matters: write the legacy ticker file FIRST. Even if it
+        # fails, the safety-critical games_full.json save below is the
+        # one we propagate as a hard error — the legacy file is a fast-
+        # path optimization and stale legacy state can't resurrect a
+        # winding-down pair (only games_full.json carries engine_state).
         save_games([p.event_ticker for p in game_mgr.active_games])
         games_data = []
         for p in game_mgr.active_games:
@@ -426,7 +431,15 @@ def main() -> None:
             except KeyError:
                 pass
             games_data.append(entry)
-        save_games_full(games_data)
+        ok = save_games_full(games_data)
+        if not ok:
+            # Persistence failed (disk full, antivirus lock, etc.). The
+            # safety-critical engine_state field never made it to disk —
+            # raise so callers (engine commit path, remove path) can roll
+            # back the in-memory mutation rather than report success.
+            from talos.persistence_errors import PersistenceError
+
+            raise PersistenceError("save_games_full() returned failure")
 
     game_mgr.on_change = _persist_games
 

@@ -233,6 +233,35 @@ async def test_add_pairs_rollback_runs_on_cancellation():
 
 
 @pytest.mark.asyncio
+async def test_add_pairs_rolls_back_on_persistence_failure():
+    """Round 5: if step 6 (persist) fails, the in-memory engine state was
+    mutated but the disk snapshot is stale. Rolling back avoids the
+    failure mode where a restart resurrects a winding-down pair as
+    freely tradable because engine_state never made it to disk."""
+    from talos.persistence_errors import PersistenceError
+
+    e = _engine_with_collaborators()
+    e._persist_active_games = MagicMock(
+        side_effect=PersistenceError("disk full")
+    )
+    r = ArbPairRecord(
+        event_ticker="KX-PERSIST",
+        ticker_a="KX-PERSIST",
+        ticker_b="KX-PERSIST",
+        kalshi_event_ticker="KX-PERSIST",
+        series_ticker="KX",
+        category="Mentions",
+    )
+    with pytest.raises(PersistenceError):
+        await e.add_pairs_from_selection([r.model_dump()])
+
+    # All four primitives that ran during steps 2-4 must be undone.
+    e._adjuster.remove_event.assert_called_with("KX-PERSIST")
+    e._game_status_resolver.remove.assert_called_with("KX-PERSIST")
+    e._game_manager.remove_game.assert_awaited_with("KX-PERSIST")
+
+
+@pytest.mark.asyncio
 async def test_add_pairs_persists_only_once_at_batch_end():
     e = _engine_with_collaborators()
     records = [
