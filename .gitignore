@@ -77,9 +77,20 @@ test_output*.txt
 all_sports_series.txt
 
 # Icon design iterations
-icons/
-icon.ico
-icon.svg
+icons/*
+!icons/export/
+icons/export/*
+!icons/export/icon_29.png
+!icons/export/icon_40.png
+!icons/export/icon_60.png
+!icons/export/icon_76.png
+!icons/export/icon_120.png
+!icons/export/icon_152.png
+!icons/export/icon_167.png
+!icons/export/icon_180.png
+!icons/export/icon_1024.png
+!icon.ico
+!icon.svg
 
 # One-off scripts (not in tools/)
 tennis_scanner.py
