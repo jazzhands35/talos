@@ -1095,7 +1095,8 @@ class TalosApp(App):
 
         if self._automation_config is None or not self._automation_config.tree_mode:
             self.notify(
-                "Tree mode disabled. Set tree_mode=True in config.",
+                "Tree mode disabled. Set TALOS_TREE_MODE=1 in your "
+                "environment (e.g. talos.bat / talos_exe.bat) and relaunch.",
                 severity="warning",
             )
             return

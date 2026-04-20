@@ -32,7 +32,7 @@ class SchedulePopup(ModalScreen[dict[str, str] | None]):
         align: center middle;
     }
     SchedulePopup > Vertical {
-        width: 80;
+        width: 100;
         height: auto;
         border: thick $primary;
         padding: 1 2;
@@ -42,8 +42,17 @@ class SchedulePopup(ModalScreen[dict[str, str] | None]):
         height: auto;
         margin-bottom: 1;
     }
+    SchedulePopup .event-label {
+        width: 28;
+    }
     SchedulePopup Input {
-        width: 40;
+        width: 32;
+    }
+    /* "No exit-only" needs at least 14 cells to render the full label
+    plus button border padding. Pin it so the prefill string can't
+    push it into a 2-char "No" rendering. */
+    SchedulePopup .optout-btn {
+        min-width: 16;
     }
     SchedulePopup .buttons {
         align-horizontal: right;
@@ -91,6 +100,7 @@ class SchedulePopup(ModalScreen[dict[str, str] | None]):
                         "No exit-only",
                         id=f"optout-{r.kalshi_event_ticker}",
                         variant="warning",
+                        classes="optout-btn",
                     )
             with Horizontal(classes="buttons"):
                 yield Button("Cancel", id="cancel", variant="default")
@@ -143,8 +153,20 @@ class SchedulePopup(ModalScreen[dict[str, str] | None]):
         return parsed
 
     def _collect(self) -> dict[str, str] | None:
-        """Validate all inputs. Return dict on success, None on failure."""
+        """Validate all inputs. Return dict on success, None on failure.
+
+        Collects ALL invalid rows before returning so the operator sees
+        every problem at once instead of fixing one, hitting Save, and
+        being told about the next one. Each error toast includes the
+        rejected raw value (truncated for display) so a render artifact
+        can be distinguished from a real corruption: if the toast shows
+        the same value the operator can read on screen, it's a real
+        invalid string they need to fix; if the toast shows something
+        different, the input has stale state from typing/cursor and
+        they should clear and retry.
+        """
         result: dict[str, str] = {}
+        errors: list[str] = []
         for r in self._records:
             et = r.kalshi_event_ticker
             if et in self._opt_outs:
@@ -152,22 +174,31 @@ class SchedulePopup(ModalScreen[dict[str, str] | None]):
                 continue
             inp = self._inputs.get(et)
             if inp is None:
-                return None
+                errors.append(f"{et}: input widget missing (internal bug)")
+                continue
             raw = inp.value.strip()
             if not raw:
-                self.app.notify(
-                    f"{et}: enter a time or click 'No exit-only'",
-                    severity="error",
+                errors.append(
+                    f"{et}: empty — enter a time or click 'No exit-only'",
                 )
-                return None
+                continue
             try:
                 self._parse_aware_datetime(raw)
             except ValueError:
-                self.app.notify(
-                    f"{et}: invalid ISO 8601 with timezone offset; "
+                # Truncate value to 40 chars to keep the toast readable
+                # but include enough so the operator can spot the error.
+                shown = raw if len(raw) <= 40 else raw[:37] + "..."
+                errors.append(
+                    f"{et}: invalid ISO 8601 — input is {shown!r}; "
                     "example: 2026-04-22T20:00:00-04:00",
-                    severity="error",
                 )
-                return None
+                continue
             result[et] = raw
+        if errors:
+            # Multi-error case: emit one toast per error so each one is
+            # visible and individually dismissable. (A single multiline
+            # toast renders as one giant block that can hide rows.)
+            for msg in errors:
+                self.app.notify(msg, severity="error")
+            return None
         return result
