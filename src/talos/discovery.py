@@ -456,12 +456,26 @@ class DiscoveryService:
             oi = int(float(oi_raw))
         except (ValueError, TypeError):
             oi = 0
+        # Post-March-12-2026 API cutover: integer fields were replaced by
+        # fixed-point string fields. The Market Pydantic model's
+        # _migrate_fp validator handles this for callers that go through
+        # it, but discovery constructs MarketNode directly. Mirror the
+        # open_interest_fp pattern above: prefer the _fp variant, fall
+        # back to the legacy bare field for tests / cached old data.
+        # Without this, every parsed market got volume_24h=0 — visible
+        # in Talos as the "0 / 0" volume column for hurricane markets
+        # despite real Kalshi volume.
+        vol_raw = raw.get("volume_24h_fp") or raw.get("volume_24h") or 0
+        try:
+            vol_24h = int(float(vol_raw))
+        except (ValueError, TypeError):
+            vol_24h = 0
         return MarketNode(
             ticker=raw.get("ticker", ""),
             title=raw.get("title", ""),
             yes_bid=_to_cents(raw.get("yes_bid_dollars")),
             yes_ask=_to_cents(raw.get("yes_ask_dollars")),
-            volume_24h=int(raw.get("volume_24h") or 0),
+            volume_24h=vol_24h,
             open_interest=oi,
             status=raw.get("status", "active"),
             close_time=close_dt,

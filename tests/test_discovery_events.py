@@ -96,3 +96,74 @@ async def test_fetch_events_unknown_series_returns_empty():
     ds = DiscoveryService()
     events = await ds.get_events_for_series("KXNONEXISTENT")
     assert events == {}
+
+
+# Post-March-12 API cutover: integer fields like volume_24h were removed
+# and replaced by fixed-point string fields like volume_24h_fp. The Market
+# Pydantic model handles this via its _migrate_fp validator (see
+# src/talos/models/market.py lines 62-68), but discovery._parse_market
+# constructs MarketNode directly from the raw dict and was reading bare
+# `volume_24h`. Real API responses don't include that field anymore, so
+# every parsed market got volume_24h=0 — visible in Talos as the "0 / 0"
+# volume column for hurricane markets that clearly have volume on Kalshi.
+#
+# Same author handled the FP migration correctly for open_interest
+# (open_interest_fp first, fallback to open_interest) but missed
+# volume_24h. These tests pin the post-cutover behavior.
+
+_EVENTS_SAMPLE_POST_FP_CUTOVER = [
+    {
+        "event_ticker": "KXHUR-26-T4",
+        "series_ticker": "KXHUR",
+        "title": "Number of hurricanes in 2026",
+        "sub_title": "Above 4",
+        "category": "Climate and Weather",
+        "markets": [
+            {
+                "ticker": "KXHUR-26-T4-ABV4",
+                "title": "Above 4",
+                "status": "active",
+                # Post-cutover: only volume_24h_fp is sent, not volume_24h.
+                "volume_24h_fp": "479",
+                "open_interest_fp": "524",
+                "yes_bid_dollars": "0.58",
+                "yes_ask_dollars": "0.60",
+                "close_time": "2026-12-02T04:00:00Z",
+            }
+        ],
+    },
+]
+
+
+@pytest.mark.asyncio
+async def test_fetch_events_parses_volume_24h_fp_post_cutover():
+    """Regression: post-March-12-2026 API only returns volume_24h_fp
+    (fixed-point string), not volume_24h (integer). Discovery must read
+    the _fp variant or every market displays 0 volume despite real
+    Kalshi volume."""
+    ds = DiscoveryService()
+    s = SeriesNode(
+        ticker="KXHUR",
+        title="Hurricanes",
+        category="Climate and Weather",
+        tags=[],
+        frequency="one_off",
+    )
+    ds.categories["Climate and Weather"] = CategoryNode(
+        name="Climate and Weather",
+        series_count=1,
+        series={"KXHUR": s},
+    )
+
+    with patch.object(
+        ds,
+        "_fetch_events_for_series",
+        new=AsyncMock(return_value=_EVENTS_SAMPLE_POST_FP_CUTOVER),
+    ):
+        events = await ds.get_events_for_series("KXHUR")
+
+    ev = events["KXHUR-26-T4"]
+    # 479 matches the Kalshi UI screenshot in the bug report.
+    assert ev.markets[0].volume_24h == 479
+    # Mirror open_interest assertion to lock the existing FP behavior.
+    assert ev.markets[0].open_interest == 524
