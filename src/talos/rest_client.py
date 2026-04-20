@@ -102,6 +102,47 @@ class KalshiRESTClient:
         data = await self._request("GET", f"/markets/{ticker}")
         return Market.model_validate(data["market"])
 
+    async def get_markets(
+        self,
+        *,
+        series_ticker: str | None = None,
+        event_ticker: str | None = None,
+        status: str | None = None,
+        tickers: list[str] | None = None,
+        min_close_ts: int | None = None,
+        max_close_ts: int | None = None,
+        limit: int = 100,
+        cursor: str | None = None,
+    ) -> list[Market]:
+        """Fetch a list of markets with full per-market data.
+
+        Use this (not get_events with with_nested_markets=True) whenever
+        you need volume_24h, last_price, or other per-market fields.
+        Kalshi's /events?with_nested_markets=true response strips
+        volume_24h on nested markets — discovered the hard way for the
+        hurricane series. /markets returns full Market objects via
+        Pydantic validation, so volume_24h_fp is parsed correctly.
+
+        Single page only — pass cursor for pagination if needed.
+        """
+        params: dict[str, Any] = {"limit": limit}
+        if series_ticker:
+            params["series_ticker"] = series_ticker
+        if event_ticker:
+            params["event_ticker"] = event_ticker
+        if status:
+            params["status"] = status
+        if tickers:
+            params["tickers"] = ",".join(tickers)
+        if min_close_ts is not None:
+            params["min_close_ts"] = min_close_ts
+        if max_close_ts is not None:
+            params["max_close_ts"] = max_close_ts
+        if cursor:
+            params["cursor"] = cursor
+        data = await self._request("GET", "/markets", params=params)
+        return [Market.model_validate(m) for m in data["markets"]]
+
     async def get_events(
         self,
         *,

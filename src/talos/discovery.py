@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from collections.abc import Callable
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
@@ -114,6 +115,15 @@ class DiscoveryService:
         self._rest = rest_client
         self.categories: dict[str, CategoryNode] = {}
         self._stopped = False
+        # Listeners notified when the bulk event-count fetch successfully
+        # populates `event_count` on every series. UI consumers (TreeScreen)
+        # subscribe so they can rebuild after a late-arriving fetch — the
+        # tree polling cap (~60s) used to expire silently when Kalshi rate-
+        # limited the bulk fetch into a retry. With auto-retry + this
+        # callback, a recovery 5 minutes later still re-renders the tree.
+        self._counts_populated_listeners: list[
+            Callable[[], None]
+        ] = []
 
     # ── Bootstrap ────────────────────────────────────────────────────
 
@@ -158,45 +168,100 @@ class DiscoveryService:
         # lazily via drill-ins otherwise (see get_events_for_series).
         asyncio.create_task(self._populate_event_counts_background())
 
+    # Backoff schedule (seconds) for retrying the bulk count fetch when
+    # Kalshi rate-limits or times out. Spread far enough apart that the
+    # rate bucket has time to refill, and capped at ~16 min total so a
+    # genuinely-unhealthy day doesn't burn the whole session retrying.
+    _COUNT_FETCH_RETRY_DELAYS = (30.0, 60.0, 120.0, 240.0, 480.0)
+
     async def _populate_event_counts_background(self) -> None:
-        """Run the bulk /events count fetch with a hard wall-clock cap.
+        """Run the bulk /events count fetch with retry-on-failure.
 
-        Cap protects us from cases where Kalshi's /events bucket is dry for
-        an extended window and the paginated fetch makes no forward
-        progress. Below-cap failures are logged and swallowed; counts stay
-        None and the lazy drill-in path fills them in.
+        Cap protects us from cases where Kalshi's /events bucket is dry
+        for an extended window and the paginated fetch makes no forward
+        progress. Per-attempt failures (timeout, 429, network error)
+        retry on the schedule above; only after exhausting all retries
+        do we give up. Counts staying None means the tree shows '?' and
+        every series is treated as visible — empty-series hiding only
+        kicks in once counts populate.
+
+        On final success, fire registered listeners so a late tree
+        rebuild can happen without polling forever.
         """
-        try:
-            counts = await asyncio.wait_for(
-                self._fetch_event_counts_per_series(),
-                timeout=_BULK_FETCH_TOTAL_TIMEOUT_SEC,
+        attempts = (0.0,) + self._COUNT_FETCH_RETRY_DELAYS
+        for attempt, delay in enumerate(attempts):
+            if delay > 0:
+                logger.info(
+                    "discovery_event_counts_retry_scheduled",
+                    attempt=attempt,
+                    delay_seconds=delay,
+                )
+                await asyncio.sleep(delay)
+            if self._stopped:
+                return
+            try:
+                counts = await asyncio.wait_for(
+                    self._fetch_event_counts_per_series(),
+                    timeout=_BULK_FETCH_TOTAL_TIMEOUT_SEC,
+                )
+            except TimeoutError:
+                logger.warning(
+                    "discovery_event_counts_timeout",
+                    attempt=attempt,
+                    timeout_seconds=_BULK_FETCH_TOTAL_TIMEOUT_SEC,
+                    will_retry=attempt < len(self._COUNT_FETCH_RETRY_DELAYS),
+                )
+                continue
+            except Exception as exc:
+                logger.warning(
+                    "discovery_event_counts_failed",
+                    attempt=attempt,
+                    exc_type=type(exc).__name__,
+                    exc_msg=str(exc),
+                    will_retry=attempt < len(self._COUNT_FETCH_RETRY_DELAYS),
+                )
+                continue
+
+            for cat in self.categories.values():
+                for series in cat.series.values():
+                    series.event_count = counts.get(series.ticker, 0)
+            logger.info(
+                "discovery_event_counts_populated",
+                attempt=attempt,
+                series_with_events=sum(
+                    1
+                    for cat in self.categories.values()
+                    for s in cat.series.values()
+                    if (s.event_count or 0) > 0
+                ),
             )
-        except TimeoutError:
-            logger.warning(
-                "discovery_event_counts_timeout",
-                timeout_seconds=_BULK_FETCH_TOTAL_TIMEOUT_SEC,
-            )
-            return
-        except Exception as exc:
-            logger.warning(
-                "discovery_event_counts_failed",
-                exc_type=type(exc).__name__,
-                exc_msg=str(exc),
-            )
+            # Notify listeners (e.g. TreeScreen) that counts arrived so
+            # they can rebuild even if their own polling already stopped.
+            for listener in list(self._counts_populated_listeners):
+                try:
+                    listener()
+                except Exception:
+                    logger.warning(
+                        "counts_populated_listener_failed",
+                        exc_info=True,
+                    )
             return
 
-        for cat in self.categories.values():
-            for series in cat.series.values():
-                series.event_count = counts.get(series.ticker, 0)
-        logger.info(
-            "discovery_event_counts_populated",
-            series_with_events=sum(
-                1
-                for cat in self.categories.values()
-                for s in cat.series.values()
-                if (s.event_count or 0) > 0
-            ),
+        logger.warning(
+            "discovery_event_counts_giving_up_after_retries",
+            attempts=len(attempts),
         )
+
+    def add_counts_populated_listener(
+        self, listener: Callable[[], None]
+    ) -> None:
+        """Register a callback to fire after the bulk count fetch
+        successfully populates event_count on every series. Safe to call
+        before bootstrap. If the fetch already succeeded by the time the
+        caller registers, the listener will NOT fire retroactively —
+        callers should check `categories` first if they need a snapshot.
+        """
+        self._counts_populated_listeners.append(listener)
 
     # ── Internals ────────────────────────────────────────────────────
 

@@ -63,3 +63,75 @@ async def test_bootstrap_failure_leaves_empty_cache():
     with patch.object(ds, "_fetch_all_series", new=AsyncMock(side_effect=RuntimeError("kaboom"))):
         await ds.bootstrap()
     assert ds.categories == {}
+
+
+@pytest.mark.asyncio
+async def test_event_counts_retry_on_transient_failure_eventually_succeeds():
+    """2026-04-19 hurricane bug: when Kalshi rate-limits the bulk count
+    fetch, the previous code logged once and gave up forever — leaving
+    every series displayed as '?' and every empty series visible. The
+    fix retries with backoff. Test: first attempt fails, second succeeds;
+    counts populate and listener fires."""
+    ds = DiscoveryService()
+    # Skip the actual sleep delays so the test runs fast.
+    ds._COUNT_FETCH_RETRY_DELAYS = (0.0, 0.0)  # type: ignore[attr-defined]
+
+    # Pre-populate categories so the populate loop has something to update.
+    from talos.models.tree import CategoryNode, SeriesNode
+
+    s = SeriesNode(
+        ticker="KXHUR",
+        title="Hurricanes",
+        category="Climate",
+        tags=[],
+        frequency="one_off",
+    )
+    ds.categories["Climate"] = CategoryNode(
+        name="Climate",
+        series_count=1,
+        series={"KXHUR": s},
+    )
+
+    # First attempt raises (simulating 429); second returns counts.
+    fetch_results = [RuntimeError("rate limited"), {"KXHUR": 7}]
+
+    async def _fake_fetch():
+        result = fetch_results.pop(0)
+        if isinstance(result, BaseException):
+            raise result
+        return result
+
+    fired: list[bool] = []
+    ds.add_counts_populated_listener(lambda: fired.append(True))
+
+    with patch.object(ds, "_fetch_event_counts_per_series", new=_fake_fetch):
+        await ds._populate_event_counts_background()
+
+    assert s.event_count == 7
+    assert fired == [True]
+
+
+@pytest.mark.asyncio
+async def test_event_counts_retry_exhaustion_does_not_fire_listener():
+    """If every retry attempt fails, counts stay None and listeners
+    must NOT fire (caller's contract: listener fires on success only)."""
+    ds = DiscoveryService()
+    ds._COUNT_FETCH_RETRY_DELAYS = (0.0, 0.0)  # type: ignore[attr-defined]
+
+    from talos.models.tree import CategoryNode, SeriesNode
+
+    s = SeriesNode(ticker="KXA", title="A", category="C", tags=[], frequency="one_off")
+    ds.categories["C"] = CategoryNode(name="C", series_count=1, series={"KXA": s})
+
+    fired: list[bool] = []
+    ds.add_counts_populated_listener(lambda: fired.append(True))
+
+    with patch.object(
+        ds,
+        "_fetch_event_counts_per_series",
+        new=AsyncMock(side_effect=RuntimeError("perma-down")),
+    ):
+        await ds._populate_event_counts_background()
+
+    assert s.event_count is None  # never populated
+    assert fired == []

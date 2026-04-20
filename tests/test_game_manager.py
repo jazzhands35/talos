@@ -644,7 +644,15 @@ class TestSeriesTicker:
         assert result.series_ticker == ""
 
     async def test_refresh_volumes_uses_series_ticker(self) -> None:
-        """refresh_volumes() uses pair.series_ticker when set, not event_ticker prefix."""
+        """refresh_volumes() uses pair.series_ticker when set, not event_ticker prefix.
+
+        Calls /markets (not /events?with_nested_markets=true) because Kalshi
+        does NOT include volume on nested markets in the events response —
+        it only includes volume on /markets responses. Hurricane bug
+        (2026-04-19): nested response strips volume_24h entirely so even
+        with the discovery FP migration fix, refresh_volumes via /events
+        always saw volume_24h=None and never updated _volumes_24h.
+        """
         rest, feed, scanner = self._make_mock_deps()
         gm = GameManager(rest, feed, scanner)
 
@@ -661,14 +669,15 @@ class TestSeriesTicker:
         })
         assert result is not None
 
-        rest.get_events = AsyncMock(return_value=[])
+        rest.get_markets = AsyncMock(return_value=[])
         await gm.refresh_volumes()
 
-        # Should call get_events with series_ticker="KXNONSPORT" (from pair.series_ticker)
-        rest.get_events.assert_called_once_with(
+        # Must call /markets (returns full Market with volume_24h),
+        # NOT /events?with_nested_markets=true (returns nested markets
+        # without volume).
+        rest.get_markets.assert_called_once_with(
             series_ticker="KXNONSPORT",
             status="open",
-            with_nested_markets=True,
             limit=200,
         )
 
@@ -685,15 +694,55 @@ class TestSeriesTicker:
         })
         assert result is not None
 
-        rest.get_events = AsyncMock(return_value=[])
+        rest.get_markets = AsyncMock(return_value=[])
         await gm.refresh_volumes()
 
-        rest.get_events.assert_called_once_with(
+        rest.get_markets.assert_called_once_with(
             series_ticker="KXNHLGAME",
             status="open",
-            with_nested_markets=True,
             limit=200,
         )
+
+    async def test_refresh_volumes_populates_volume_from_markets_endpoint(self) -> None:
+        """End-to-end: refresh_volumes via /markets actually populates
+        _volumes_24h. This is the hurricane-bug regression test —
+        previously refresh_volumes via /events?with_nested_markets=true
+        always saw volume=None for non-sports markets and silently
+        skipped the update."""
+        rest, feed, scanner = self._make_mock_deps()
+        gm = GameManager(rest, feed, scanner)
+
+        # Restore a non-sports pair — KXHURCTOTMAJ scenario from the bug.
+        result = gm.restore_game({
+            "event_ticker": "KXHURCTOTMAJ-26DEC01-T4",
+            "ticker_a": "KXHURCTOTMAJ-26DEC01-T4",
+            "ticker_b": "KXHURCTOTMAJ-26DEC01-T4",
+            "side_a": "yes",
+            "side_b": "no",
+            "kalshi_event_ticker": "KXHURCTOTMAJ-26DEC01",
+            "series_ticker": "KXHURCTOTMAJ",
+        })
+        assert result is not None
+        # No prior volume seeded
+        assert "KXHURCTOTMAJ-26DEC01-T4" not in gm.volumes_24h
+
+        # /markets endpoint returns full Market data including volume.
+        rest.get_markets = AsyncMock(
+            return_value=[
+                Market(
+                    ticker="KXHURCTOTMAJ-26DEC01-T4",
+                    event_ticker="KXHURCTOTMAJ-26DEC01",
+                    title="Above 4",
+                    status="active",
+                    volume_24h=479,  # matches Kalshi UI screenshot from bug report
+                ),
+            ]
+        )
+
+        await gm.refresh_volumes()
+
+        # Volume now populated from the API response.
+        assert gm.volumes_24h["KXHURCTOTMAJ-26DEC01-T4"] == 479
 
 
 def _make_nonsports_event(

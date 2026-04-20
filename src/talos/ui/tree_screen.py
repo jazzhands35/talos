@@ -271,6 +271,40 @@ class TreeScreen(Screen):
             self._bootstrap_polls = 0
             self.set_interval(0.5, self._poll_for_bootstrap)
 
+        # Subscribe to discovery's late-arrival callback. Without this,
+        # if the bulk count fetch's first attempt fails (rate-limited)
+        # and the retry succeeds 30+ seconds later, the polling loop
+        # would already have given up at 60s — but now never below this
+        # one — and the tree would show '?' for every series until the
+        # user manually refreshed. The listener fires only on success
+        # AND only after the polling cap, so the cost is at most one
+        # extra rebuild on the rare retry-success path.
+        if self._discovery is not None and hasattr(
+            self._discovery, "add_counts_populated_listener"
+        ):
+            self._discovery.add_counts_populated_listener(
+                self._on_counts_populated_async,
+            )
+
+    def _on_counts_populated_async(self) -> None:
+        """Discovery callback: rebuild the tree on the Textual loop.
+
+        Called from the discovery background task on whatever loop it's
+        on (typically the same Textual loop, but we marshal explicitly
+        to be safe — discovery has no contract requiring same-loop).
+        """
+        loop = getattr(self, "_app_loop", None)
+        if loop is None:
+            return
+        loop.call_soon_threadsafe(self._rebuild_tree_after_counts)
+
+    def _rebuild_tree_after_counts(self) -> None:
+        """Inner handler — runs on the Textual loop. Idempotent."""
+        if not self._counts_seen and self._any_counts_populated():
+            self._rebuild_tree()
+            self._counts_seen = True
+            self._bootstrap_done = True
+
     def _any_counts_populated(self) -> bool:
         """Cheap check: has any series got a non-None event_count yet?
         Used to decide when to rebuild the tree after the async background
@@ -641,8 +675,20 @@ class TreeScreen(Screen):
         return current
 
     async def action_manual_refresh(self) -> None:
-        if self._discovery is not None:
-            await self._discovery.bootstrap()
+        if self._discovery is None:
+            return
+        # Reset polling state so a fresh bootstrap+count-fetch can be
+        # observed by _poll_for_bootstrap. Without this, pressing 'r'
+        # after the initial poll cap (60s) would re-fire the bulk fetch
+        # but the tree would never rebuild — _bootstrap_done is True
+        # and _counts_seen is False forever. Reset and re-arm so the
+        # post-refresh count populate triggers a tree rebuild.
+        self._bootstrap_done = False
+        self._counts_seen = self._any_counts_populated()
+        self._bootstrap_polls = 0
+        if not (self._categories_seen and self._counts_seen):
+            self.set_interval(0.5, self._poll_for_bootstrap)
+        await self._discovery.bootstrap()
 
     def toggle_event_by_ticker(self, kalshi_event_ticker: str) -> None:
         """State-aware toggle.
@@ -1095,6 +1141,20 @@ class TreeScreen(Screen):
 
         # 4. Clear staged.
         self.staged_changes = StagedChanges.empty()
+
+        # 5. Trigger an immediate volume refresh for newly-added pairs so
+        # the operator sees real 24h volume in the OpportunitiesTable
+        # within seconds, not at the next hourly refresh tick. Without
+        # this, freshly-added hurricane pairs displayed "0 / 0" volume
+        # for up to 60 minutes after adding (the 2026-04-19 bug). Fire
+        # as a background task so commit() returns immediately and the
+        # refresh's ~1s API call doesn't block the UI worker.
+        if added and self._engine is not None and hasattr(
+            self._engine, "refresh_volumes"
+        ):
+            import asyncio as _asyncio
+            _asyncio.create_task(self._engine.refresh_volumes())
+
         return True
 
     def on_event_fully_removed(self, kalshi_event_ticker: str) -> None:

@@ -692,6 +692,14 @@ class GameManager:
         """Re-fetch 24h volume for all monitored markets, batched by series.
 
         Prioritizes series with missing volume data so the UI fills in fast.
+
+        Uses /markets (not /events?with_nested_markets=true) because the
+        Kalshi /events response strips volume_24h on nested markets for
+        non-sports series. Discovered via the hurricane-series bug
+        (2026-04-19): pairs added via the tree had _volumes_24h seeded
+        with 0 (discovery's nested-markets parse), and refresh_volumes
+        via /events also returned None for volume, so the UI showed 0
+        volume forever.
         """
         # Group active games by series ticker, track which have missing data
         series_missing: set[str] = set()
@@ -710,13 +718,12 @@ class GameManager:
 
         sem = asyncio.Semaphore(4)
 
-        async def _fetch(series: str) -> list[Event]:
+        async def _fetch(series: str) -> list[Market]:
             async with sem:
                 try:
-                    return await self._rest.get_events(
+                    return await self._rest.get_markets(
                         series_ticker=series,
                         status="open",
-                        with_nested_markets=True,
                         limit=200,
                     )
                 except Exception:
@@ -724,10 +731,9 @@ class GameManager:
 
         results = await asyncio.gather(*(_fetch(s) for s in ordered))
         for batch in results:
-            for event in batch:
-                for m in event.markets:
-                    if m.volume_24h is not None:
-                        self._volumes_24h[m.ticker] = m.volume_24h
+            for m in batch:
+                if m.volume_24h is not None:
+                    self._volumes_24h[m.ticker] = m.volume_24h
 
     async def scan_events(self, scan_mode: str = "sports") -> list[Event]:
         """Discover all open arb-eligible events not already monitored."""

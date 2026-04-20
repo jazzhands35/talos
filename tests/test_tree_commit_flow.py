@@ -673,6 +673,72 @@ def test_on_mount_registers_listener_before_rebuild_tree():
     assert register_idx < order.index("load_deferred")
 
 
+# ─── Hurricane bug fix: commit triggers refresh_volumes ───────────────────
+
+
+@pytest.mark.asyncio
+async def test_commit_triggers_refresh_volumes_on_added_pairs():
+    """2026-04-19 hurricane bug, half 2: even after fixing refresh_volumes
+    to use /markets, freshly-added pairs would still show 0 volume for
+    up to 60 minutes (the next hourly refresh tick). commit() must
+    trigger an immediate refresh_volumes after a successful add so the
+    operator sees real volume within seconds."""
+    engine = _FakeEngine()
+    engine.refresh_volumes = AsyncMock(return_value=None)
+    added_record = ArbPairRecord(
+        event_ticker="K-1",
+        ticker_a="K-1",
+        ticker_b="K-1",
+        kalshi_event_ticker="K",
+        series_ticker="KX",
+        category="Mentions",
+    )
+    engine.add_pairs_from_selection = AsyncMock(return_value=[added_record])
+    md = _FakeMetadata()
+    md.manual_event_start = lambda _et: "none"  # type: ignore[method-assign]
+    screen = _make_screen(engine, md)
+    screen.staged_changes = StagedChanges(to_add=[added_record])
+
+    completed = await screen.commit()
+    assert completed is True
+
+    # Yield control so the create_task() scheduled refresh runs.
+    import asyncio as _asyncio
+    await _asyncio.sleep(0)
+
+    engine.refresh_volumes.assert_awaited()
+
+
+@pytest.mark.asyncio
+async def test_commit_does_not_trigger_refresh_when_no_adds():
+    """Symmetric: a remove-only commit (no to_add) should NOT trigger a
+    refresh — there are no new tickers needing volume seeding, and an
+    extra refresh just burns rate-limit budget."""
+    engine = _FakeEngine()
+    engine.refresh_volumes = AsyncMock(return_value=None)
+    engine.remove_pairs_from_selection = AsyncMock(return_value=[
+        RemoveOutcome(
+            pair_ticker="K-1",
+            kalshi_event_ticker="K",
+            status="removed",
+            reason="clean",
+        ),
+    ])
+    md = _FakeMetadata()
+    screen = _make_screen(engine, md)
+    screen.staged_changes = StagedChanges(
+        to_remove=[("K-1", "K")],
+        to_set_unticked=["K"],
+    )
+
+    completed = await screen.commit()
+    assert completed is True
+    import asyncio as _asyncio
+    await _asyncio.sleep(0)
+
+    engine.refresh_volumes.assert_not_awaited()
+
+
 # ─── Round-5 review fix #1: commit() rejects engine 'failed' outcomes ────
 
 
