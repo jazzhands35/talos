@@ -3251,7 +3251,14 @@ class TradingEngine:
             try:
                 await asyncio.shield(
                     self._rollback_partial_add(
-                        pairs=pairs,
+                        # Round-5 review fix #2: rollback must only undo
+                        # side effects of the CURRENT call. Pre-existing
+                        # pairs (returned by restore_game on duplicate)
+                        # were wired by a prior successful add — their
+                        # adjuster/GSR/feed state is correct. Removing
+                        # them here would erase legitimate engine state
+                        # the user did not ask to delete.
+                        pairs=new_pairs,
                         added_to_adjuster=added_to_adjuster,
                         gsr_seeded=gsr_seeded,
                         subscribed_tickers=subscribed_tickers,
@@ -3263,15 +3270,19 @@ class TradingEngine:
                 # least logged what was leaked.
                 logger.warning(
                     "add_pairs_rollback_interrupted",
-                    pairs=len(pairs),
+                    pairs=len(new_pairs),
                 )
             raise
 
         # Step 5: data_collector — only on the happy path. log_game_add
         # writes an audit row that has no companion log_game_remove, so on
         # rollback we simply don't emit it (no phantom audit entry).
+        # Round-5 review fix #3: iterate new_pairs (not pairs) so a retry
+        # over an already-monitored pair does NOT emit a duplicate audit
+        # row. The round-3 toast claim ("retry has zero downstream side
+        # effects") only holds if step 5 also dedupes.
         if self._data_collector is not None:
-            for pair in pairs:
+            for pair in new_pairs:
                 gs = (
                     self._game_status_resolver.get(pair.event_ticker)
                     if self._game_status_resolver
@@ -3306,14 +3317,19 @@ class TradingEngine:
         except Exception as exc:
             logger.warning(
                 "add_pairs_persistence_failed_rolling_back",
-                attempted=len(pairs),
+                attempted=len(new_pairs),
                 exc_type=type(exc).__name__,
                 exc_msg=str(exc),
             )
             try:
                 await asyncio.shield(
                     self._rollback_partial_add(
-                        pairs=pairs,
+                        # Round-5 review fix #2 (second site): same
+                        # rationale as the step-3/4 rollback above —
+                        # pass new_pairs only so a retry-with-
+                        # existing-pair persist failure does NOT
+                        # tear down the pre-existing pair.
+                        pairs=new_pairs,
                         added_to_adjuster=added_to_adjuster,
                         gsr_seeded=gsr_seeded,
                         subscribed_tickers=subscribed_tickers,
@@ -3322,7 +3338,7 @@ class TradingEngine:
             except asyncio.CancelledError:
                 logger.warning(
                     "add_pairs_rollback_interrupted",
-                    pairs=len(pairs),
+                    pairs=len(new_pairs),
                 )
             raise
         return pairs

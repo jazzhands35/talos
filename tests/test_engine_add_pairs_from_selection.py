@@ -391,3 +391,129 @@ async def test_add_pairs_retry_is_idempotent_for_already_present_pairs():
     assert e._game_status_resolver.resolve_batch.await_count == (
         resolve_batch_after_first
     )
+
+
+@pytest.mark.asyncio
+async def test_add_pairs_retry_does_not_emit_duplicate_log_game_add():
+    """Round-5 review fix #3: step 5 (data_collector.log_game_add) must
+    iterate new_pairs, not pairs. The round-3 idempotency test never
+    wired _data_collector and missed this — a successful duplicate
+    retry was emitting a second audit row, contradicting the round-1
+    toast claim that "retry has zero downstream side effects."
+
+    The audit row has no companion log_game_remove, so a phantom
+    duplicate would skew downstream analytics that key off this table."""
+    e = _engine_with_collaborators()
+    real_games: dict[str, ArbPair] = {}
+
+    def _restore(record):
+        et = record["event_ticker"]
+        if et in real_games:
+            return real_games[et]
+        pair = ArbPair(
+            event_ticker=et,
+            ticker_a=record["ticker_a"],
+            ticker_b=record["ticker_b"],
+            side_a=record.get("side_a", "yes"),
+            side_b=record.get("side_b", "no"),
+            source=record.get("source"),
+        )
+        real_games[et] = pair
+        return pair
+
+    e._game_manager.restore_game = MagicMock(side_effect=_restore)
+    e._game_manager._games = real_games
+    # Wire a real-ish data_collector so log_game_add gets invoked.
+    e._data_collector = MagicMock()
+    e._data_collector.log_game_add = MagicMock()
+
+    r = ArbPairRecord(
+        event_ticker="KXFEDMENTION-26APR-YIEL",
+        ticker_a="KXFEDMENTION-26APR-YIEL",
+        ticker_b="KXFEDMENTION-26APR-YIEL",
+        kalshi_event_ticker="KXFEDMENTION-26APR",
+        series_ticker="KXFEDMENTION",
+        category="Mentions",
+    ).model_dump()
+
+    # First call — exactly one audit row.
+    await e.add_pairs_from_selection([r])
+    assert e._data_collector.log_game_add.call_count == 1
+
+    # Second call (retry) — pair is already in _games, so no new audit row.
+    await e.add_pairs_from_selection([r])
+    assert e._data_collector.log_game_add.call_count == 1
+
+
+@pytest.mark.asyncio
+async def test_add_pairs_retry_persist_failure_does_not_remove_existing_pair():
+    """Round-5 review fix #2: when a retry of an already-monitored pair
+    fails at the final persist step, _rollback_partial_add must NOT
+    call game_manager.remove_game on the pre-existing pair. The pair
+    was wired by a prior successful add and its presence is correct.
+    Removing it would erase legitimate engine state the user did not
+    ask to delete (and silently break any positions still open).
+
+    Pre-fix, both rollback call sites passed `pairs=pairs` (which
+    includes the pre-existing pair returned by restore_game). The fix
+    is to pass `pairs=new_pairs` so rollback only undoes side effects
+    of the current call."""
+    from talos.persistence_errors import PersistenceError
+
+    e = _engine_with_collaborators()
+    real_games: dict[str, ArbPair] = {}
+    remove_game_calls: list[str] = []
+
+    def _restore(record):
+        et = record["event_ticker"]
+        if et in real_games:
+            return real_games[et]
+        pair = ArbPair(
+            event_ticker=et,
+            ticker_a=record["ticker_a"],
+            ticker_b=record["ticker_b"],
+            side_a=record.get("side_a", "yes"),
+            side_b=record.get("side_b", "no"),
+            source=record.get("source"),
+        )
+        real_games[et] = pair
+        return pair
+
+    async def _remove_game(pair_ticker):
+        remove_game_calls.append(pair_ticker)
+        real_games.pop(pair_ticker, None)
+
+    e._game_manager.restore_game = MagicMock(side_effect=_restore)
+    e._game_manager._games = real_games
+    e._game_manager.remove_game = AsyncMock(side_effect=_remove_game)
+
+    r = ArbPairRecord(
+        event_ticker="KXFEDMENTION-26APR-YIEL",
+        ticker_a="KXFEDMENTION-26APR-YIEL",
+        ticker_b="KXFEDMENTION-26APR-YIEL",
+        kalshi_event_ticker="KXFEDMENTION-26APR",
+        series_ticker="KXFEDMENTION",
+        category="Mentions",
+    ).model_dump()
+
+    # First call — succeeds, pair lands in _games.
+    await e.add_pairs_from_selection([r])
+    assert "KXFEDMENTION-26APR-YIEL" in real_games
+    assert remove_game_calls == []  # nothing rolled back
+
+    # Second call (retry) — make persist fail at the final step. The
+    # rollback that follows must not remove the pre-existing pair.
+    e._persist_active_games = MagicMock(
+        side_effect=PersistenceError("disk full")
+    )
+
+    with pytest.raises(PersistenceError):
+        await e.add_pairs_from_selection([r])
+
+    # CRITICAL contract: rollback did NOT touch the pre-existing pair.
+    # Pre-fix, remove_game_calls would contain the pair_ticker because
+    # _rollback_partial_add iterated `pairs` (which included it).
+    assert remove_game_calls == []
+    # And the pair is still in _games (user's prior successful add is
+    # still durable in memory).
+    assert "KXFEDMENTION-26APR-YIEL" in real_games

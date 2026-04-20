@@ -975,6 +975,45 @@ class TreeScreen(Screen):
                     )
                 return False
 
+        # 2.5 Round-5 review fix #1: scan remove_outcomes for any
+        # status='failed' before applying deferred/applied unticked
+        # metadata. The engine's per-pair `except Exception` records a
+        # failed outcome and continues — without this gate, commit()
+        # would fall into the deferred branch, write a pending untick,
+        # clear staging, return True, and notify "Commit complete." for
+        # a pair that is still live (still in GameManager and trading).
+        # The pair-level failure semantics: pair stays in _games, no
+        # adjuster/feed cleanup ran, retry from a re-commit will hit
+        # the same code path. Toast preserves staging so user can fix
+        # the underlying cause and retry.
+        failed_outcomes = [
+            o for o in remove_outcomes if o.status == "failed"
+        ]
+        if failed_outcomes:
+            failed_pair_tickers = sorted(
+                {o.pair_ticker for o in failed_outcomes}
+            )
+            sample_reason = next(
+                (o.reason for o in failed_outcomes if o.reason),
+                "no reason recorded",
+            )
+            _log.warning(
+                "tree_commit_remove_outcome_failed",
+                pair_tickers=failed_pair_tickers,
+                count=len(failed_outcomes),
+                sample_reason=sample_reason,
+            )
+            self.app.notify(
+                f"Remove failed for {len(failed_outcomes)} pair(s): "
+                f"{', '.join(failed_pair_tickers[:3])}"
+                f"{' …' if len(failed_pair_tickers) > 3 else ''}. "
+                f"Reason: {sample_reason}. Pairs are still live; staged "
+                "changes preserved — fix the underlying cause and press "
+                "'c' again to retry.",
+                severity="error",
+            )
+            return False
+
         # 3. Apply deferred/applied unticked per §5.1a rules.
         #    - set_unticked applied when ALL staged pairs for the event came
         #      back "removed". Mixed/winding → defer via _deferred_set_unticked.

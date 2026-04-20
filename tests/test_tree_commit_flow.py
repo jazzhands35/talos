@@ -671,3 +671,57 @@ def test_on_mount_registers_listener_before_rebuild_tree():
     register_idx = order.index("register")
     assert register_idx < order.index("rebuild")
     assert register_idx < order.index("load_deferred")
+
+
+# ─── Round-5 review fix #1: commit() rejects engine 'failed' outcomes ────
+
+
+@pytest.mark.asyncio
+async def test_commit_failed_remove_outcome_preserves_staging_and_skips_metadata(
+    monkeypatch,
+):
+    """Round-5 review fix #1: TradingEngine.remove_pairs_from_selection()
+    converts non-persistence per-pair errors into RemoveOutcome(status=
+    'failed') and continues. Without an explicit gate in commit(), the
+    failed pair would fall through to the deferred branch — pending
+    untick written to disk, staging cleared, return True, "Commit
+    complete." toast — even though the pair is still live in
+    GameManager and trading. The fix scans remove_outcomes for any
+    status=='failed' before metadata application; if found, return
+    False, preserve staging, do NOT write any untick metadata."""
+    engine = _FakeEngine()
+    engine.remove_pairs_from_selection.return_value = [
+        RemoveOutcome(
+            pair_ticker="K-1",
+            kalshi_event_ticker="K",
+            status="failed",
+            reason="unsubscribe boom",
+        ),
+    ]
+    md = _FakeMetadata()
+    screen = _make_screen(engine, md)
+    app_stub = _AppStub()
+    monkeypatch.setattr(TreeScreen, "app", property(lambda _self: app_stub))
+    original = StagedChanges(
+        to_remove=[("K-1", "K")],
+        to_set_unticked=["K"],
+    )
+    screen.staged_changes = original
+
+    completed = await screen.commit()
+
+    # Contract 1: hard failure — return False, preserve staging.
+    assert completed is False
+    assert not screen.staged_changes.is_empty()
+    assert screen.staged_changes.to_set_unticked == ["K"]
+    # Contract 2: NO metadata writes for the failed event. Pre-fix,
+    # the deferred branch would have written set_deliberately_unticked_pending
+    # and added "K" to _deferred_set_unticked.
+    assert md.applied == []  # no immediate apply
+    assert "K" not in screen._deferred_set_unticked
+    # Contract 3: toast surfaces the failure with the pair tickers and
+    # reason so the operator can act.
+    assert any(
+        "K-1" in m and ("Remove failed" in m or "still live" in m)
+        for m, _ in app_stub.notifications
+    )
