@@ -4,13 +4,14 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Callable
+from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
 from urllib.parse import urlparse
 
 import structlog
 
 from talos.errors import KalshiAPIError
-from talos.fees import maker_fee_rate
+from talos.fees import coerce_persisted_fee_rate, effective_fee_rate
 from talos.market_feed import MarketFeed
 from talos.models.market import Event, Market
 from talos.models.strategy import ArbPair
@@ -214,6 +215,54 @@ class GameManager:
         self._leg_labels: dict[str, tuple[str, str]] = {}
         self._volumes_24h: dict[str, int] = {}  # market_ticker -> 24h volume
         self.on_change: Callable[[], None] | None = None
+        # Stack of saved on_change callbacks during nested suppression.
+        # Stack-based (vs single-slot) so nested `with suppress_on_change()`
+        # blocks correctly restore the OUTER callback on exit. Used by
+        # engine._persist_active_games(force_during_suppress=True) to
+        # bypass the suppression for safety-critical winding_down persist.
+        self._suppressed_on_change_stack: list[Callable[[], None] | None] = []
+
+    @contextmanager
+    def suppress_on_change(self):
+        """Pause on_change emission within a batch.
+
+        Engine batch paths (add_pairs_from_selection, remove_pairs_from_selection)
+        call this to prevent per-pair save_games_full writes during restore/
+        remove loops. A single final persist runs in Engine._persist_active_games
+        at batch end.
+
+        Non-batch callers (URL-add via add_games, clear_all_games, UI
+        re-renders) are unaffected — they keep firing on_change per-pair.
+
+        Stack-based to support nesting: each enter pushes the current
+        callback (which may itself be None inside a nested suppress);
+        exit pops and restores. The bypass accessor `suppressed_on_change`
+        walks the stack for the nearest non-None entry.
+        """
+        self._suppressed_on_change_stack.append(self.on_change)
+        self.on_change = None
+        try:
+            yield
+        finally:
+            self.on_change = self._suppressed_on_change_stack.pop()
+
+    @property
+    def suppressed_on_change(self) -> Callable[[], None] | None:
+        """Return the nearest saved non-None on_change callback during
+        suppression, walking outward through the stack. Used by the
+        engine's force_during_suppress path to bypass suppression for
+        safety-critical persists.
+
+        Round-3 (v0.1.1) of the planning loop: in nested suppression the
+        inner stack entries are None (because the outer suppression
+        already cleared on_change to None before the inner suppress
+        pushed). Returning the top would falsely report "no writer wired"
+        even though an outer callback is preserved deeper in the stack.
+        """
+        for entry in reversed(self._suppressed_on_change_stack):
+            if entry is not None:
+                return entry
+        return None
 
     def is_blacklisted(self, ticker: str) -> bool:
         """Check if a ticker matches any blacklist entry (prefix or exact)."""
@@ -319,7 +368,7 @@ class GameManager:
         try:
             series = await self._rest.get_series(event.series_ticker)
             fee_type = series.fee_type
-            fee_rate = maker_fee_rate(series.fee_type, series.fee_multiplier)
+            fee_rate = effective_fee_rate(series.fee_type)
             logger.info(
                 "series_fee_info",
                 series=event.series_ticker,
@@ -401,7 +450,7 @@ class GameManager:
         try:
             series = await self._rest.get_series(event.series_ticker)
             fee_type = series.fee_type
-            fee_rate = maker_fee_rate(series.fee_type, series.fee_multiplier)
+            fee_rate = effective_fee_rate(series.fee_type)
         except Exception:
             logger.warning(
                 "series_fee_fetch_failed", series=event.series_ticker, exc_info=True,
@@ -483,6 +532,15 @@ class GameManager:
         series_ticker = str(data.get("series_ticker", ""))
         talos_id = int(data.get("talos_id", 0))
 
+        # Plumb source / engine_state through from the persisted record.
+        # Without this, a crash/restart while a pair was winding_down
+        # silently restored it as engine_state="active" (ArbPair default),
+        # the engine resumed normal trading, and the documented restart-
+        # safety invariant of this branch would be FALSE. _setup_initial_games
+        # calls _apply_persisted_engine_state on each restored pair to
+        # re-arm _winding_down / _exit_only_events from these fields.
+        persisted_source = data.get("source")
+        persisted_engine_state = str(data.get("engine_state", "active"))
         pair = ArbPair(
             talos_id=talos_id,
             event_ticker=event_ticker,
@@ -493,7 +551,7 @@ class GameManager:
             kalshi_event_ticker=kalshi_event_ticker,
             series_ticker=series_ticker,
             fee_type=str(data.get("fee_type", "quadratic_with_maker_fees")),
-            fee_rate=maker_fee_rate(
+            fee_rate=coerce_persisted_fee_rate(
                 str(data.get("fee_type", "quadratic_with_maker_fees")),
                 float(data.get("fee_rate", 0.0175)),
             ),
@@ -503,6 +561,8 @@ class GameManager:
                 if data.get("expected_expiration_time")
                 else None
             ),
+            source=str(persisted_source) if persisted_source is not None else None,
+            engine_state=persisted_engine_state,
         )
         self._scanner.add_pair(
             event_ticker,
@@ -580,18 +640,33 @@ class GameManager:
         return pairs
 
     async def remove_game(self, event_ticker: str) -> None:
-        """Remove a game from monitoring."""
-        pair = self._games.pop(event_ticker, None)
+        """Remove a game from monitoring.
+
+        Order matters: unsubscribe FIRST (the only step that can fail
+        with a non-trivial cause — network/WS error), then mutate the
+        local dicts. If unsubscribe raises, _games still contains the
+        pair so a retry can complete the removal cleanly. The previous
+        order popped the pair before unsubscribing, which on failure
+        left the WS subscription orphaned and made the second remove
+        attempt return early (not_found) — silently desynchronizing
+        engine state from live subscriptions.
+        """
+        pair = self._games.get(event_ticker)
         if pair is None:
             return
+        await self._feed.unsubscribe(pair.ticker_a)
+        if pair.ticker_b != pair.ticker_a:
+            await self._feed.unsubscribe(pair.ticker_b)
+
+        # Unsubscribes succeeded — local state mutation below is sync and
+        # cannot fail in any meaningful way (dict.pop is total).
+        self._games.pop(event_ticker, None)
         self._labels.pop(event_ticker, None)
         self._subtitles.pop(event_ticker, None)
         self._leg_labels.pop(event_ticker, None)
         self._volumes_24h.pop(pair.ticker_a, None)
         self._volumes_24h.pop(pair.ticker_b, None)
         self._scanner.remove_pair(event_ticker)
-        await self._feed.unsubscribe(pair.ticker_a)
-        await self._feed.unsubscribe(pair.ticker_b)
         if self.on_change:
             self.on_change()
         logger.info("game_removed", event_ticker=event_ticker)

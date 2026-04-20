@@ -20,12 +20,15 @@ from textual.widgets._data_table import CellDoesNotExist
 
 from talos.auto_accept import ExecutionMode
 from talos.auto_accept_log import AutoAcceptLogger
-from talos.automation_config import DEFAULT_UNIT_SIZE
+from talos.automation_config import DEFAULT_UNIT_SIZE, AutomationConfig
+from talos.discovery import DiscoveryService
 from talos.engine import TradingEngine
 from talos.errors import KalshiRateLimitError
+from talos.milestones import MilestoneResolver
 from talos.models.proposal import ProposalKey
 from talos.models.strategy import BidConfirmation
 from talos.scanner import ArbitrageScanner
+from talos.tree_metadata import TreeMetadataStore
 from talos.ui.event_review import EventReviewScreen
 from talos.ui.proposal_panel import ProposalPanel
 from talos.ui.screens import (
@@ -80,6 +83,7 @@ class TalosApp(App):
         ("B", "edit_blacklist", "Edit Blacklist"),
         ("m", "toggle_scan_mode", "Mode"),
         ("v", "toggle_view", "View"),
+        ("t", "push_tree_screen", "Tree"),
         ("q", "quit", "Quit"),
     ]
 
@@ -90,6 +94,10 @@ class TalosApp(App):
         scanner: ArbitrageScanner | None = None,
         startup_execution_mode: str = "automatic",
         startup_auto_stop_hours: float | None = None,
+        automation_config: AutomationConfig | None = None,
+        tree_metadata_store: TreeMetadataStore | None = None,
+        milestone_resolver: MilestoneResolver | None = None,
+        discovery_service: DiscoveryService | None = None,
     ) -> None:
         super().__init__()
         self._engine = engine
@@ -103,6 +111,28 @@ class TalosApp(App):
         self._rate_limit_until: datetime | None = None
         self._scan_mode: str = "sports"
         self.on_scan_mode_change: Callable[[str], None] | None = None
+        # Tree-mode collaborators (None unless automation_config.tree_mode is on).
+        self._automation_config = automation_config
+        self._tree_metadata_store = tree_metadata_store
+        self._milestone_resolver = milestone_resolver
+        self._discovery_service = discovery_service
+
+    def notify(self, message: object = "", *args: object, **kwargs: object) -> None:  # type: ignore[override]
+        """Tee every toast notification to structlog so devs tailing the log
+        file see the same messages the user sees as toasts.
+
+        Diagnostic hook — remove (or make opt-in) after bootstrap-lag work
+        is finished.
+        """
+        import contextlib
+
+        with contextlib.suppress(Exception):
+            logger.info(
+                "notify_toast",
+                message=str(message),
+                severity=kwargs.get("severity", "information"),
+            )
+        return super().notify(message, *args, **kwargs)  # type: ignore[no-any-return]
 
     def compose(self) -> ComposeResult:
         yield Header()
@@ -162,6 +192,25 @@ class TalosApp(App):
             self._start_watchdog()
             self._poll_balance()  # show cash immediately
             self._refresh_volumes()  # populate 24h volume on startup
+            # Tree-mode: kick off discovery + milestone bootstrap as a
+            # background worker right after engine wiring. This used to be
+            # lazy (deferred until the user opened TreeScreen), but that
+            # left a critical safety hole: restored pairs on a tree-mode
+            # restart would trade with no milestone protection because the
+            # engine readiness gate self-times out after 30s. Workers run
+            # off the event loop, so the heavy 9,700-series pull doesn't
+            # freeze the TUI — and the milestone-load gate in the engine
+            # now actually arms before any trading cycle runs.
+            self._tree_bootstrap_started = False
+            if (
+                self._automation_config is not None
+                and self._automation_config.tree_mode
+                and self._discovery_service is not None
+                and self._milestone_resolver is not None
+            ):
+                self._tree_bootstrap_started = True
+                self._bootstrap_tree_discovery()
+                self._run_tree_milestone_loop()
 
     # ── Engine callbacks ──────────────────────────────────────────
 
@@ -424,6 +473,85 @@ class TalosApp(App):
     async def _start_feed(self) -> None:
         if self._engine is not None:
             await self._engine.start_feed()
+
+    @work(thread=False)
+    async def _bootstrap_tree_discovery(self) -> None:
+        """Tree-mode: bootstrap discovery + initial milestone refresh, then
+        signal the engine that it is ready for trading."""
+        import time as _time
+
+        if self._discovery_service is None or self._milestone_resolver is None:
+            return
+        t0 = _time.perf_counter()
+        import structlog as _structlog
+
+        _log = _structlog.get_logger()
+        _log.info("tree_bootstrap_start")
+        self.notify("Tree: loading series catalog...", severity="information")
+
+        t_fetch = _time.perf_counter()
+        await self._discovery_service.bootstrap()
+        series_ms = int((_time.perf_counter() - t_fetch) * 1000)
+        series_count = sum(c.series_count for c in self._discovery_service.categories.values())
+        _log.info(
+            "tree_bootstrap_series_done",
+            elapsed_ms=series_ms,
+            series_count=series_count,
+        )
+        self.notify(
+            f"Series: {series_count} in {series_ms} ms",
+            severity="information",
+        )
+
+        t_ms = _time.perf_counter()
+        await self._milestone_resolver.refresh()
+        ms_elapsed = int((_time.perf_counter() - t_ms) * 1000)
+        _log.info(
+            "tree_bootstrap_milestones_done",
+            elapsed_ms=ms_elapsed,
+            milestone_count=self._milestone_resolver.count,
+        )
+        self.notify(
+            f"Milestones: {self._milestone_resolver.count} in {ms_elapsed} ms",
+            severity="information",
+        )
+
+        if self._engine is not None:
+            self._engine._ready_for_trading.set()
+
+        total_ms = int((_time.perf_counter() - t0) * 1000)
+        _log.info("tree_bootstrap_complete", total_ms=total_ms)
+        self.notify(f"Tree: loaded in {total_ms} ms", severity="information")
+
+    @work(thread=False)
+    async def _run_tree_milestone_loop(self) -> None:
+        """Tree-mode: periodic milestone refresh loop (runs until shutdown).
+
+        Delays the first refresh until after bootstrap completes so the two
+        aren't competing for network/CPU during user-visible TreeScreen mount.
+        """
+        import asyncio
+
+        if (
+            self._discovery_service is None
+            or self._milestone_resolver is None
+            or self._automation_config is None
+        ):
+            return
+        # Wait for bootstrap to signal completion — no point refreshing
+        # milestones while the series catalog is still downloading.
+        import contextlib
+
+        if self._engine is not None:
+            with contextlib.suppress(TimeoutError):
+                await asyncio.wait_for(
+                    self._engine._ready_for_trading.wait(),
+                    timeout=60.0,
+                )
+        await self._discovery_service.run_milestone_loop(
+            self._milestone_resolver,
+            interval_seconds=self._automation_config.milestone_refresh_seconds,
+        )
 
     @work(thread=False)
     async def _poll_balance(self) -> None:
@@ -956,6 +1084,50 @@ class TalosApp(App):
         table.set_compact(new_compact)
         mode_label = "compact" if new_compact else "full"
         self.notify(f"View: {mode_label}")
+
+    def action_push_tree_screen(self) -> None:
+        """Push the TreeScreen (tree-mode selection surface).
+
+        Gated behind automation_config.tree_mode. If tree mode is off or the
+        collaborators are not initialized, show a warning notification.
+        """
+        from talos.ui.tree_screen import TreeScreen
+
+        if self._automation_config is None or not self._automation_config.tree_mode:
+            self.notify(
+                "Tree mode disabled. Set tree_mode=True in config.",
+                severity="warning",
+            )
+            return
+        if (
+            self._discovery_service is None
+            or self._milestone_resolver is None
+            or self._tree_metadata_store is None
+        ):
+            self.notify(
+                "Tree mode collaborators not initialized.",
+                severity="warning",
+            )
+            return
+        # Lazy bootstrap: only start discovery + milestone loop the first
+        # time the user opens the tree screen. Prevents startup event-loop
+        # block from the 9,700-series /series pull.
+        if not getattr(self, "_tree_bootstrap_started", False):
+            self._tree_bootstrap_started = True
+            self._bootstrap_tree_discovery()
+            self._run_tree_milestone_loop()
+
+        screen = TreeScreen(
+            discovery=self._discovery_service,
+            milestones=self._milestone_resolver,
+            metadata=self._tree_metadata_store,
+            engine=self._engine,
+        )
+        # Listener registration moved into TreeScreen.on_mount (round-7
+        # plan Step 12a) so it happens AFTER _app_loop is captured.
+        # Pre-mount delivery would otherwise hit the defensive log-and-
+        # drop path and lose real signals.
+        self.push_screen(screen)
 
     @work(thread=False)
     async def _show_blacklist_editor(self, current: list[str]) -> None:

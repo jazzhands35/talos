@@ -5,9 +5,13 @@ from __future__ import annotations
 import pytest
 
 from talos.fees import (
+    KALSHI_FEE_RATE,
+    KALSHI_MAKER_REBATE_RATE,
     MAKER_FEE_RATE,
     american_odds,
+    coerce_persisted_fee_rate,
     compute_fee,
+    effective_fee_rate,
     fee_adjusted_cost,
     fee_adjusted_edge,
     fee_adjusted_profit_matched,
@@ -288,3 +292,71 @@ class TestDynamicFeeRate:
     def test_compute_fee_dispatches_fee_free(self) -> None:
         assert compute_fee(50, fee_type="fee_free") == 0.0
         assert compute_fee(50, fee_type="no_fee") == 0.0
+
+
+class TestEffectiveFeeRate:
+    """Kalshi fee rate is a platform-wide constant — ``series.fee_multiplier``
+    is unreliable (observed returning 1.0 on both ``quadratic`` and
+    ``quadratic_with_maker_fees`` series, which would produce edges near
+    -50¢ on coin-flip pairs).
+    """
+
+    def test_constants(self) -> None:
+        assert KALSHI_FEE_RATE == 0.0175
+        assert KALSHI_MAKER_REBATE_RATE == 0.00875
+        assert MAKER_FEE_RATE == KALSHI_FEE_RATE  # back-compat alias
+
+    def test_quadratic_with_maker_fees(self) -> None:
+        assert effective_fee_rate("quadratic_with_maker_fees") == 0.0175
+
+    def test_quadratic(self) -> None:
+        assert effective_fee_rate("quadratic") == 0.0175
+
+    def test_fee_free(self) -> None:
+        assert effective_fee_rate("fee_free") == 0.0
+        assert effective_fee_rate("no_fee") == 0.0
+
+    def test_maker_rebate(self) -> None:
+        assert effective_fee_rate("quadratic_with_maker_fees", maker_rebate=True) == 0.00875
+
+    def test_maker_rebate_still_zero_on_fee_free(self) -> None:
+        assert effective_fee_rate("fee_free", maker_rebate=True) == 0.0
+
+    def test_kxipo_sanity_at_full_rate(self) -> None:
+        """The -46.4¢ regression: NO-A=58 + NO-B=40 should show a small
+        positive edge, not catastrophic negative, at the correct rate."""
+        rate = effective_fee_rate("quadratic_with_maker_fees")
+        edge = fee_adjusted_edge(58, 40, rate=rate)
+        # raw edge = 2¢; quadratic fees at 0.0175 eat ~0.85¢ → ~+1.15¢
+        assert 0 < edge < 2
+
+
+class TestCoercePersistedFeeRate:
+    """Heals caches that persisted a bad rate before the effective_fee_rate fix."""
+
+    def test_accepts_canonical_full_rate(self) -> None:
+        assert coerce_persisted_fee_rate("quadratic_with_maker_fees", 0.0175) == 0.0175
+
+    def test_accepts_canonical_rebate_rate(self) -> None:
+        assert coerce_persisted_fee_rate("quadratic_with_maker_fees", 0.00875) == 0.00875
+
+    def test_accepts_zero_on_fee_free(self) -> None:
+        assert coerce_persisted_fee_rate("fee_free", 0.0) == 0.0
+
+    def test_repairs_zero_on_paying_series(self) -> None:
+        # Historical bug: "quadratic" + fee_multiplier=1.0 routed to 0.0 via
+        # old maker_fee_rate. That would understate fees on taker fills.
+        assert coerce_persisted_fee_rate("quadratic", 0.0) == 0.0175
+
+    def test_repairs_sentinel_one(self) -> None:
+        """The active bug: Kalshi returned fee_multiplier=1.0 and we stored
+        it as the rate, producing -46.4¢ edges on KXIPO coin flips."""
+        assert coerce_persisted_fee_rate("quadratic_with_maker_fees", 1.0) == 0.0175
+        assert coerce_persisted_fee_rate("quadratic", 1.0) == 0.0175
+
+    def test_repairs_arbitrary_garbage(self) -> None:
+        assert coerce_persisted_fee_rate("quadratic_with_maker_fees", 0.07) == 0.0175
+        assert coerce_persisted_fee_rate("quadratic_with_maker_fees", 42.0) == 0.0175
+
+    def test_fee_free_garbage_falls_to_zero(self) -> None:
+        assert coerce_persisted_fee_rate("fee_free", 1.0) == 0.0

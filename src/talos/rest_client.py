@@ -126,6 +126,36 @@ class KalshiRESTClient:
         data = await self._request("GET", "/events", params=params)
         return [Event.model_validate(e) for e in data["events"]]
 
+    async def get_events_raw(
+        self,
+        *,
+        status: str | None = None,
+        series_ticker: str | None = None,
+        with_nested_markets: bool = False,
+        min_close_ts: int | None = None,
+        limit: int = 100,
+        cursor: str | None = None,
+    ) -> dict[str, Any]:
+        """Authenticated /events call returning the raw API response dict.
+
+        Used by DiscoveryService, which needs fields the Event Pydantic
+        model doesn't carry (e.g. close_time on events, dollars-form price
+        fields on markets). Auth + rate-limit handling is inherited from
+        _request; just skips Pydantic validation.
+        """
+        params: dict[str, Any] = {"limit": limit}
+        if status:
+            params["status"] = status
+        if series_ticker:
+            params["series_ticker"] = series_ticker
+        if with_nested_markets:
+            params["with_nested_markets"] = "true"
+        if min_close_ts is not None:
+            params["min_close_ts"] = min_close_ts
+        if cursor:
+            params["cursor"] = cursor
+        return await self._request("GET", "/events", params=params)
+
     async def get_all_events(
         self,
         *,

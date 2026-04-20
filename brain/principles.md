@@ -191,3 +191,15 @@ Each required a follow-up fix to wire the missing segment. The pattern is always
 - [ ] Does the response execute? (API call, state change, order mutation)
 
 If any box is unchecked, the feature is not done.
+
+## 23. Safety over speed
+
+When trading and scheduling decisions are time-sensitive, prefer delay or pause over proceeding on incomplete data. A five-second delayed decision is recoverable; a decision made with stale or missing data is not.
+
+This applies to:
+- **Startup sequencing.** Engine waits for milestone data to load before beginning the tick loop, up to a 30-second hard cap.
+- **Resolver cascades.** When `_check_exit_only` has no schedule source for an event, it logs and defers rather than guessing.
+- **Milestone conflicts.** When a manual override and a Kalshi milestone disagree by more than the threshold, the user is prompted rather than silently overridden.
+- **Persisted engine state.** Winding-down pairs survive restarts via `engine_state = "winding_down"` in `games_full.json`, so a crash mid-wind-down doesn't result in a pair resuming normal trading post-restart.
+
+The SURVIVOR incident of 2026-04-15 is the motivating case. Acting fast on a broken proxy (`expiration − 3h`) led to adverse-selection fills during a live broadcast. The fix is not a better heuristic — it's to gate trading on having real schedule data.

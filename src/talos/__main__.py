@@ -4,9 +4,9 @@ from __future__ import annotations
 
 import os
 import sys
+from io import StringIO
 from pathlib import Path
 from typing import TextIO
-from io import StringIO
 
 import structlog
 
@@ -254,11 +254,13 @@ def main() -> None:
     from talos.automation_config import DEFAULT_UNIT_SIZE, AutomationConfig
     from talos.bid_adjuster import BidAdjuster
     from talos.data_collector import DataCollector
+    from talos.discovery import DiscoveryService
     from talos.engine import TradingEngine
     from talos.game_manager import DEFAULT_NONSPORTS_CATEGORIES, GameManager
     from talos.game_status import GameStatusResolver
     from talos.lifecycle_feed import LifecycleFeed
     from talos.market_feed import MarketFeed
+    from talos.milestones import MilestoneResolver
     from talos.orderbook import OrderBookManager
     from talos.persistence import (
         load_saved_games,
@@ -276,6 +278,7 @@ def main() -> None:
     from talos.suggestion_log import SuggestionLog
     from talos.ticker_feed import TickerFeed
     from talos.top_of_market import TopOfMarketTracker
+    from talos.tree_metadata import TreeMetadataStore
     from talos.ui.app import TalosApp
     from talos.ws_client import KalshiWSClient
 
@@ -292,14 +295,37 @@ def main() -> None:
 
     _db_dir = get_data_dir()
     data_collector = DataCollector(_db_dir / "talos_data.db")
-    adjuster = BidAdjuster(
-        books, [], unit_size=unit_size, data_collector=data_collector
-    )
+    adjuster = BidAdjuster(books, [], unit_size=unit_size, data_collector=data_collector)
     portfolio_feed = PortfolioFeed(ws_client=ws)
     ticker_feed = TickerFeed(ws_client=ws)
     lifecycle_feed = LifecycleFeed(ws_client=ws)
     position_feed = PositionFeed(ws_client=ws)
-    auto_config = AutomationConfig()
+    # Tree-mode flag can be toggled per-launch via TALOS_TREE_MODE env var
+    # ("1"/"true"/"yes"/"on" → enabled, anything else or unset → disabled).
+    # Without the env var, tree_mode defaults to AutomationConfig's False.
+    _tree_mode_env = os.environ.get("TALOS_TREE_MODE", "").strip().lower()
+    _tree_mode = _tree_mode_env in ("1", "true", "yes", "on")
+    auto_config = AutomationConfig(tree_mode=_tree_mode)
+
+    # Tree-mode collaborators (only constructed when tree_mode is enabled).
+    # DiscoveryService is kept on the app (not the engine) since only TreeScreen
+    # needs it; the engine only uses tree_metadata_store and milestone_resolver.
+    tree_metadata_store: TreeMetadataStore | None = None
+    milestone_resolver: MilestoneResolver | None = None
+    discovery_service: DiscoveryService | None = None
+
+    if auto_config.tree_mode:
+        tree_metadata_store = TreeMetadataStore()
+        tree_metadata_store.load()
+
+        milestone_resolver = MilestoneResolver(
+            refresh_interval_seconds=auto_config.milestone_refresh_seconds,
+        )
+        discovery_service = DiscoveryService(
+            concurrent_limit=auto_config.discovery_concurrent_limit,
+            rest_client=rest,
+        )
+
     nonsports_categories = settings.get("nonsports_categories", DEFAULT_NONSPORTS_CATEGORIES)
     nonsports_max_days = int(settings.get("nonsports_max_days", 7))  # type: ignore[arg-type]
     ticker_blacklist = settings.get("ticker_blacklist", [])
@@ -338,44 +364,92 @@ def main() -> None:
 
     feed.on_book_update = on_book_update
 
-    # Wire game persistence — save full pair data for instant startup
-    saved_games_full = load_saved_games_full()
+    # Wire game persistence — save full pair data for instant startup.
+    # If games_full.json exists but is corrupt, fail-closed: refuse to
+    # silently fall back to the ticker-only legacy file (which would
+    # lose engine_state and resurrect winding-down pairs as freely
+    # tradable). User has to inspect / repair / delete the file before
+    # restarting.
+    from talos.persistence import GamesFullCorrupt
+
+    try:
+        saved_games_full = load_saved_games_full()
+    except GamesFullCorrupt as exc:
+        sys.stderr.write(
+            f"\nFATAL: persisted game state at games_full.json is corrupt:\n"
+            f"  {exc}\n\n"
+            "Refusing to start to avoid resurrecting winding-down pairs as\n"
+            "freely tradable. Inspect or back up the file, then either:\n"
+            "  (a) repair the JSON manually if you know the schema, or\n"
+            "  (b) delete games_full.json to start fresh (you will lose\n"
+            "      restart durability for any in-flight winding-down pairs).\n"
+        )
+        sys.exit(2)
     saved_games = load_saved_games() if saved_games_full is None else []
 
     def _persist_games() -> None:
-        save_games([p.event_ticker for p in game_mgr.active_games])
-        games_data = []
-        for p in game_mgr.active_games:
-            entry: dict[str, object] = {
-                "event_ticker": p.event_ticker,
-                "ticker_a": p.ticker_a,
-                "ticker_b": p.ticker_b,
-                "fee_type": p.fee_type,
-                "fee_rate": p.fee_rate,
-                "close_time": p.close_time,
-                "expected_expiration_time": p.expected_expiration_time,
-                "label": game_mgr.labels.get(p.event_ticker, ""),
-                "sub_title": game_mgr.subtitles.get(p.event_ticker, ""),
-                "side_a": p.side_a,
-                "side_b": p.side_b,
-                "kalshi_event_ticker": p.kalshi_event_ticker,
-                "series_ticker": p.series_ticker,
-                "talos_id": p.talos_id,
-            }
-            # Persist volume data so it's available instantly on restart
-            vol_a = game_mgr.volumes_24h.get(p.ticker_a)
-            vol_b = game_mgr.volumes_24h.get(p.ticker_b)
-            if vol_a is not None:
-                entry["volume_a"] = vol_a
-            if vol_b is not None:
-                entry["volume_b"] = vol_b
-            try:
-                ledger = adjuster.get_ledger(p.event_ticker)
-                entry["ledger"] = ledger.to_save_dict()
-            except KeyError:
-                pass
-            games_data.append(entry)
-        save_games_full(games_data)
+        # Round-3 (v0.1.1) of the planning loop: normalize ALL persistence-
+        # path failures to PersistenceError. The wrapping try/except
+        # converts data-assembly errors (AttributeError, KeyError on a
+        # malformed pair) AND save_games_full failures to a single
+        # exception type, so the writer's exit contract is uniform:
+        # "raises iff persistence-relevant, only PersistenceError type."
+        from talos.persistence_errors import PersistenceError
+
+        try:
+            # Order matters: write the legacy ticker file FIRST. Even if it
+            # fails, the safety-critical games_full.json save below is the
+            # one we propagate as a hard error — the legacy file is a fast-
+            # path optimization and stale legacy state can't resurrect a
+            # winding-down pair (only games_full.json carries engine_state).
+            save_games([p.event_ticker for p in game_mgr.active_games])
+            games_data = []
+            for p in game_mgr.active_games:
+                entry: dict[str, object] = {
+                    "event_ticker": p.event_ticker,
+                    "ticker_a": p.ticker_a,
+                    "ticker_b": p.ticker_b,
+                    "fee_type": p.fee_type,
+                    "fee_rate": p.fee_rate,
+                    "close_time": p.close_time,
+                    "expected_expiration_time": p.expected_expiration_time,
+                    "label": game_mgr.labels.get(p.event_ticker, ""),
+                    "sub_title": game_mgr.subtitles.get(p.event_ticker, ""),
+                    "side_a": p.side_a,
+                    "side_b": p.side_b,
+                    "kalshi_event_ticker": p.kalshi_event_ticker,
+                    "series_ticker": p.series_ticker,
+                    "talos_id": p.talos_id,
+                }
+                # Phase 1: persist tree-mode durability fields.
+                # - source is observability only; write only when set.
+                # - engine_state is safety-critical; always write (default "active").
+                if p.source is not None:
+                    entry["source"] = p.source
+                entry["engine_state"] = p.engine_state
+                # Persist volume data so it's available instantly on restart
+                vol_a = game_mgr.volumes_24h.get(p.ticker_a)
+                vol_b = game_mgr.volumes_24h.get(p.ticker_b)
+                if vol_a is not None:
+                    entry["volume_a"] = vol_a
+                if vol_b is not None:
+                    entry["volume_b"] = vol_b
+                try:
+                    ledger = adjuster.get_ledger(p.event_ticker)
+                    entry["ledger"] = ledger.to_save_dict()
+                except KeyError:
+                    pass
+                games_data.append(entry)
+            ok = save_games_full(games_data)
+            if not ok:
+                raise PersistenceError("save_games_full() returned failure")
+        except PersistenceError:
+            raise
+        except Exception as exc:
+            raise PersistenceError(
+                f"persistence-path failure during _persist_games: "
+                f"{type(exc).__name__}: {exc}"
+            ) from exc
 
     game_mgr.on_change = _persist_games
 
@@ -396,6 +470,8 @@ def main() -> None:
         game_status_resolver=game_status_resolver,
         data_collector=data_collector,
         settlement_cache=settlement_cache,
+        tree_metadata_store=tree_metadata_store,
+        milestone_resolver=milestone_resolver,
     )
 
     startup_execution_mode = str(settings.get("execution_mode", "automatic"))
@@ -429,6 +505,10 @@ def main() -> None:
         engine=engine,
         startup_execution_mode=startup_execution_mode,
         startup_auto_stop_hours=startup_auto_stop_hours,
+        automation_config=auto_config,
+        tree_metadata_store=tree_metadata_store,
+        milestone_resolver=milestone_resolver,
+        discovery_service=discovery_service,
     )
 
     # Restore persisted scan mode and wire persistence
@@ -455,9 +535,9 @@ def main() -> None:
 
         crash_log = get_data_dir() / "talos_crash.log"
         with open(crash_log, "a") as f:
-            f.write(f"\n{'='*60}\n")
+            f.write(f"\n{'=' * 60}\n")
             f.write(f"CRASH at {datetime.now(UTC).isoformat()}\n")
-            f.write(f"{'='*60}\n")
+            f.write(f"{'=' * 60}\n")
             traceback.print_exc(file=f)
         raise
 

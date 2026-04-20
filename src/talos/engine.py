@@ -11,7 +11,7 @@ import contextlib
 import time
 from collections.abc import Callable
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import httpx
 import structlog
@@ -34,6 +34,7 @@ from talos.models.order import Order
 from talos.models.portfolio import EventPosition, Position, Settlement
 from talos.models.position import EventPositionSummary
 from talos.models.proposal import Proposal, ProposalKey, ProposedQueueImprovement
+from talos.models.tree import RemoveOutcome
 from talos.models.ws import FillMessage, TickerMessage, UserOrderMessage
 from talos.opportunity_proposer import OpportunityProposer
 from talos.orderbook import OrderBookManager
@@ -54,7 +55,9 @@ from talos.ticker_feed import TickerFeed
 from talos.top_of_market import TopOfMarketTracker
 
 if TYPE_CHECKING:
+    from talos.milestones import MilestoneResolver
     from talos.models.strategy import ArbPair, BidConfirmation
+    from talos.tree_metadata import TreeMetadataStore
 
 logger = structlog.get_logger()
 _STALE_BOOK_RECOVERY_COOLDOWN_S = 120.0
@@ -101,6 +104,8 @@ class TradingEngine:
         lifecycle_feed: LifecycleFeed | None = None,
         position_feed: PositionFeed | None = None,
         game_status_resolver: GameStatusResolver | None = None,
+        tree_metadata_store: TreeMetadataStore | None = None,
+        milestone_resolver: MilestoneResolver | None = None,
         data_collector: DataCollector | None = None,
         settlement_cache: SettlementCache | None = None,
     ) -> None:
@@ -118,12 +123,12 @@ class TradingEngine:
         self._ticker_feed = ticker_feed
         self._lifecycle_feed = lifecycle_feed
         self._game_status_resolver = game_status_resolver
+        self._tree_metadata_store = tree_metadata_store
+        self._milestone_resolver = milestone_resolver
         self._data_collector = data_collector
         self._settlement_cache = settlement_cache
         self._position_feed = position_feed
-        self._proposer = OpportunityProposer(
-            self._auto_config, data_collector=data_collector
-        )
+        self._proposer = OpportunityProposer(self._auto_config, data_collector=data_collector)
 
         # Mutable caches
         self._queue_cache: dict[str, int] = {}
@@ -139,11 +144,14 @@ class TradingEngine:
         self._settled_markets: dict[str, dict[str, str]] = {}  # event_ticker -> {ticker: result}
         self._order_placed_at: dict[str, float] = {}  # order_id -> monotonic timestamp
         self._exit_only_events: set[str] = set()  # events in exit-only mode
+        self._winding_down: set[str] = set()  # pairs removed-while-inventory-present
+        self._event_fully_removed_listeners: list = []
         self._game_started_events: set[str] = set()  # events where game is live/final
         self._last_jump_eval: dict[str, tuple[int, int]] = {}  # ticker -> (book_top, resting)
         # Dedup for replay log: only write an imbalance-eval row on transition.
         self._last_imbalance_outcome: dict[str, str] = {}
         self._stale_candidates: set[str] = set()  # two-strike stale position cleanup
+        self._log_once_keys: set[tuple[str, str]] = set()
         self._dirty_events: set[str] = set()  # events needing imbalance check (WS-driven)
         self._overcommit_events: set[str] = set()  # unit overcommit — priority
         # Reconciliation-derived overcommit targets: event → {side → target_resting}
@@ -166,6 +174,10 @@ class TradingEngine:
         self._event_claim_times: dict[str, float] = {}  # event_ticker → monotonic claim time
         self._last_ws_reaction: dict[str, float] = {}  # observability: last WS reaction timestamp
         self._reaction_consumer_started: bool = False
+
+        # Startup gate: set once the milestone resolver cascade is armed.
+        # TradingEngine.wait_for_ready_for_trading() awaits this with a hard cap.
+        self._ready_for_trading: asyncio.Event = asyncio.Event()
 
         # Wire portfolio feed callbacks
         if self._portfolio_feed is not None:
@@ -225,6 +237,28 @@ class TradingEngine:
         event-driven rebalancing instead of polling all 1000+ pairs.
         """
         self._dirty_events.add(event_ticker)
+
+    async def wait_for_ready_for_trading(self) -> None:
+        """Block until the resolver cascade is armed, or a hard cap expires.
+
+        Flag-off (tree_mode = False): return immediately (legacy behavior).
+        Flag-on: await _ready_for_trading.set() OR startup_milestone_wait_seconds
+        elapsed — whichever first. Emits structured log on timeout.
+        """
+        if not self._auto_config.tree_mode:
+            return
+
+        timeout = self._auto_config.startup_milestone_wait_seconds
+        try:
+            await asyncio.wait_for(self._ready_for_trading.wait(), timeout=timeout)
+            logger.info("startup_gate_ready", elapsed_s=None)
+        except TimeoutError:
+            self._ready_for_trading.set()
+            logger.warning(
+                "startup_gate_timeout",
+                elapsed_s=timeout,
+                exit_only_degraded=True,
+            )
 
     # ── Per-event claim mechanism ─────────────���────────────────────
 
@@ -570,10 +604,7 @@ class TradingEngine:
                             to_resting=target_behind_resting,
                         )
                     except KalshiAPIError as e:
-                        if (
-                            e.status_code == 409
-                            and "market_closed" in str(e).lower()
-                        ):
+                        if e.status_code == 409 and "market_closed" in str(e).lower():
                             import contextlib
 
                             with contextlib.suppress(ValueError):
@@ -596,7 +627,171 @@ class TradingEngine:
 
         await self._verify_after_action(event_ticker)
 
+    def _resolve_event_start(
+        self, kalshi_event_ticker: str, pair: Any
+    ) -> tuple[datetime | None, str | None]:
+        """Resolver cascade per spec §5.2.
+
+        Priority: manual override -> Kalshi milestone -> sports GSR -> nothing.
+
+        Returns (start_time, source) where source is one of:
+          - "manual_opt_out": user explicitly disabled exit-only for this event
+          - "manual":         user-set override; start_time is the datetime
+          - "milestone":      Kalshi milestone start_date
+          - "sports_gsr":     sports provider scheduled_start
+          - None:             no schedule data available
+        """
+        # 1. Manual (user-owned)
+        if self._tree_metadata_store is not None:
+            manual = self._tree_metadata_store.manual_event_start(kalshi_event_ticker)
+            if manual == "none":
+                return (None, "manual_opt_out")
+            if manual is not None:
+                return (manual, "manual")
+
+        # 2. Kalshi milestone
+        if self._milestone_resolver is not None:
+            ms = self._milestone_resolver.event_start(kalshi_event_ticker)
+            if ms is not None:
+                return (ms, "milestone")
+
+        # 3. Sports GSR (keyed by pair.event_ticker — sports pairs have
+        #    event_ticker == kalshi_event_ticker)
+        if self._game_status_resolver is not None:
+            gs = self._game_status_resolver.get(pair.event_ticker)
+            if gs and getattr(gs, "scheduled_start", None):
+                return (gs.scheduled_start, "sports_gsr")
+
+        return (None, None)
+
     def _check_exit_only(self) -> None:
+        """Dispatch to legacy or tree-mode cascade based on automation flag."""
+        if self._auto_config.tree_mode:
+            self._check_exit_only_tree_mode()
+        else:
+            self._check_exit_only_legacy()
+
+    def _check_exit_only_tree_mode(self) -> None:
+        """Resolver-cascade driven auto-trigger per spec §5.2.
+
+        Dedupes by kalshi_event_ticker so multi-market events (e.g., Fed
+        presser with 46 markets) get a single scheduling decision applied
+        to all sibling pairs via _flip_exit_only_for_key.
+        """
+        now = datetime.now(UTC)
+        seen_events: set[str] = set()
+
+        for pair in self._scanner.pairs:
+            key = pair.kalshi_event_ticker or pair.event_ticker
+            if key in seen_events:
+                continue
+            seen_events.add(key)
+
+            if pair.event_ticker in self._exit_only_events:
+                continue
+
+            start_time, source = self._resolve_event_start(key, pair)
+
+            if source == "manual_opt_out":
+                continue
+
+            if source is None:
+                # Defensive degradation: if the cascade has nothing, ask
+                # the milestone resolver whether IT considers itself
+                # trustworthy right now. Healthy = last refresh recent AND
+                # index non-empty. The earlier "last_refresh is None" check
+                # only covered the bootstrap window — Kalshi can serve a
+                # 200-OK with zero milestones during partial outages, which
+                # marked last_refresh but left the index empty. is_healthy()
+                # also catches that, so the safety degradation stays armed
+                # past the first successful-but-empty refresh.
+                ms_resolver = self._milestone_resolver
+                ms_unhealthy = ms_resolver is not None and not ms_resolver.is_healthy()
+                if ms_unhealthy:
+                    self._flip_exit_only_for_key(
+                        key,
+                        reason="milestones_unavailable",
+                    )
+                    continue
+                self._log_once("exit_only_no_schedule", key)
+                continue
+
+            # Sports GSR additionally supplies live/post state — flip immediately
+            if source == "sports_gsr" and self._game_status_resolver is not None:
+                gs = self._game_status_resolver.get(pair.event_ticker)
+                if gs and gs.state in ("live", "post"):
+                    self._flip_exit_only_for_key(
+                        key,
+                        reason=f"sports_{gs.state}",
+                    )
+                    continue
+
+            if start_time is None:
+                continue
+
+            lead_min = self._auto_config.exit_only_minutes
+            if (start_time - now).total_seconds() < lead_min * 60:
+                self._flip_exit_only_for_key(
+                    key,
+                    reason=source,
+                    scheduled_start=start_time,
+                )
+
+    def _flip_exit_only_for_key(
+        self,
+        kalshi_event_ticker: str,
+        *,
+        reason: str,
+        scheduled_start: datetime | None = None,
+    ) -> None:
+        """Flip all pairs sharing kalshi_event_ticker into exit-only.
+
+        Adds each sibling pair's pair-level event_ticker to _exit_only_events
+        so downstream enforcement (_enforce_all_exit_only, adjuster ledger
+        lookups) keeps working — _exit_only_events is a pair-level set.
+
+        For sports (where event_ticker == kalshi_event_ticker), this adds the
+        single event key. For non-sports multi-market events, this adds
+        every market-pair's event_ticker.
+        """
+        flipped: list[str] = []
+        for pair in self._scanner.pairs:
+            pair_key = pair.kalshi_event_ticker or pair.event_ticker
+            if pair_key != kalshi_event_ticker:
+                continue
+            if pair.event_ticker in self._exit_only_events:
+                continue
+            self._exit_only_events.add(pair.event_ticker)
+            self._game_started_events.add(pair.event_ticker)
+            flipped.append(pair.event_ticker)
+
+        if not flipped:
+            return
+
+        name = self._display_name(kalshi_event_ticker)
+        self._notify(
+            f"EXIT-ONLY: {name} — {reason}",
+            "warning",
+            toast=True,
+        )
+        logger.info(
+            "exit_only_auto_trigger",
+            kalshi_event_ticker=kalshi_event_ticker,
+            reason=reason,
+            flipped_pairs=flipped,
+            pair_count=len(flipped),
+            scheduled_start=(scheduled_start.isoformat() if scheduled_start else None),
+        )
+
+    def _log_once(self, event_key: str, event_ticker: str) -> None:
+        """Emit a structured log at most once per event_ticker per process."""
+        key = (event_key, event_ticker)
+        if key in self._log_once_keys:
+            return
+        self._log_once_keys.add(key)
+        logger.info(event_key, event_ticker=event_ticker)
+
+    def _check_exit_only_legacy(self) -> None:
         """Auto-trigger exit-only based on game status, auto-remove when done.
 
         Called from recompute_positions (runs every refresh cycle).
@@ -709,18 +904,14 @@ class TradingEngine:
                     pair = self.find_pair(event_ticker)
                     if pair is not None and pair.close_time:
                         try:
-                            ct = datetime.fromisoformat(
-                                pair.close_time.replace("Z", "+00:00")
-                            )
+                            ct = datetime.fromisoformat(pair.close_time.replace("Z", "+00:00"))
                             if datetime.now(UTC) > ct:
                                 market_done = True
                         except (ValueError, TypeError):
                             pass
                 if market_done:
                     name = self._display_name(event_ticker)
-                    self._notify(
-                        f"Exit-only DONE: {name} — removing (market closed)"
-                    )
+                    self._notify(f"Exit-only DONE: {name} — removing (market closed)")
                     logger.info(
                         "exit_only_auto_remove_determined",
                         event_ticker=event_ticker,
@@ -763,9 +954,7 @@ class TradingEngine:
                 # Start the listen loop BEFORE subscribing — this way,
                 # orderbook snapshots are processed as they arrive instead
                 # of queuing in the WS buffer and hitting all at once.
-                listen_task = asyncio.create_task(
-                    self._feed.start(), name="ws_listen"
-                )
+                listen_task = asyncio.create_task(self._feed.start(), name="ws_listen")
 
                 if first_connect:
                     await self._setup_initial_games()
@@ -924,6 +1113,7 @@ class TradingEngine:
                         self._game_manager._volumes_24h[pair.ticker_a] = int(vol_a)
                     if vol_b is not None:
                         self._game_manager._volumes_24h[pair.ticker_b] = int(vol_b)
+                    self._apply_persisted_engine_state(pair)
                     pairs.append(pair)
                     cached_tickers.add(pair.event_ticker)
                 except Exception:
@@ -1036,6 +1226,13 @@ class TradingEngine:
 
         Runs every 30s as a safety net — catches anything WS missed.
         """
+        # Startup safety gate: tree_mode waits for milestones to load before
+        # the first trading cycle runs. Hard cap inside wait_for_ready_for_trading
+        # means we never deadlock. Subsequent ticks pass through immediately
+        # because _ready_for_trading stays set.
+        if self._auto_config.tree_mode and not self._ready_for_trading.is_set():
+            await self.wait_for_ready_for_trading()
+
         await self._recover_stale_books()
 
         # Bump sync generation so optimistic placements from this cycle
@@ -1188,6 +1385,8 @@ class TradingEngine:
 
             # Check exit-only triggers and enforce cancellations
             self._check_exit_only()
+            if self._auto_config.tree_mode:
+                await self._reconcile_winding_down()
             await self._enforce_all_exit_only()
 
             # Persist ledger fill state so restarts don't lose fills
@@ -1825,9 +2024,7 @@ class TradingEngine:
                     self._overcommit_events.add(pair.event_ticker)
                     # Store reconciliation-derived target so resolution uses
                     # the same data as detection (ledger fill_gap may differ).
-                    targets = self._overcommit_targets.setdefault(
-                        pair.event_ticker, {}
-                    )
+                    targets = self._overcommit_targets.setdefault(pair.event_ticker, {})
                     targets[sl] = allowed
 
                 # Check 2: Multiple resting orders (double-bid indicator)
@@ -2214,7 +2411,7 @@ class TradingEngine:
         pairs_ordered = (
             sorted(
                 self._scanner.pairs,
-                key=lambda p: (0 if p.event_ticker in overcommit_priority else 1),
+                key=lambda p: 0 if p.event_ticker in overcommit_priority else 1,
             )
             if overcommit_priority
             else self._scanner.pairs
@@ -2259,9 +2456,7 @@ class TradingEngine:
                         ledger,
                         pair,
                         self._display_name(pair.event_ticker),
-                        reconciled_targets=overcommit_targets.get(
-                            pair.event_ticker
-                        ),
+                        reconciled_targets=overcommit_targets.get(pair.event_ticker),
                     )
                     if overcommit is not None:
                         self._log_imbalance_outcome(
@@ -2813,17 +3008,17 @@ class TradingEngine:
                 and "market_closed" in str(e).lower()
             )
             if is_market_closed and event_ticker and event_ticker not in self._exit_only_events:
-                    self._exit_only_events.add(event_ticker)
-                    self._enforce_exit_only_sync(event_ticker)
-                    name = self._display_name(event_ticker)
-                    self._notify(
-                        f"Exit-only ON: {name} (market closed)",
-                        "warning",
-                    )
-                    logger.info(
-                        "exit_only_market_closed",
-                        event_ticker=event_ticker,
-                    )
+                self._exit_only_events.add(event_ticker)
+                self._enforce_exit_only_sync(event_ticker)
+                name = self._display_name(event_ticker)
+                self._notify(
+                    f"Exit-only ON: {name} (market closed)",
+                    "warning",
+                )
+                logger.info(
+                    "exit_only_market_closed",
+                    event_ticker=event_ticker,
+                )
 
             is_cross = isinstance(e, KalshiAPIError) and "post only cross" in str(e).lower()
             if is_cross:
@@ -2936,6 +3131,649 @@ class TradingEngine:
         if pairs:
             self._notify(f"Added {len(pairs)} market pair(s)", toast=True)
         return pairs
+
+    async def add_pairs_from_selection(self, records: list[dict[str, Any]]) -> list[ArbPair]:
+        """Commit path for tree-selected pairs.
+
+        Mirrors add_games (engine.py:~2839) step-for-step, with:
+          1. restore_game per record (inside suppress_on_change)
+          1.5 seed _volumes_24h from record fields (not populated by restore_game)
+          2. adjuster ledger wiring
+          3. GSR set_expiration + resolve_batch
+          4. feed subscribes
+          5. data_collector.log_game_add
+          6. persist once
+
+        If steps 3 or 4 raise (resolver / subscribe failure), every pair
+        added so far in this call is rolled back: GameManager, adjuster, and
+        any open feed subscriptions are reverted, and the exception is
+        re-raised so the UI commit path can leave staging intact for retry.
+        Without rollback, partial state would persist invisibly and a retry
+        would double-add.
+        """
+        pairs: list[ArbPair] = []
+        # Round-3 review fix #1: Track which pairs were already present
+        # BEFORE this call so we can skip re-wiring them in steps 2-4.
+        # Without this, retrying a preserved-staging commit (e.g. add
+        # succeeded but a later metadata write failed) would call
+        # adjuster.add_event / feed.subscribe / GSR.set_expiration a
+        # second time, producing duplicate ticker_map entries, duplicate
+        # subscribes, and duplicate _resolve_batch wiring. The retry
+        # contract that the round-1 toast advertises ("adds become
+        # no-ops on retry") only holds if we genuinely no-op here.
+        pre_existing_event_tickers: set[str] = set(
+            self._game_manager._games.keys()
+        )
+        added_to_adjuster: list[ArbPair] = []
+        subscribed_tickers: list[str] = []
+
+        # Steps 1 + 1.5: reconstitute + volume seeding, with on_change suppressed
+        with self._game_manager.suppress_on_change():
+            for r in records:
+                try:
+                    pair = self._game_manager.restore_game(
+                        {**r, "source": r.get("source", "tree")},
+                    )
+                    if pair is None:
+                        continue
+                    vol_a = r.get("volume_24h_a")
+                    vol_b = r.get("volume_24h_b")
+                    if vol_a is not None:
+                        self._game_manager._volumes_24h[pair.ticker_a] = int(vol_a)
+                    if vol_b is not None and pair.ticker_b != pair.ticker_a:
+                        self._game_manager._volumes_24h[pair.ticker_b] = int(vol_b)
+                    pairs.append(pair)
+                except Exception:
+                    logger.warning(
+                        "tree_add_failed",
+                        pair_ticker=r.get("event_ticker"),
+                        exc_info=True,
+                    )
+
+        # Filter to genuinely-new pairs for downstream wiring. Pre-existing
+        # pairs were already wired by the prior successful add — their
+        # adjuster ledger, GSR registration, and feed subscribes are
+        # already in place. Re-wiring would duplicate side effects.
+        new_pairs: list[ArbPair] = [
+            p for p in pairs if p.event_ticker not in pre_existing_event_tickers
+        ]
+
+        gsr_seeded: list[str] = []
+        try:
+            # Step 2: adjuster (only for genuinely-new pairs)
+            for pair in new_pairs:
+                self._adjuster.add_event(pair)
+                added_to_adjuster.append(pair)
+
+            # Step 3: GSR wiring + resolve_batch (only for genuinely-new pairs)
+            if self._game_status_resolver is not None and new_pairs:
+                for pair in new_pairs:
+                    self._game_status_resolver.set_expiration(
+                        pair.event_ticker,
+                        pair.expected_expiration_time,
+                    )
+                    gsr_seeded.append(pair.event_ticker)
+                batch = [
+                    (
+                        p.event_ticker,
+                        self._game_manager.subtitles.get(p.event_ticker, ""),
+                    )
+                    for p in new_pairs
+                ]
+                await self._game_status_resolver.resolve_batch(batch)
+
+            # Step 4: feed subscribes (only for genuinely-new pairs)
+            for pair in new_pairs:
+                await self._feed.subscribe(pair.ticker_a)
+                subscribed_tickers.append(pair.ticker_a)
+                if pair.ticker_b != pair.ticker_a:
+                    await self._feed.subscribe(pair.ticker_b)
+                    subscribed_tickers.append(pair.ticker_b)
+        except BaseException as exc:
+            # BaseException, not Exception — asyncio.CancelledError inherits
+            # from BaseException in Py3.12+. Without this, a cancelled commit
+            # worker (e.g. user mashes 'c' and exclusive=True kills us) would
+            # skip rollback entirely and leave engine state half-mutated.
+            cancelled = isinstance(exc, asyncio.CancelledError)
+            logger.warning(
+                "add_pairs_from_selection_rollback",
+                attempted=len(pairs),
+                rolled_back_adjuster=len(added_to_adjuster),
+                rolled_back_gsr=len(gsr_seeded),
+                rolled_back_subscribes=len(subscribed_tickers),
+                cancelled=cancelled,
+                exc_type=type(exc).__name__,
+                exc_msg=str(exc),
+            )
+            # Shield rollback so a secondary cancellation can't truncate it
+            # mid-cleanup. asyncio.shield wraps a single coroutine; we need
+            # one task that performs all the awaits.
+            try:
+                await asyncio.shield(
+                    self._rollback_partial_add(
+                        # Round-5 review fix #2: rollback must only undo
+                        # side effects of the CURRENT call. Pre-existing
+                        # pairs (returned by restore_game on duplicate)
+                        # were wired by a prior successful add — their
+                        # adjuster/GSR/feed state is correct. Removing
+                        # them here would erase legitimate engine state
+                        # the user did not ask to delete.
+                        pairs=new_pairs,
+                        added_to_adjuster=added_to_adjuster,
+                        gsr_seeded=gsr_seeded,
+                        subscribed_tickers=subscribed_tickers,
+                    )
+                )
+            except asyncio.CancelledError:
+                # If the shielded rollback itself is cancelled (process
+                # shutdown), let the cancellation propagate after we've at
+                # least logged what was leaked.
+                logger.warning(
+                    "add_pairs_rollback_interrupted",
+                    pairs=len(new_pairs),
+                )
+            raise
+
+        # Step 5: data_collector — only on the happy path. log_game_add
+        # writes an audit row that has no companion log_game_remove, so on
+        # rollback we simply don't emit it (no phantom audit entry).
+        # Round-5 review fix #3: iterate new_pairs (not pairs) so a retry
+        # over an already-monitored pair does NOT emit a duplicate audit
+        # row. The round-3 toast claim ("retry has zero downstream side
+        # effects") only holds if step 5 also dedupes.
+        if self._data_collector is not None:
+            for pair in new_pairs:
+                gs = (
+                    self._game_status_resolver.get(pair.event_ticker)
+                    if self._game_status_resolver
+                    else None
+                )
+                scheduled = gs.scheduled_start.isoformat() if gs and gs.scheduled_start else None
+                self._data_collector.log_game_add(
+                    event_ticker=pair.event_ticker,
+                    series_ticker=pair.series_ticker,
+                    sport="",
+                    league="",
+                    source="tree",
+                    ticker_a=pair.ticker_a,
+                    ticker_b=pair.ticker_b,
+                    volume_a=self._game_manager.volumes_24h.get(pair.ticker_a, 0),
+                    volume_b=self._game_manager.volumes_24h.get(pair.ticker_b, 0),
+                    fee_type=pair.fee_type,
+                    fee_rate=pair.fee_rate,
+                    scheduled_start=scheduled,
+                )
+
+        # Step 6: persist once. If persistence fails (disk full, antivirus
+        # lock on games_full.json, etc.), the in-memory engine state has
+        # already been mutated but the on-disk snapshot is stale. A restart
+        # at that point would lose engine_state for any newly-added pair —
+        # exactly the SURVIVOR-class bug the durability work prevents. So
+        # we run the same rollback as a step-3/4 failure: undo every side
+        # effect, then re-raise so the UI sees a hard commit failure and
+        # preserves staged_changes.
+        try:
+            self._persist_active_games()
+        except Exception as exc:
+            logger.warning(
+                "add_pairs_persistence_failed_rolling_back",
+                attempted=len(new_pairs),
+                exc_type=type(exc).__name__,
+                exc_msg=str(exc),
+            )
+            try:
+                await asyncio.shield(
+                    self._rollback_partial_add(
+                        # Round-5 review fix #2 (second site): same
+                        # rationale as the step-3/4 rollback above —
+                        # pass new_pairs only so a retry-with-
+                        # existing-pair persist failure does NOT
+                        # tear down the pre-existing pair.
+                        pairs=new_pairs,
+                        added_to_adjuster=added_to_adjuster,
+                        gsr_seeded=gsr_seeded,
+                        subscribed_tickers=subscribed_tickers,
+                    )
+                )
+            except asyncio.CancelledError:
+                logger.warning(
+                    "add_pairs_rollback_interrupted",
+                    pairs=len(new_pairs),
+                )
+            raise
+        return pairs
+
+    async def _rollback_partial_add(
+        self,
+        *,
+        pairs: list[ArbPair],
+        added_to_adjuster: list[ArbPair],
+        gsr_seeded: list[str],
+        subscribed_tickers: list[str],
+    ) -> None:
+        """Reverse every side effect of add_pairs_from_selection that
+        succeeded before failure.
+
+        Each step catches BaseException (not just Exception) because a
+        cancellation that lands inside one cleanup step would otherwise
+        escape the inner try/except, abort the rest of the cleanup, and
+        leak the side effects of all later steps. Catching BaseException
+        per step lets us log the cancellation, continue cleaning up, and
+        let the outer caller decide whether to re-raise.
+        """
+        for ticker in subscribed_tickers:
+            try:
+                await self._feed.unsubscribe(ticker)
+            except BaseException as exc:
+                logger.warning(
+                    "rollback_unsubscribe_failed",
+                    ticker=ticker,
+                    exc_type=type(exc).__name__,
+                    exc_msg=str(exc),
+                )
+        if self._game_status_resolver is not None:
+            for et in gsr_seeded:
+                try:
+                    self._game_status_resolver.remove(et)
+                except BaseException as exc:
+                    logger.warning(
+                        "rollback_gsr_failed",
+                        event_ticker=et,
+                        exc_type=type(exc).__name__,
+                        exc_msg=str(exc),
+                    )
+        for pair in added_to_adjuster:
+            try:
+                self._adjuster.remove_event(pair.event_ticker)
+            except BaseException as exc:
+                logger.warning(
+                    "rollback_adjuster_failed",
+                    event_ticker=pair.event_ticker,
+                    exc_type=type(exc).__name__,
+                    exc_msg=str(exc),
+                )
+        for pair in pairs:
+            try:
+                await self._game_manager.remove_game(pair.event_ticker)
+            except BaseException as exc:
+                logger.warning(
+                    "rollback_game_manager_failed",
+                    event_ticker=pair.event_ticker,
+                    exc_type=type(exc).__name__,
+                    exc_msg=str(exc),
+                )
+
+    async def remove_pairs_from_selection(
+        self,
+        pairs: list[tuple[str, str]],
+    ) -> list[RemoveOutcome]:
+        """Commit path for tree-unticked pairs.
+
+        Input shape (round-7 plan Fix #1): list of (pair_ticker,
+        kalshi_event_ticker) tuples. The kalshi_event_ticker is captured
+        at staging time so retry-after-persist-failure can populate the
+        outcome with the correct event identity even when the pair is
+        already gone from game_manager.
+
+        Returns per-pair RemoveOutcome so TreeScreen can decide per-event
+        whether to set deliberately_unticked, defer, or retry.
+
+        Per-transition durability: for inventory-bearing pairs that
+        transition to winding_down, an immediate persist runs after the
+        engine state is mutated. On persist failure, the pair's prior
+        engine state is restored (snapshot-and-restore) and a
+        RemoveBatchPersistenceError is raised carrying the count of
+        successfully-persisted transitions.
+        """
+        from talos.persistence_errors import (
+            PersistenceError,
+            RemoveBatchPersistenceError,
+        )
+
+        outcomes: list[RemoveOutcome] = []
+        successful_winding_count = 0
+
+        with self._game_manager.suppress_on_change():
+            for pt, input_kalshi_et in pairs:
+                pair = self._game_manager.get_game(pt)
+                if pair is None:
+                    outcomes.append(
+                        RemoveOutcome(
+                            pair_ticker=pt,
+                            kalshi_event_ticker=input_kalshi_et,
+                            status="not_found",
+                        )
+                    )
+                    continue
+                kalshi_et = pair.kalshi_event_ticker or pair.event_ticker
+
+                try:
+                    ledger = self._adjuster.get_ledger(pt)
+                    # Tests use MagicMock ledgers with has_filled_positions /
+                    # has_resting_orders; real PositionLedger has neither, so
+                    # derive has_inventory from filled_count / resting_count.
+                    has_inventory = False
+                    if ledger is not None:
+                        has_filled = getattr(ledger, "has_filled_positions", None)
+                        has_resting = getattr(ledger, "has_resting_orders", None)
+                        if callable(has_filled) or callable(has_resting):
+                            has_inventory = bool(
+                                (callable(has_filled) and has_filled())
+                                or (callable(has_resting) and has_resting()),
+                            )
+                        else:
+                            try:
+                                has_inventory = (
+                                    ledger.filled_count(Side.A) > 0
+                                    or ledger.filled_count(Side.B) > 0
+                                    or ledger.resting_count(Side.A) > 0
+                                    or ledger.resting_count(Side.B) > 0
+                                )
+                            except Exception:
+                                has_inventory = False
+
+                    if has_inventory:
+                        # Snapshot prior state for accurate rollback if
+                        # the per-transition persist fails. Plan Fix #2
+                        # (round-5 v0.1.1 finding #2): pairs can already
+                        # be in _exit_only_events via other engine paths
+                        # (milestone, sports-game-started, etc.); a
+                        # hardcoded rollback would silently strip those
+                        # safety conditions. Restore exactly the prior
+                        # values, not hardcoded "active".
+                        prior_was_winding = pt in self._winding_down
+                        prior_was_exit_only = pt in self._exit_only_events
+                        prior_engine_state = pair.engine_state
+
+                        self._winding_down.add(pt)
+                        await self.enforce_exit_only(pt)
+                        self._mark_engine_state(pt, "winding_down")
+
+                        # Per-transition durability: persist immediately
+                        # so a crash here doesn't lose the winding_down
+                        # state. force_during_suppress=True bypasses the
+                        # outer suppress_on_change() block.
+                        try:
+                            self._persist_active_games(force_during_suppress=True)
+                        except PersistenceError as exc:
+                            # Restore prior state EXACTLY. Cancelled
+                            # orders stay cancelled (irreversible) but
+                            # idempotent for retry.
+                            if not prior_was_winding:
+                                self._winding_down.discard(pt)
+                            if not prior_was_exit_only:
+                                self._exit_only_events.discard(pt)
+                            self._mark_engine_state(pt, prior_engine_state)
+                            raise RemoveBatchPersistenceError(
+                                persisted_count=successful_winding_count,
+                                message=(
+                                    f"persistence failed after "
+                                    f"{successful_winding_count} winding-down "
+                                    f"transitions (current pair: {pt})"
+                                ),
+                                original=exc,
+                                phase="transition",
+                            ) from exc
+                        successful_winding_count += 1
+
+                        try:
+                            fa = ledger.filled_count(Side.A) if ledger else "?"
+                            fb = ledger.filled_count(Side.B) if ledger else "?"
+                            ra = ledger.resting_count(Side.A) if ledger else "?"
+                            rb = ledger.resting_count(Side.B) if ledger else "?"
+                        except Exception:
+                            fa = fb = ra = rb = "?"
+                        reason = f"filled={fa},{fb} resting={ra},{rb}"
+                        logger.info(
+                            "winding_down_started",
+                            pair_ticker=pt,
+                            reason=reason,
+                        )
+                        outcomes.append(
+                            RemoveOutcome(
+                                pair_ticker=pt,
+                                kalshi_event_ticker=kalshi_et,
+                                status="winding_down",
+                                reason=reason,
+                            )
+                        )
+                        continue
+
+                    # Clean removal (reverse of add flow). Order matters:
+                    # do the dangerous async work (game_manager.remove_game,
+                    # which awaits feed.unsubscribe) FIRST. If it raises,
+                    # the `except Exception` below records "failed" and the
+                    # cheap engine-state cleanup never runs — so retry
+                    # finds the pair still present on every layer and can
+                    # complete the removal cleanly. The earlier ordering
+                    # cleared exit_only/stale/GSR/adjuster first, so an
+                    # unsubscribe failure left the engine in a half-cleared
+                    # state and the retry returned not_found.
+                    await self._game_manager.remove_game(pt)
+                    self._exit_only_events.discard(pt)
+                    self._stale_candidates.discard(pt)
+                    if self._game_status_resolver is not None:
+                        self._game_status_resolver.remove(pt)
+                    self._adjuster.remove_event(pt)
+                    outcomes.append(
+                        RemoveOutcome(
+                            pair_ticker=pt,
+                            kalshi_event_ticker=kalshi_et,
+                            status="removed",
+                        )
+                    )
+                except RemoveBatchPersistenceError:
+                    # Per-transition persist failure already raised; let
+                    # it escape the suppress block to the caller.
+                    raise
+                except Exception as exc:
+                    logger.warning(
+                        "tree_remove_failed",
+                        pair_ticker=pt,
+                        exc_info=True,
+                    )
+                    outcomes.append(
+                        RemoveOutcome(
+                            pair_ticker=pt,
+                            kalshi_event_ticker=kalshi_et,
+                            status="failed",
+                            reason=str(exc),
+                        )
+                    )
+
+        # Batch-end persist (covers clean removes; per-transition saves
+        # already covered winding_down transitions). Wrap in the same
+        # RemoveBatchPersistenceError envelope so failures here also
+        # carry the count of successful winding_down transitions for
+        # the user-facing toast.
+        try:
+            self._persist_active_games(force_during_suppress=True)
+        except PersistenceError as exc:
+            if isinstance(exc, RemoveBatchPersistenceError):
+                raise
+            raise RemoveBatchPersistenceError(
+                persisted_count=successful_winding_count,
+                message=(
+                    f"per-transition winding-down saves succeeded for "
+                    f"{successful_winding_count} pairs; final batch save "
+                    f"failed (clean removes in this batch may not be durable "
+                    f"and will reappear from the stale snapshot on restart)"
+                ),
+                original=exc,
+                phase="batch_end",
+            ) from exc
+        return outcomes
+
+    async def _reconcile_winding_down(self) -> None:
+        """Remove winding-down pairs whose ledger has cleared.
+
+        For each cleanly-removed pair, check if it was the last one sharing
+        its kalshi_event_ticker. If so, emit event_fully_removed to all
+        subscribed listeners (TreeScreen uses this to apply deferred [.] flags).
+        """
+        to_check = list(self._winding_down)
+        to_remove: list[str] = []
+        for pt in to_check:
+            ledger = self._adjuster.get_ledger(pt)
+            if ledger is None:
+                continue
+            # Support both ledger API (real) and MagicMock (tests)
+            has_filled = getattr(ledger, "has_filled_positions", None)
+            has_resting = getattr(ledger, "has_resting_orders", None)
+            if callable(has_filled) and callable(has_resting):
+                if has_filled() or has_resting():
+                    continue
+            else:
+                # Real PositionLedger: use count accessors
+                if ledger.filled_count(Side.A) or ledger.filled_count(Side.B):
+                    continue
+                if ledger.resting_count(Side.A) or ledger.resting_count(Side.B):
+                    continue
+            to_remove.append(pt)
+
+        if not to_remove:
+            return
+
+        # Build (pair_ticker, kalshi_event_ticker) tuples for the new
+        # remove_pairs_from_selection signature (round-7 plan Fix #1).
+        remove_input: list[tuple[str, str]] = []
+        for pt in to_remove:
+            pair = self._game_manager.get_game(pt)
+            kalshi_et = ""
+            if pair is not None:
+                kalshi_et = pair.kalshi_event_ticker or pair.event_ticker
+            remove_input.append((pt, kalshi_et))
+        outcomes = await self.remove_pairs_from_selection(remove_input)
+        # Round-3 review fix #2: only discard pairs from _winding_down when
+        # the outcome is actually terminal for that pair. A `failed`
+        # outcome (e.g. unsubscribe raised) leaves the pair still present
+        # in GameManager; if we discarded it from _winding_down, the next
+        # reconciliation cycle wouldn't retry the removal and any deferred
+        # untick would stay stuck pending forever (until restart). Only
+        # `removed` (clean removal completed) and `not_found` (pair already
+        # gone — idempotency case) are terminal.
+        terminal_statuses = {"removed", "not_found"}
+        terminal_pts = {
+            o.pair_ticker for o in outcomes if o.status in terminal_statuses
+        }
+        for pt in terminal_pts:
+            self._winding_down.discard(pt)
+
+        # Emit event_fully_removed for any kalshi_event_ticker that no longer
+        # has any pair in GameManager._games. Pairs we just asked to remove in
+        # this pass are excluded from the "still present" check since the real
+        # remove_pairs_from_selection has already popped them from _games (and
+        # tests mock remove_pairs_from_selection directly, so we treat the
+        # pair_tickers we scheduled for removal as already-gone).
+        # Round-3 review fix #2 (paired): only count actually-terminal pairs
+        # as "just removed". Otherwise a partial-failure batch where event K
+        # had P1 (removed) + P2 (failed) would treat both as gone and emit
+        # event_fully_removed(K) prematurely, promoting the deferred untick
+        # while P2 was still alive in _games and _winding_down.
+        just_removed_pts = terminal_pts
+        removed_events = {o.kalshi_event_ticker for o in outcomes if o.status == "removed"}
+        for kalshi_et in removed_events:
+            still_present = any(
+                pt not in just_removed_pts
+                and (p.kalshi_event_ticker or p.event_ticker) == kalshi_et
+                for pt, p in self._game_manager._games.items()
+            )
+            if not still_present:
+                for listener in self._event_fully_removed_listeners:
+                    try:
+                        listener(kalshi_et)
+                    except Exception:
+                        logger.warning(
+                            "event_fully_removed_listener_failed",
+                            exc_info=True,
+                        )
+
+    def add_event_fully_removed_listener(self, fn) -> None:
+        self._event_fully_removed_listeners.append(fn)
+
+    def _mark_engine_state(self, pair_ticker: str, state: str) -> None:
+        """Set per-pair engine_state on the ArbPair in GameManager._games
+        so the next _persist_games write picks it up."""
+        pair = self._game_manager.get_game(pair_ticker)
+        if pair is not None:
+            pair.engine_state = state
+
+    def _apply_persisted_engine_state(self, pair: ArbPair) -> None:
+        """Apply a pair's persisted engine_state after restore.
+
+        Winding-down pairs re-enter _winding_down + _exit_only_events so the
+        next tick immediately applies exit-only behavior — preventing the
+        SURVIVOR-class failure mode where a crash during wind-down could
+        result in the pair resuming normal trading after restart.
+        """
+        state = getattr(pair, "engine_state", "active")
+        if state == "winding_down":
+            self._winding_down.add(pair.event_ticker)
+            self._exit_only_events.add(pair.event_ticker)
+            logger.info(
+                "winding_down_restored",
+                pair_ticker=pair.event_ticker,
+            )
+        elif state == "exit_only":
+            self._exit_only_events.add(pair.event_ticker)
+            logger.info(
+                "exit_only_restored",
+                pair_ticker=pair.event_ticker,
+            )
+
+    def _persist_active_games(self, *, force_during_suppress: bool = False) -> None:
+        """Single persist point for batch add/remove paths.
+
+        Delegates to GameManager.on_change if it's wired to the legacy
+        _persist_games writer in __main__.py. That writer serializes all
+        pairs in game_manager.active_games to games_full.json.
+
+        force_during_suppress: bypass the suppress_on_change() null-out
+        and call the saved (suppressed) callback. Used by the per-
+        transition winding_down persist inside remove_pairs_from_selection,
+        which runs INSIDE the suppress block but needs durability NOW.
+
+        Failure semantics:
+        - PersistenceError always propagates so callers can roll back.
+        - Under force_during_suppress=True: ANY callback exception
+          (TypeError, AttributeError from a wiring bug, etc.) is
+          converted to PersistenceError. The caller demanded durability;
+          a silent swallow would break the safety contract.
+        - Under force_during_suppress=False: non-PersistenceError
+          exceptions are logged but not raised (legacy fire-and-forget
+          behavior for non-safety on_change writers).
+        """
+        from talos.persistence_errors import PersistenceError
+
+        cb = self._game_manager.on_change
+        if cb is None and force_during_suppress:
+            cb = self._game_manager.suppressed_on_change
+        if cb is None:
+            if force_during_suppress:
+                # Fail-closed: caller demanded durability and there's no
+                # writer to deliver it. Indicates a wiring bug.
+                raise PersistenceError(
+                    "_persist_active_games(force_during_suppress=True) "
+                    "called but no on_change writer is wired"
+                )
+            return
+        try:
+            cb()
+        except PersistenceError:
+            raise
+        except Exception as exc:
+            if force_during_suppress:
+                # Fail-closed: any unexpected callback exception under
+                # force is converted to PersistenceError to preserve the
+                # writer's exit contract ("raises iff persistence-relevant,
+                # only PersistenceError type"). Silent swallow would
+                # break the durability invariant the same way a swallowed
+                # save_games_full failure would.
+                raise PersistenceError(
+                    f"persistence callback raised {type(exc).__name__}: {exc}"
+                ) from exc
+            # Non-force path: legacy fire-and-forget behavior preserved.
+            logger.warning("persist_active_games_failed", exc_info=True)
 
     async def remove_game(self, event_ticker: str) -> None:
         """Remove a game from monitoring."""
@@ -3205,9 +4043,7 @@ class TradingEngine:
             # Update fills from amend response
             fill_delta = old_order.fill_count - ledger.filled_count(side)
             if fill_delta > 0:
-                old_price = (
-                    old_order.no_price if qi.kalshi_side == "no" else old_order.yes_price
-                )
+                old_price = old_order.no_price if qi.kalshi_side == "no" else old_order.yes_price
                 fee_delta = old_order.maker_fees - ledger.filled_fees(side)
                 ledger.record_fill(
                     side,
@@ -3218,9 +4054,7 @@ class TradingEngine:
 
             # Update ledger with new resting state
             amended_price = (
-                amended_order.no_price
-                if qi.kalshi_side == "no"
-                else amended_order.yes_price
+                amended_order.no_price if qi.kalshi_side == "no" else amended_order.yes_price
             )
             ledger.record_resting(
                 side,
@@ -3230,8 +4064,7 @@ class TradingEngine:
             )
 
             self._notify(
-                f"Queue improved: {name} {qi.side} "
-                f"{qi.current_price}c → {qi.improved_price}c",
+                f"Queue improved: {name} {qi.side} {qi.current_price}c → {qi.improved_price}c",
             )
             logger.info(
                 "queue_improvement_executed",
