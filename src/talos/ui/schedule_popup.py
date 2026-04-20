@@ -80,15 +80,8 @@ class SchedulePopup(ModalScreen[dict[str, str] | None]):
                         f"{r.kalshi_event_ticker}  ({r.sub_title or r.series_ticker})",
                         classes="event-label",
                     )
-                    # Do NOT pre-fill from expected_expiration_time /
-                    # close_time. For continuous events (hurricane counts,
-                    # commodity panels) those values are settlement times
-                    # — typically a day or more after the rules-window
-                    # closes — and using them as defaults would persist a
-                    # cutoff that's hours late, defeating the point of
-                    # exit-only scheduling. Force the user to type a real
-                    # cutoff or explicitly opt out via "No exit-only".
                     inp = Input(
+                        value=self._prefill_value(r),
                         placeholder="YYYY-MM-DDTHH:MM:SS±HH:MM",
                         id=f"input-{r.kalshi_event_ticker}",
                     )
@@ -123,6 +116,23 @@ class SchedulePopup(ModalScreen[dict[str, str] | None]):
             if inp is not None:
                 inp.value = "(no exit-only)"
                 inp.disabled = True
+
+    @staticmethod
+    def _prefill_value(record: ArbPairRecord) -> str:
+        """Return the initial Input value for `record`'s row.
+
+        Pre-fills from expected_expiration_time. Operator explicitly
+        accepted the round-2 risk that for continuous events (hurricane
+        counts, commodity panels) this value is the SETTLEMENT time —
+        hours to days AFTER the actual rules-window closes — so leaving
+        the default would let trading run past the real resolution
+        moment. Mitigation: the popup is still shown for confirmation;
+        nothing commits to Talos until the operator clicks "Save all"
+        with the visible value. Empty string when the record has no
+        expected_expiration_time (preserves the placeholder hint and
+        forces explicit input or opt-out).
+        """
+        return record.expected_expiration_time or ""
 
     @staticmethod
     def _parse_aware_datetime(raw: str) -> datetime:

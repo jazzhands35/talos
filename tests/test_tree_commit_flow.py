@@ -330,6 +330,73 @@ def test_schedule_popup_rejects_naive_datetime():
     assert parsed.tzinfo is not None
 
 
+def test_schedule_popup_accepts_kalshi_z_suffix():
+    """Kalshi API returns ISO strings with 'Z' suffix (e.g.
+    "2026-12-02T15:00:00Z"). Python 3.11+ datetime.fromisoformat
+    accepts Z, but we need to confirm it parses to a tz-aware datetime
+    so the validator doesn't reject API pre-fill values."""
+    parsed = SchedulePopup._parse_aware_datetime("2026-12-02T15:00:00Z")
+    assert parsed.tzinfo is not None
+    assert parsed.utcoffset() is not None  # not None even though offset is 0
+
+
+def test_schedule_popup_prefills_from_expected_expiration_time():
+    """User explicitly opted into auto-fill (2026-04-20). SchedulePopup
+    must pre-fill each row's Input with the record's
+    expected_expiration_time so the operator can hit Save without
+    typing — but the popup is still shown so they can review/edit
+    before any commit lands. This is the round-2 prefill safety
+    decision being deliberately reverted at user request; the popup
+    remains the confirmation gate."""
+    record = ArbPairRecord(
+        event_ticker="KXHURCTOTMAJ-26DEC01-T4",
+        ticker_a="KXHURCTOTMAJ-26DEC01-T4",
+        ticker_b="KXHURCTOTMAJ-26DEC01-T4",
+        kalshi_event_ticker="KXHURCTOTMAJ-26DEC01",
+        series_ticker="KXHURCTOTMAJ",
+        category="Climate and Weather",
+        expected_expiration_time="2026-12-02T15:00:00Z",
+    )
+    assert SchedulePopup._prefill_value(record) == "2026-12-02T15:00:00Z"
+
+
+def test_schedule_popup_prefill_handles_missing_expected_expiration():
+    """Some Kalshi events lack expected_expiration_time entirely (or it
+    came back None during parse). In that case pre-fill must fall back
+    to empty string rather than 'None' literal — empty preserves the
+    placeholder hint and forces the user to type or click opt-out."""
+    record = ArbPairRecord(
+        event_ticker="K-1",
+        ticker_a="K-1",
+        ticker_b="K-1",
+        kalshi_event_ticker="K",
+        series_ticker="KX",
+        category="Mentions",
+        expected_expiration_time=None,
+    )
+    assert SchedulePopup._prefill_value(record) == ""
+
+
+def test_schedule_popup_prefill_value_is_validator_compatible():
+    """End-to-end: a Kalshi-shaped expected_expiration_time string ('Z'
+    suffix, no offset) pre-filled into the popup must pass the
+    _parse_aware_datetime validator without modification. Otherwise the
+    operator would have to edit every pre-filled row before Save
+    would accept it — defeating the point of auto-fill."""
+    record = ArbPairRecord(
+        event_ticker="K-1",
+        ticker_a="K-1",
+        ticker_b="K-1",
+        kalshi_event_ticker="K",
+        series_ticker="KX",
+        category="Mentions",
+        expected_expiration_time="2026-12-02T15:00:00Z",
+    )
+    raw = SchedulePopup._prefill_value(record)
+    parsed = SchedulePopup._parse_aware_datetime(raw)
+    assert parsed.tzinfo is not None
+
+
 @pytest.mark.asyncio
 async def test_action_commit_changes_does_not_announce_success_on_cancel():
     screen = cast(Any, TreeScreen.__new__(TreeScreen))
