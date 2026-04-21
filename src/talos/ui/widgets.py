@@ -9,6 +9,7 @@ from zoneinfo import ZoneInfo
 from rich.segment import Segment
 from rich.style import Style as RichStyle
 from rich.text import Text as RichText
+from textual.binding import Binding
 from textual.widgets import DataTable, RichLog, Static
 
 from talos.cpm import format_cpm, format_eta
@@ -301,6 +302,25 @@ class OpportunitiesTable(DataTable):
     }
     """
 
+    # Horizontal scroll bindings. DataTable's cursor_type="row" disables the
+    # arrow-key horizontal navigation path, and Textual shows a 1-cell
+    # scrollbar that's hard to hit with a mouse, so on narrow terminals the
+    # rightmost columns (status, locked, exposure) become unreachable without
+    # these. Kept hidden (show=False) to avoid adding to the already-crowded
+    # app footer. Bracket pair = page-scroll, shift+arrow = single-cell.
+    BINDINGS = [
+        Binding("[", "page_left", "Page Left", show=False),
+        Binding("]", "page_right", "Page Right", show=False),
+        Binding("shift+left", "scroll_left", show=False),
+        Binding("shift+right", "scroll_right", show=False),
+    ]
+
+    # How many leading columns to pin in full and compact modes. Full pins
+    # ID + dot + Team so the ticker stays visible while scrolling right;
+    # compact already hides ID + dot, so we pin Team only.
+    _FIXED_COLS_FULL = 3
+    _FIXED_COLS_COMPACT = 1
+
     def __init__(self, **kwargs: Any) -> None:
         super().__init__(**kwargs)
         self._positions: dict[str, EventPositionSummary] = {}
@@ -350,6 +370,15 @@ class OpportunitiesTable(DataTable):
         self.cursor_type = "row"
         self.zebra_stripes = False  # We handle pair striping ourselves
         self._setup_columns()
+        self._apply_fixed_columns()
+
+    def _apply_fixed_columns(self) -> None:
+        """Pin the leading identifier columns so they stay visible during
+        horizontal scroll. Count depends on the current view mode.
+        """
+        self.fixed_columns = (
+            self._FIXED_COLS_COMPACT if self._compact else self._FIXED_COLS_FULL
+        )
 
     # ── View mode helpers ────────────────────────────────────────────
 
@@ -392,6 +421,7 @@ class OpportunitiesTable(DataTable):
         self._needs_resort = False
         self.clear(columns=True)
         self._setup_columns()
+        self._apply_fixed_columns()
         self._all_dirty = True  # Force full rebuild on next refresh
 
     def _get_row_style(self, row_index: int, base_style: RichStyle) -> RichStyle:  # type: ignore[override]
@@ -413,7 +443,32 @@ class OpportunitiesTable(DataTable):
         cursor_location: Any,
         hover_location: Any,
     ) -> Any:
-        """Vertical column dividers + overline separator between event pairs."""
+        """Vertical column dividers + overline separator between event pairs.
+
+        Scroll-geometry invariant: Textual crops the ``scrollable`` band at
+        ``fixed_width = sum(ordered_columns[:fixed_columns].render_width)``
+        and draws everything from that offset onward to the right of the
+        pinned band. If we insert separator cells into the first
+        ``fixed_columns`` positions of ``scrollable``, the first non-fixed
+        cell ends up shifted to the right of the crop boundary, so the
+        first horizontal-scroll steps consume duplicated padding instead of
+        real content. To avoid that we:
+
+        * leave the leading ``fixed_columns`` cells of ``scrollable``
+          unseparated (their sum equals ``fixed_width``),
+        * emit no separator at the fixed/scrollable seam (that boundary
+          is naturally indicated by the pinned band's right edge), and
+        * only insert ``│`` dividers between the remaining scrollable
+          cells.
+
+        The ``fixed`` band is returned at its native width for the same
+        reason — adding cells to it would widen the pinned render beyond
+        the ``fixed_width`` Textual expects, desyncing the crop. The
+        trailing extend-style filler segment(s) Textual appends to
+        ``scrollable`` are preserved verbatim. The pair-separator overline
+        is applied to both bands because it's a style-only modifier and
+        does not change segment widths.
+        """
         fixed, scrollable = super()._render_line_in_row(
             row_key,
             line_no,
@@ -425,35 +480,47 @@ class OpportunitiesTable(DataTable):
         if col_count < 2:
             return fixed, scrollable
 
-        # Vertical column separators
         sep = [Segment("\u2502", self._SEP_STYLE)]
-        result = [scrollable[0]]
-        for i in range(1, col_count):
-            result.append(sep)
-            result.append(scrollable[i])
-        for i in range(col_count, len(scrollable)):
-            result.append(scrollable[i])
+        fc = self.fixed_columns or 0
 
-        # Overline on :a rows (except the very first) to separate event pairs
+        # Rebuild the scrollable band without shifting the crop boundary.
+        scrollable_out: list[Any] = [scrollable[i] for i in range(fc)]
+        if fc < col_count:
+            scrollable_out.append(scrollable[fc])
+            for i in range(fc + 1, col_count):
+                scrollable_out.append(sep)
+                scrollable_out.append(scrollable[i])
+        # Preserve any trailing extend-style filler segments.
+        for i in range(col_count, len(scrollable)):
+            scrollable_out.append(scrollable[i])
+
+        # Overline on :a rows (except the very first) to separate event
+        # pairs. Style-only; preserves the width of both bands.
+        fixed_out: list[Any] = list(fixed)
         key_str = str(row_key.value) if row_key.value is not None else ""
         if key_str.endswith(":a") and line_no == 0:
             row_index = self._row_locations.get(row_key)
             if row_index is None:
                 row_index = 0
             if row_index > 0:
-                result = [
-                    [
-                        Segment(
-                            seg.text,
-                            (seg.style or RichStyle()) + self._DIVIDER_STYLE,
-                            seg.control,
-                        )
-                        for seg in cell
-                    ]
-                    for cell in result
-                ]
 
-        return fixed, result
+                def _with_overline(cells: list[Any]) -> list[Any]:
+                    return [
+                        [
+                            Segment(
+                                seg.text,
+                                (seg.style or RichStyle()) + self._DIVIDER_STYLE,
+                                seg.control,
+                            )
+                            for seg in cell
+                        ]
+                        for cell in cells
+                    ]
+
+                scrollable_out = _with_overline(scrollable_out)
+                fixed_out = _with_overline(fixed_out)
+
+        return fixed_out, scrollable_out
 
     def toggle_sort(self, col_idx: int) -> None:
         """Sort rows by column — one-time reorder on click."""

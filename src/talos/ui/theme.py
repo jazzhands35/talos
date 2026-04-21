@@ -44,6 +44,7 @@ Footer {{
     min-height: 8;
     border: solid {SURFACE1};
     background: {BASE};
+    scrollbar-size-horizontal: 2;
 }}
 
 #bottom-panels {{

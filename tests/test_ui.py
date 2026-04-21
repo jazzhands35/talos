@@ -7,6 +7,7 @@ from types import MethodType, SimpleNamespace
 from typing import cast
 
 from rich.text import Text as RichText
+from textual.binding import Binding
 
 from talos.auto_accept_log import AutoAcceptLogger
 from talos.engine import TradingEngine
@@ -724,3 +725,250 @@ class TestExecutionModeGovernance:
             await pilot.pause()
             error = screen.query_one("#modal-error", Label)
             assert "greater than 0" in str(error.render())
+
+
+class TestHorizontalScrollUX:
+    """Coverage for the fixed-column + horizontal-scroll-binding patch.
+
+    Regression targets:
+      - Narrow-viewport users need horizontal-scroll keybindings because
+        cursor_type='row' disables arrow-key horizontal navigation.
+      - The leading identifier columns must stay pinned while scrolling so
+        the row remains identifiable.
+      - The render override must preserve Textual's fixed-band width
+        contract (sum of the first ``fixed_columns`` column render widths).
+    """
+
+    @staticmethod
+    def _binding_map() -> dict[str, Binding]:
+        """Index OpportunitiesTable.BINDINGS by key, filtering out any
+        tuple-form entries so pyright can narrow to Binding."""
+        result: dict[str, Binding] = {}
+        for b in OpportunitiesTable.BINDINGS:
+            if isinstance(b, Binding):
+                result[b.key] = b
+        return result
+
+    def test_bindings_wire_brackets_to_page_scroll(self) -> None:
+        """`[` / `]` must invoke page_left / page_right (not scroll_left /
+        scroll_right) so keyboard navigation can jump a viewport at a time
+        on narrow terminals."""
+        bindings = self._binding_map()
+        assert bindings["["].action == "page_left"
+        assert bindings["]"].action == "page_right"
+
+    def test_bindings_wire_shift_arrows_to_single_cell_scroll(self) -> None:
+        """shift+arrow must invoke fine-grained single-cell scroll."""
+        bindings = self._binding_map()
+        assert bindings["shift+left"].action == "scroll_left"
+        assert bindings["shift+right"].action == "scroll_right"
+
+    def test_scroll_bindings_are_hidden_from_footer(self) -> None:
+        """Footer is already crowded — these bindings must not add to it."""
+        bindings = self._binding_map()
+        for key in ("[", "]", "shift+left", "shift+right"):
+            assert bindings[key].show is False, f"{key} must be show=False"
+
+    async def test_full_mode_pins_three_leading_columns(self) -> None:
+        """Full mode pins id + dot + team (indices 0-2)."""
+        app = TalosApp()
+        async with app.run_test(size=(200, 50)):
+            table = app.query_one(OpportunitiesTable)
+            assert table._compact is False
+            assert table.fixed_columns == OpportunitiesTable._FIXED_COLS_FULL
+            assert table.fixed_columns == 3
+
+    async def test_compact_mode_pins_one_leading_column(self) -> None:
+        """Compact mode drops id + dot so only team should be pinned."""
+        app = TalosApp()
+        async with app.run_test(size=(200, 50)) as pilot:
+            table = app.query_one(OpportunitiesTable)
+            table.set_compact(True)
+            await pilot.pause()
+            assert table._compact is True
+            assert table.fixed_columns == OpportunitiesTable._FIXED_COLS_COMPACT
+            assert table.fixed_columns == 1
+
+    async def test_compact_toggle_updates_fixed_columns(self) -> None:
+        """Toggling compact twice returns fixed_columns to the full value."""
+        app = TalosApp()
+        async with app.run_test(size=(200, 50)) as pilot:
+            table = app.query_one(OpportunitiesTable)
+            assert table.fixed_columns == 3
+            table.set_compact(True)
+            await pilot.pause()
+            assert table.fixed_columns == 1
+            table.set_compact(False)
+            await pilot.pause()
+            assert table.fixed_columns == 3
+
+    async def test_fixed_band_width_matches_textual_contract(self) -> None:
+        """Render override must not widen the pinned band — Textual crops
+        the scrollable region using the sum of the first fixed_columns
+        column render widths, so adding cells to `fixed` desyncs the crop.
+        """
+        from textual.coordinate import Coordinate
+
+        scanner = _make_scanner_with_opportunity()
+        app = TalosApp(scanner=scanner)
+        async with app.run_test(size=(120, 30)) as pilot:
+            app.refresh_opportunities()
+            await pilot.pause()
+            table = app.query_one(OpportunitiesTable)
+
+            expected = sum(
+                c.get_render_width(table)
+                for c in table.ordered_columns[: table.fixed_columns]
+            )
+            first_row_key = next(iter(table._data.keys()))
+            fixed, _scrollable = table._render_line_in_row(
+                first_row_key,
+                0,
+                table.rich_style,
+                Coordinate(-1, -1),
+                Coordinate(-1, -1),
+            )
+            actual = sum(sum(len(seg.text) for seg in cell) for cell in fixed)
+            assert actual == expected, (
+                f"Fixed-band width {actual} does not match Textual contract {expected}. "
+                "Adding separator cells to `fixed` desyncs the scroll crop."
+            )
+
+    async def test_scrollable_band_crop_boundary_aligns_with_fixed_width(
+        self,
+    ) -> None:
+        """Scroll-geometry invariant: Textual crops the scrollable band at
+        ``fixed_width`` (the summed render widths of the first
+        ``fixed_columns`` columns). If our separator insertion widens the
+        scrollable prefix beyond that, the first visible content after the
+        pinned band is not the first non-fixed cell but leftover padding
+        from the pinned-column duplicate, and horizontal scroll consumes
+        padding instead of advancing through real content.
+        """
+        from textual.coordinate import Coordinate
+
+        scanner = _make_scanner_with_opportunity()
+        app = TalosApp(scanner=scanner)
+        async with app.run_test(size=(80, 30)) as pilot:
+            app.refresh_opportunities()
+            await pilot.pause()
+            table = app.query_one(OpportunitiesTable)
+            fc = table.fixed_columns
+            fixed_width = sum(
+                c.get_render_width(table) for c in table.ordered_columns[:fc]
+            )
+            first_row_key = next(iter(table._data.keys()))
+            _fixed, scrollable = table._render_line_in_row(
+                first_row_key,
+                0,
+                table.rich_style,
+                Coordinate(-1, -1),
+                Coordinate(-1, -1),
+            )
+            prefix_width = sum(
+                sum(len(seg.text) for seg in cell) for cell in scrollable[:fc]
+            )
+            assert prefix_width == fixed_width, (
+                f"scrollable prefix width {prefix_width} must equal fixed_width "
+                f"{fixed_width}. If larger, the scroll crop lands inside the "
+                "first non-fixed column and early scroll steps consume "
+                "duplicated padding instead of column content."
+            )
+
+    async def test_first_non_fixed_cell_is_at_crop_boundary(self) -> None:
+        """Stronger form of the crop-alignment invariant: the cell at index
+        ``fixed_columns`` in scrollable_out must be an actual column cell
+        (non-empty, not a separator) and its first character sits at
+        position ``fixed_width`` in the concatenated scrollable stream.
+        """
+        from textual.coordinate import Coordinate
+
+        scanner = _make_scanner_with_opportunity()
+        app = TalosApp(scanner=scanner)
+        async with app.run_test(size=(80, 30)) as pilot:
+            app.refresh_opportunities()
+            await pilot.pause()
+            table = app.query_one(OpportunitiesTable)
+            fc = table.fixed_columns
+            fixed_width = sum(
+                c.get_render_width(table) for c in table.ordered_columns[:fc]
+            )
+            expected_first_col_width = table.ordered_columns[fc].get_render_width(table)
+
+            first_row_key = next(iter(table._data.keys()))
+            _fixed, scrollable = table._render_line_in_row(
+                first_row_key,
+                0,
+                table.rich_style,
+                Coordinate(-1, -1),
+                Coordinate(-1, -1),
+            )
+            first_scrollable_cell_width = sum(
+                len(seg.text) for seg in scrollable[fc]
+            )
+            # Cell at index fc must be the first non-fixed column (no
+            # separator cell has been inserted before it).
+            assert first_scrollable_cell_width == expected_first_col_width, (
+                f"scrollable[{fc}] width is {first_scrollable_cell_width}, "
+                f"expected {expected_first_col_width} (the first non-fixed "
+                "column's render width). If this is 1, a separator cell was "
+                "inserted at the seam and the crop boundary is misaligned."
+            )
+            # The cell just past the first non-fixed column should be a
+            # separator (1-char `│`), confirming we only insert separators
+            # AFTER the crop boundary, not before.
+            if fc + 1 < len(scrollable) and fc + 2 < len(scrollable):
+                sep_width = sum(len(seg.text) for seg in scrollable[fc + 1])
+                assert sep_width == 1, (
+                    f"expected separator (width 1) at scrollable[{fc + 1}], "
+                    f"got width {sep_width}"
+                )
+            # And prefix text content before the crop boundary must be
+            # exactly fixed_width characters.
+            prefix_text = "".join(
+                seg.text
+                for cell in scrollable[:fc]
+                for seg in cell
+            )
+            assert len(prefix_text) == fixed_width
+
+    async def test_shift_right_advances_scroll_x(self) -> None:
+        """End-to-end wiring: pressing shift+right must invoke the
+        scroll_right action, which increments the widget's scroll_x state.
+        This catches regressions where the binding is unreachable (focus
+        routing) or wired to the wrong action.
+        """
+        scanner = _make_scanner_with_opportunity()
+        app = TalosApp(scanner=scanner)
+        async with app.run_test(size=(80, 30)) as pilot:
+            app.refresh_opportunities()
+            await pilot.pause()
+            table = app.query_one(OpportunitiesTable)
+            table.focus()
+            await pilot.pause()
+
+            # Row count and structural invariants preserved across scroll.
+            row_count_before = table.row_count
+            scroll_x_start = table.scroll_x
+
+            await pilot.press("shift+right")
+            await pilot.pause()
+            scroll_x_after_one = table.scroll_x
+
+            await pilot.press("shift+right")
+            await pilot.pause()
+            scroll_x_after_two = table.scroll_x
+
+            assert table.row_count == row_count_before
+            assert scroll_x_after_one > scroll_x_start, (
+                "shift+right must advance scroll_x (binding not reaching "
+                "scroll_right action)"
+            )
+            assert scroll_x_after_two > scroll_x_after_one, (
+                "second shift+right must advance scroll_x further"
+            )
+
+            # shift+left should reverse it.
+            await pilot.press("shift+left")
+            await pilot.pause()
+            assert table.scroll_x < scroll_x_after_two
