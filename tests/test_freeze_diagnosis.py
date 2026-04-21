@@ -14,6 +14,7 @@ import contextlib
 import time
 from unittest.mock import AsyncMock, MagicMock
 
+from talos.automation_config import AutomationConfig
 from talos.bid_adjuster import BidAdjuster
 from talos.engine import TradingEngine
 from talos.game_manager import GameManager
@@ -54,6 +55,10 @@ def _make_engine(*, n_pairs: int = 0, with_data_collector: bool = False) -> Trad
     game_mgr.volumes_24h = {}
     game_mgr.leg_labels = {}
 
+    # These diagnostics measure engine responsiveness without the tree-mode
+    # startup gate — that path is covered by its own tests. Passing
+    # tree_mode=False explicitly keeps refresh_account / refresh_balance
+    # fast even after the default flipped to True.
     engine = TradingEngine(
         scanner=scanner,
         game_manager=game_mgr,
@@ -61,6 +66,7 @@ def _make_engine(*, n_pairs: int = 0, with_data_collector: bool = False) -> Trad
         market_feed=feed,
         tracker=tracker,
         adjuster=adjuster,
+        automation_config=AutomationConfig(tree_mode=False),
     )
 
     # Add pairs if requested

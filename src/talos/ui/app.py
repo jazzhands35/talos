@@ -1088,20 +1088,15 @@ class TalosApp(App):
     def action_push_tree_screen(self) -> None:
         """Push the TreeScreen (tree-mode selection surface).
 
-        Gated behind automation_config.tree_mode. If tree mode is off or the
-        collaborators are not initialized, show a warning notification.
+        Tree mode is always on in production. Collaborators are only
+        absent in test harnesses that construct the app without a full
+        engine; in that case we bail with a warning rather than crash.
         """
         from talos.ui.tree_screen import TreeScreen
 
-        if self._automation_config is None or not self._automation_config.tree_mode:
-            self.notify(
-                "Tree mode disabled. Set TALOS_TREE_MODE=1 in your "
-                "environment (e.g. talos.bat / talos_exe.bat) and relaunch.",
-                severity="warning",
-            )
-            return
         if (
-            self._discovery_service is None
+            self._automation_config is None
+            or self._discovery_service is None
             or self._milestone_resolver is None
             or self._tree_metadata_store is None
         ):

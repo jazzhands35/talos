@@ -394,6 +394,9 @@ class TestGameStartCancelAll:
         resolver = MagicMock(spec=GameStatusResolver)
         resolver.get.return_value = GameStatus(state="live")
 
+        # This test asserts on _game_started_events which is populated by
+        # _check_exit_only_legacy. Tree-mode runs a different cascade, so
+        # opt out explicitly.
         engine = TradingEngine(
             scanner=scanner,
             game_manager=MagicMock(spec=GameManager),
@@ -402,6 +405,7 @@ class TestGameStartCancelAll:
             tracker=TopOfMarketTracker(books),
             adjuster=adjuster,
             game_status_resolver=resolver,
+            automation_config=AutomationConfig(tree_mode=False),
         )
 
         engine._check_exit_only()
@@ -436,6 +440,7 @@ class TestGameStartCancelAll:
             tracker=TopOfMarketTracker(books),
             adjuster=adjuster,
             game_status_resolver=resolver,
+            automation_config=AutomationConfig(tree_mode=False),
         )
 
         engine._check_exit_only()
@@ -473,6 +478,7 @@ class TestGameStartCancelAll:
             tracker=TopOfMarketTracker(books),
             adjuster=adjuster,
             game_status_resolver=resolver,
+            automation_config=AutomationConfig(tree_mode=False),
         )
 
         engine._check_exit_only()

@@ -22,7 +22,10 @@ class AutomationConfig:
     sports_enabled: bool = True
 
     # Tree-mode feature flag — all new behavior gated on this.
-    tree_mode: bool = False
+    # Defaults on: the feature has stabilized through the scanner-tree-redesign
+    # branch and is the intended production experience. Tests that need
+    # legacy behavior can still pass `tree_mode=False` explicitly.
+    tree_mode: bool = True
 
     # Startup gate — max wait for milestones before engine begins tick loop.
     startup_milestone_wait_seconds: float = 30.0

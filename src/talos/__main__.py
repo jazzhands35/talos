@@ -43,10 +43,9 @@ def _configure_logging(*, log_path: Path | None = None, stderr: TextIO | None = 
     if log_path is not None:
         log_path.parent.mkdir(parents=True, exist_ok=True)
         _LOG_FILE_HANDLE = log_path.open("a", encoding="utf-8")
-        if tee_stderr:
-            stream = _TeeTextIO(stream, _LOG_FILE_HANDLE)
-        else:
-            stream = _LOG_FILE_HANDLE
+        stream = (
+            _TeeTextIO(stream, _LOG_FILE_HANDLE) if tee_stderr else _LOG_FILE_HANDLE
+        )
 
     structlog.configure(
         processors=[
@@ -300,12 +299,10 @@ def main() -> None:
     ticker_feed = TickerFeed(ws_client=ws)
     lifecycle_feed = LifecycleFeed(ws_client=ws)
     position_feed = PositionFeed(ws_client=ws)
-    # Tree-mode flag can be toggled per-launch via TALOS_TREE_MODE env var
-    # ("1"/"true"/"yes"/"on" → enabled, anything else or unset → disabled).
-    # Without the env var, tree_mode defaults to AutomationConfig's False.
-    _tree_mode_env = os.environ.get("TALOS_TREE_MODE", "").strip().lower()
-    _tree_mode = _tree_mode_env in ("1", "true", "yes", "on")
-    auto_config = AutomationConfig(tree_mode=_tree_mode)
+    # Tree mode is always on in production — see AutomationConfig.tree_mode.
+    # The launch-path env var was removed so double-clicking Talos.exe gets
+    # the same behavior as launching via talos.bat / talos_exe.bat.
+    auto_config = AutomationConfig()
 
     # Tree-mode collaborators (only constructed when tree_mode is enabled).
     # DiscoveryService is kept on the app (not the engine) since only TreeScreen

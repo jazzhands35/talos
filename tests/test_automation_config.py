@@ -63,7 +63,10 @@ class TestAutomationConfigCustom:
 
 def test_defaults_include_tree_mode_settings():
     c = AutomationConfig()
-    assert c.tree_mode is False
+    # Tree mode is the intended production experience; default must be True
+    # so launching Talos.exe directly (bypassing talos.bat / talos_exe.bat)
+    # still gets the tree UI without requiring an env var.
+    assert c.tree_mode is True
     assert c.startup_milestone_wait_seconds == 30.0
     assert c.schedule_conflict_threshold_minutes == 5.0
     assert c.discovery_concurrent_limit == 5
