@@ -256,3 +256,160 @@ async def test_add_pairs_from_selection_rejects_sub_cent(engine_fixture):
     assert rejected_record["event_ticker"] == "KXS-26JAN01"
     assert isinstance(rejected_error, MarketAdmissionError)
     assert "sub-cent" in str(rejected_error).lower() or "tick" in str(rejected_error).lower()
+
+
+# ──────────────────────────────────────────────────────────────────
+# UI ingress (manual add + market picker) admission surfacing
+# ──────────────────────────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_game_manager_add_market_as_pair_raises_for_fractional():
+    """GameManager.add_market_as_pair raises MarketAdmissionError when the
+    market is fractional, BEFORE touching the scanner / feed / ArbPair ctor.
+    This is the guard at the market-picker ingress path in game_manager.py.
+    """
+    from unittest.mock import AsyncMock, MagicMock
+
+    from talos.game_manager import GameManager
+    from talos.models.market import Event
+
+    # Minimal stand-up — the guard fires before any collaborator is touched,
+    # so MagicMock stubs are sufficient.
+    rest = MagicMock()
+    rest.get_series = AsyncMock()
+    feed = MagicMock()
+    feed.subscribe = AsyncMock()
+    scanner = MagicMock()
+    gm = GameManager(rest=rest, feed=feed, scanner=scanner)
+
+    event = Event(
+        event_ticker="KXF-26JAN01",
+        series_ticker="KXF",
+        title="Test event",
+        sub_title="",
+        category="test",
+        markets=[],
+    )
+    fractional_market = Market(
+        ticker="KXF-26JAN01-A",
+        event_ticker="KXF-26JAN01",
+        title="Fractional",
+        status="open",
+        fractional_trading_enabled=True,
+    )
+    with pytest.raises(MarketAdmissionError) as exc_info:
+        await gm.add_market_as_pair(event, fractional_market)
+    assert "KXF-26JAN01-A" in str(exc_info.value)
+    # Guard fires before scanner.add_pair is called.
+    scanner.add_pair.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_add_market_pairs_surfaces_rejection_notification(engine_fixture):
+    """engine.add_market_pairs catches MarketAdmissionError per market and
+    surfaces a consolidated notification listing the rejected ticker(s).
+    The OK market still flows through successfully."""
+    from talos.game_manager import validate_market_for_admission
+    from talos.models.market import Event
+    from talos.models.strategy import ArbPair
+
+    # Wire the fixture's gm.add_market_as_pair to honour the real admission
+    # guard — the fixture normally returns a MagicMock for every call.
+    async def _add_market_as_pair(event, market):
+        validate_market_for_admission(market, market)
+        return ArbPair(
+            event_ticker=market.ticker,
+            ticker_a=market.ticker,
+            ticker_b=market.ticker,
+            side_a="yes",
+            side_b="no",
+        )
+
+    engine_fixture._game_manager.add_market_as_pair = _add_market_as_pair
+
+    captured: list[tuple[str, str, bool]] = []
+
+    def _capture_notify(msg, severity="information", *, toast=False):
+        captured.append((msg, severity, toast))
+
+    engine_fixture._notify = _capture_notify
+
+    event = Event(
+        event_ticker="KXF-26JAN01",
+        series_ticker="KXF",
+        title="Test event",
+        sub_title="",
+        category="test",
+        markets=[],
+    )
+    fractional_market = Market(
+        ticker="KXF-26JAN01-A",
+        event_ticker="KXF-26JAN01",
+        title="Fractional",
+        status="open",
+        fractional_trading_enabled=True,
+    )
+    ok_market = Market(
+        ticker="KXA-26JAN01-A",
+        event_ticker="KXA-26JAN01",
+        title="OK",
+        status="open",
+    )
+
+    pairs = await engine_fixture.add_market_pairs(
+        event, [fractional_market, ok_market],
+    )
+
+    # The OK market succeeded.
+    assert len(pairs) == 1
+    assert pairs[0].ticker_a == "KXA-26JAN01-A"
+
+    # A rejection notification fired, mentioning the fractional ticker and
+    # with severity=error.
+    rejection_notifs = [
+        (msg, sev) for msg, sev, _toast in captured
+        if sev == "error" and "KXF-26JAN01-A" in msg
+    ]
+    assert rejection_notifs, (
+        f"expected rejection notification mentioning KXF-26JAN01-A, "
+        f"got {captured}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_add_games_surfaces_admission_rejection_as_specific_toast(
+    engine_fixture,
+):
+    """engine.add_games catches MarketAdmissionError from the underlying
+    game_manager.add_game path and surfaces a 'Market rejected (admission
+    guard): ...' toast rather than the generic 'Error: ...' path."""
+    async def _raise(urls):
+        raise MarketAdmissionError(
+            "KXF-26JAN01-A: fractional_trading_enabled markets ..."
+        )
+
+    engine_fixture._game_manager.add_games = _raise
+
+    captured: list[tuple[str, str, bool]] = []
+
+    def _capture_notify(msg, severity="information", *, toast=False):
+        captured.append((msg, severity, toast))
+
+    engine_fixture._notify = _capture_notify
+
+    result = await engine_fixture.add_games(["https://kalshi.com/x"])
+
+    assert result == []
+    rejection_notifs = [
+        (msg, sev) for msg, sev, _toast in captured
+        if sev == "error" and "admission guard" in msg.lower()
+    ]
+    assert rejection_notifs, (
+        f"expected 'admission guard' rejection notification, got {captured}"
+    )
+    # And the notification should carry the specific reason, not a bare
+    # "Error: ..." prefix.
+    assert any("Market rejected" in msg for msg, _sev, _toast in captured), (
+        f"expected 'Market rejected' prefix, got {captured}"
+    )

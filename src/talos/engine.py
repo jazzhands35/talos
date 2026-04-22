@@ -3082,6 +3082,17 @@ class TradingEngine:
                         else None,
                     )
             return pairs
+        except MarketAdmissionError as exc:
+            # Phase 0: fractional / sub-cent shape rejected by
+            # GameManager.add_game. Surface a specific operator-visible
+            # toast instead of the generic "Error: ..." path below.
+            self._notify(
+                f"Market rejected (admission guard): {exc}",
+                "error",
+                toast=True,
+            )
+            logger.warning("add_games_admission_rejected", reason=str(exc))
+            return []
         except Exception as e:
             from talos.game_manager import MarketPickerNeeded
 
@@ -3111,6 +3122,11 @@ class TradingEngine:
             )
             return []
         pairs: list[ArbPair] = []
+        # Phase 0: collect per-market admission rejections so we can surface
+        # a consolidated notification after the loop (separate from the
+        # success toast) rather than losing rejected tickers into the
+        # generic "add_market_pair_failed" warning log.
+        rejected_tickers: list[tuple[str, str]] = []
         for market in markets:
             if not isinstance(market, MarketModel):
                 logger.warning(
@@ -3127,6 +3143,13 @@ class TradingEngine:
                         pair.expected_expiration_time,
                     )
                 pairs.append(pair)
+            except MarketAdmissionError as exc:
+                rejected_tickers.append((market.ticker, str(exc)))
+                logger.warning(
+                    "add_market_pair_admission_rejected",
+                    market_ticker=market.ticker,
+                    reason=str(exc),
+                )
             except Exception:
                 logger.warning(
                     "add_market_pair_failed",
@@ -3135,6 +3158,14 @@ class TradingEngine:
                 )
         if pairs:
             self._notify(f"Added {len(pairs)} market pair(s)", toast=True)
+        if rejected_tickers:
+            reasons = "\n".join(f"  - {t}: {r}" for t, r in rejected_tickers)
+            self._notify(
+                f"Rejected {len(rejected_tickers)} market(s) by admission "
+                f"guard:\n{reasons}",
+                "error",
+                toast=True,
+            )
         return pairs
 
     async def add_pairs_from_selection(self, records: list[dict[str, Any]]) -> CommitResult:

@@ -448,6 +448,11 @@ class GameManager:
         # the two legs (fractional on either side, smallest tick) so the
         # guard rejects the pair if either leg would trip it.
         mkt_a, mkt_b = active_markets[0], active_markets[1]
+        # Phase 0 admission guard — reject fractional / sub-cent markets at
+        # the URL-add ingress path before any downstream state is touched.
+        # Raises MarketAdmissionError; engine.add_games surfaces it as a
+        # specific operator-visible toast.
+        validate_market_for_admission(mkt_a, mkt_b)
         pair_fractional = (
             mkt_a.fractional_trading_enabled or mkt_b.fractional_trading_enabled
         )
@@ -516,6 +521,13 @@ class GameManager:
         """Create a YES/NO arb pair from a single market within an event."""
         if market.ticker in self._games:
             return self._games[market.ticker]
+
+        # Phase 0 admission guard — reject fractional / sub-cent markets at
+        # the market-picker ingress path before any downstream state is
+        # touched. Same market is used on both sides for a YES/NO arb.
+        # Raises MarketAdmissionError; engine.add_market_pairs catches it
+        # per-market and surfaces a consolidated rejection notification.
+        validate_market_for_admission(market, market)
 
         # Fetch series for fee metadata
         fee_type = "quadratic_with_maker_fees"
