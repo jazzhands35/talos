@@ -1,5 +1,7 @@
 # Kalshi Fixed-Point Migration — SUPERSEDED
 
+> **Phase 0 (admission guard) landed 2026-04-22** — branch `feat/bps-fp100-migration`. Fractional and sub-cent markets are now blocked at every ingress path (scanner, engine commit, URL-add, market-picker, startup restore) pending Phase 1+2. Tracking: see `docs/superpowers/plans/2026-04-21-bps-fp100-phase-0-admission-guard.md`.
+>
 > **⚠️ This plan is superseded. Do not use it as an implementation guide.**
 >
 > The March 2026 first-pass migration described here shipped successfully for the *wire-compat* goal it aimed at, but the boundary-only strategy it prescribed — specifically `_fp → int(float(val))` and `_dollars → int cents` — is the direct source of two later-discovered money-path bugs:
