@@ -453,6 +453,15 @@ class GameManager:
             close_time=close_time,
             expected_expiration_time=expected_expiration_time,
         )
+        # Shape metadata from the active markets — scanner uses these to
+        # enforce the Phase 0 admission guard. Take the "worst" shape across
+        # the two legs (fractional on either side, smallest tick) so the
+        # guard rejects the pair if either leg would trip it.
+        mkt_a, mkt_b = active_markets[0], active_markets[1]
+        pair_fractional = (
+            mkt_a.fractional_trading_enabled or mkt_b.fractional_trading_enabled
+        )
+        pair_tick_bps = min(mkt_a.tick_bps(), mkt_b.tick_bps())
         self._scanner.add_pair(
             event.event_ticker,
             ticker_a,
@@ -461,6 +470,8 @@ class GameManager:
             fee_rate=fee_rate,
             close_time=close_time,
             expected_expiration_time=expected_expiration_time,
+            fractional_trading_enabled=pair_fractional,
+            tick_bps=pair_tick_bps,
         )
         if subscribe:
             await self._feed.subscribe(ticker_a)
@@ -540,6 +551,8 @@ class GameManager:
             fee_rate=fee_rate,
             close_time=market.close_time,
             expected_expiration_time=market.expected_expiration_time,
+            fractional_trading_enabled=market.fractional_trading_enabled,
+            tick_bps=market.tick_bps(),
         )
         if subscribe:
             await self._feed.subscribe(market.ticker)
@@ -624,6 +637,9 @@ class GameManager:
             source=str(persisted_source) if persisted_source is not None else None,
             engine_state=persisted_engine_state,
         )
+        # Shape defaults kept — Market objects are not in scope during
+        # restore (we only have the cached dict). The bigger restore-path
+        # admission story is handled by Task 8 (quarantined startup restore).
         self._scanner.add_pair(
             event_ticker,
             ticker_a,

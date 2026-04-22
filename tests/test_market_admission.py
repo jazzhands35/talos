@@ -102,3 +102,65 @@ def test_rejects_fractional_even_if_sub_cent_also():
     b = _cent_market()
     with pytest.raises(MarketAdmissionError):
         validate_market_for_admission(a, b)
+
+
+# ──────────────────────────────────────────────────────────────────
+# Scanner ingress
+# ──────────────────────────────────────────────────────────────────
+
+from talos.orderbook import OrderBookManager  # noqa: E402
+from talos.scanner import ArbitrageScanner  # noqa: E402
+
+
+def test_scanner_skips_fractional_pair_and_produces_no_opportunity(caplog):
+    """Scanner rejects pairs whose stored shape violates admission invariants,
+    logs exactly one WARNING per event ticker across multiple scan ticks."""
+    import logging
+    caplog.set_level(logging.WARNING)
+
+    books = OrderBookManager()
+    scanner = ArbitrageScanner(books)
+    scanner.add_pair(
+        "KXF-26JAN01",
+        "KXF-26JAN01-A",
+        "KXF-26JAN01-B",
+        fractional_trading_enabled=True,
+    )
+
+    # Scan multiple times — should dedup the warning.
+    scanner.scan("KXF-26JAN01-A")
+    scanner.scan("KXF-26JAN01-A")
+    scanner.scan("KXF-26JAN01-B")
+
+    assert scanner.opportunities == []
+    admission_warnings = [r for r in caplog.records if "admission" in r.message.lower()]
+    assert len(admission_warnings) == 1, (
+        f"expected exactly one admission warning (dedup), got {len(admission_warnings)}"
+    )
+
+
+def test_scanner_skips_subcent_pair():
+    """A pair stored with tick_bps < 100 triggers the guard."""
+    books = OrderBookManager()
+    scanner = ArbitrageScanner(books)
+    scanner.add_pair(
+        "KXS-26JAN01",
+        "KXS-26JAN01-A",
+        "KXS-26JAN01-B",
+        tick_bps=10,
+    )
+    scanner.scan("KXS-26JAN01-A")
+    assert scanner.opportunities == []
+
+
+def test_scanner_admits_ordinary_cent_pair(caplog):
+    """A pair with default (cent, non-fractional) shape passes the guard."""
+    import logging
+    caplog.set_level(logging.WARNING)
+    books = OrderBookManager()
+    scanner = ArbitrageScanner(books)
+    scanner.add_pair("KXA-26JAN01", "KXA-26JAN01-A", "KXA-26JAN01-B")
+    # No opportunities (books are empty) but no admission warning either.
+    scanner.scan("KXA-26JAN01-A")
+    admission_warnings = [r for r in caplog.records if "admission" in r.message.lower()]
+    assert admission_warnings == []

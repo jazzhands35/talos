@@ -29,6 +29,7 @@ class ArbitrageScanner:
         self._all_snapshots: dict[str, Opportunity] = {}
         self._sorted_cache: list[Opportunity] | None = None
         self._next_id: int = 1
+        self._admission_warned: set[str] = set()
 
     def add_pair(
         self,
@@ -44,6 +45,8 @@ class ArbitrageScanner:
         side_b: str = "no",
         kalshi_event_ticker: str = "",
         talos_id: int = 0,
+        fractional_trading_enabled: bool = False,
+        tick_bps: int = 100,
     ) -> None:
         """Register a pair of markets to monitor."""
         if any(p.event_ticker == event_ticker for p in self._pairs):
@@ -62,6 +65,8 @@ class ArbitrageScanner:
             fee_rate=fee_rate,
             close_time=close_time,
             expected_expiration_time=expected_expiration_time,
+            fractional_trading_enabled=fractional_trading_enabled,
+            tick_bps=tick_bps,
         )
         self._pairs.append(pair)
         self._pairs_by_ticker.setdefault(ticker_a, []).append(pair)
@@ -127,6 +132,26 @@ class ArbitrageScanner:
 
     def _evaluate_pair(self, pair: ArbPair) -> None:
         """Check one pair for arbitrage opportunity."""
+        # Phase 0 admission guard — skip pairs whose shape violates the
+        # bps/fp100 migration invariants (fractional trading or sub-cent
+        # tick). Local import avoids a circular dep with game_manager.
+        from talos.game_manager import ONE_CENT_BPS
+
+        if pair.fractional_trading_enabled or pair.tick_bps < ONE_CENT_BPS:
+            if pair.event_ticker not in self._admission_warned:
+                self._admission_warned.add(pair.event_ticker)
+                reason = (
+                    "fractional_trading_enabled"
+                    if pair.fractional_trading_enabled
+                    else f"sub-cent tick ({pair.tick_bps} bps)"
+                )
+                logger.warning(
+                    "scanner_admission_skip",
+                    event_ticker=pair.event_ticker,
+                    reason=reason,
+                )
+            return
+
         self._sorted_cache = None
         no_a = self._books.best_ask(pair.ticker_a, side=pair.side_a)
         no_b = self._books.best_ask(pair.ticker_b, side=pair.side_b)

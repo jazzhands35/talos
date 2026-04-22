@@ -21,6 +21,11 @@ class ArbPair(BaseModel):
     close_time: str | None = None
     expected_expiration_time: str | None = None
     source: str | None = None  # "tree" | "manual_url" | "restore" | "migration"
+    # Phase 0 admission-guard shape fields (bps/fp100 migration gate).
+    # Defaults correspond to "safe cent-only non-fractional", so existing
+    # callers that don't pass these fields are unaffected.
+    fractional_trading_enabled: bool = False
+    tick_bps: int = 100
     engine_state: str = "active"  # "active" | "winding_down" | "exit_only"
 
     @property

@@ -123,6 +123,8 @@ class TestGameManager:
             fee_rate=0.0175,
             close_time=None,
             expected_expiration_time=None,
+            fractional_trading_enabled=False,
+            tick_bps=100,
         )
 
     async def test_add_game_subscribes_both_tickers(
