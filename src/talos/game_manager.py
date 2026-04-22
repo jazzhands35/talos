@@ -443,16 +443,6 @@ class GameManager:
                 exc_info=True,
             )
 
-        pair = ArbPair(
-            event_ticker=event.event_ticker,
-            ticker_a=ticker_a,
-            ticker_b=ticker_b,
-            series_ticker=event.series_ticker,
-            fee_type=fee_type,
-            fee_rate=fee_rate,
-            close_time=close_time,
-            expected_expiration_time=expected_expiration_time,
-        )
         # Shape metadata from the active markets — scanner uses these to
         # enforce the Phase 0 admission guard. Take the "worst" shape across
         # the two legs (fractional on either side, smallest tick) so the
@@ -462,6 +452,18 @@ class GameManager:
             mkt_a.fractional_trading_enabled or mkt_b.fractional_trading_enabled
         )
         pair_tick_bps = min(mkt_a.tick_bps(), mkt_b.tick_bps())
+        pair = ArbPair(
+            event_ticker=event.event_ticker,
+            ticker_a=ticker_a,
+            ticker_b=ticker_b,
+            series_ticker=event.series_ticker,
+            fee_type=fee_type,
+            fee_rate=fee_rate,
+            close_time=close_time,
+            expected_expiration_time=expected_expiration_time,
+            fractional_trading_enabled=pair_fractional,
+            tick_bps=pair_tick_bps,
+        )
         self._scanner.add_pair(
             event.event_ticker,
             ticker_a,
@@ -539,6 +541,8 @@ class GameManager:
             fee_rate=fee_rate,
             close_time=market.close_time,
             expected_expiration_time=market.expected_expiration_time,
+            fractional_trading_enabled=market.fractional_trading_enabled,
+            tick_bps=market.tick_bps(),
         )
         self._scanner.add_pair(
             market.ticker,

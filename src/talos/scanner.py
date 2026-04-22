@@ -135,6 +135,10 @@ class ArbitrageScanner:
         # Phase 0 admission guard — skip pairs whose shape violates the
         # bps/fp100 migration invariants (fractional trading or sub-cent
         # tick). Local import avoids a circular dep with game_manager.
+        # Assumes ArbPair shape fields are immutable post-registration;
+        # early return before _sorted_cache reset is safe under that
+        # invariant. Do NOT mutate pair.fractional_trading_enabled or
+        # pair.tick_bps after add_pair without also invalidating the cache.
         from talos.game_manager import ONE_CENT_BPS
 
         if pair.fractional_trading_enabled or pair.tick_bps < ONE_CENT_BPS:
