@@ -72,6 +72,7 @@ def test_rejects_sub_cent_tick_on_side_a():
     with pytest.raises(MarketAdmissionError) as exc_info:
         validate_market_for_admission(a, b)
     assert "sub-cent" in str(exc_info.value).lower() or "tick" in str(exc_info.value).lower()
+    assert "KXS-26JAN01-A" in str(exc_info.value)
 
 
 def test_rejects_sub_cent_tick_on_side_b():

@@ -57,10 +57,11 @@ def validate_market_for_admission(market_a: Market, market_b: Market) -> None:
                 f"See docs/superpowers/specs/"
                 f"2026-04-17-bps-fp100-unit-migration-design.md."
             )
-        if m.tick_bps() < ONE_CENT_BPS:
+        tick = m.tick_bps()
+        if tick < ONE_CENT_BPS:
             raise MarketAdmissionError(
                 f"{m.ticker}: sub-cent-tick markets "
-                f"(tick={m.tick_bps()} bps) are not supported until "
+                f"(tick={tick} bps) are not supported until "
                 f"Phase 1+2 of the bps/fp100 migration."
             )
 
