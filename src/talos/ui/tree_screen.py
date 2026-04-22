@@ -938,9 +938,15 @@ class TreeScreen(Screen):
         remove_outcomes: list[Any] = []
         if staged.to_add:
             try:
-                added = await self._engine.add_pairs_from_selection(
-                    [r.model_dump() for r in staged.to_add]
-                )
+                # Task 4 band-aid: unwrap CommitResult.admitted to keep
+                # the old list contract until Task 5 restructures commit()
+                # to consume CommitResult fully (partial-failure dialog,
+                # selective staging clear).
+                added = (
+                    await self._engine.add_pairs_from_selection(
+                        [r.model_dump() for r in staged.to_add]
+                    )
+                ).admitted
             except PersistenceError as exc:
                 # Narrow catch (round-4 v0.1.1 finding #4): only catch
                 # PersistenceError. Engine bugs (KeyError, AttributeError,

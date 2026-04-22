@@ -5,6 +5,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from talos.engine import TradingEngine
+from talos.models.market import Market
 from talos.models.strategy import ArbPair
 from talos.models.tree import ArbPairRecord
 
@@ -46,6 +47,20 @@ def _engine_with_collaborators():
     e._data_collector = None
     e._persist_active_games = MagicMock()
     gm.remove_game = AsyncMock()
+
+    # REST stub — default to admittable cent-tick markets so the Phase 0
+    # admission guard lets the record through. Tests that need rejection
+    # can override e._rest.get_market.
+    async def _get_market(ticker: str) -> Market:
+        return Market(
+            ticker=ticker,
+            event_ticker=ticker,
+            title=f"Market {ticker}",
+            status="open",
+        )
+
+    e._rest = MagicMock()
+    e._rest.get_market = AsyncMock(side_effect=_get_market)
     return e
 
 
@@ -60,8 +75,9 @@ async def test_add_pairs_wires_adjuster_gsr_feeds_and_persists():
         series_ticker="KXFEDMENTION",
         category="Mentions",
     )
-    pairs = await e.add_pairs_from_selection([r.model_dump()])
-    assert len(pairs) == 1
+    result = await e.add_pairs_from_selection([r.model_dump()])
+    assert len(result.admitted) == 1
+    assert result.rejected == []
     e._adjuster.add_event.assert_called_once()
     e._game_status_resolver.resolve_batch.assert_awaited_once()
     e._feed.subscribe.assert_awaited()  # at least one subscribe call
@@ -366,7 +382,7 @@ async def test_add_pairs_retry_is_idempotent_for_already_present_pairs():
 
     # First call — full wiring expected.
     pairs1 = await e.add_pairs_from_selection([r])
-    assert len(pairs1) == 1
+    assert len(pairs1.admitted) == 1
     add_event_after_first = e._adjuster.add_event.call_count
     subscribe_after_first = e._feed.subscribe.await_count
     set_expiration_after_first = e._game_status_resolver.set_expiration.call_count
@@ -380,7 +396,7 @@ async def test_add_pairs_retry_is_idempotent_for_already_present_pairs():
     # wiring MUST be skipped entirely.
     pairs2 = await e.add_pairs_from_selection([r])
     # Returned pair list still includes it (UI accounting), but no new wiring.
-    assert len(pairs2) == 1
+    assert len(pairs2.admitted) == 1
     assert e._adjuster.add_event.call_count == add_event_after_first
     assert e._feed.subscribe.await_count == subscribe_after_first
     assert e._game_status_resolver.set_expiration.call_count == (

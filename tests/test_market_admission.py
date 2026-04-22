@@ -164,3 +164,70 @@ def test_scanner_admits_ordinary_cent_pair(caplog):
     scanner.scan("KXA-26JAN01-A")
     admission_warnings = [r for r in caplog.records if "admission" in r.message.lower()]
     assert admission_warnings == []
+
+
+# ──────────────────────────────────────────────────────────────────
+# Engine.add_pairs_from_selection returns CommitResult
+# ──────────────────────────────────────────────────────────────────
+
+@pytest.mark.asyncio
+async def test_add_pairs_from_selection_returns_commit_result_with_mixed_batch(engine_fixture):
+    """Mixed admitted/rejected batch returns a CommitResult, not a bare list."""
+    from talos.game_manager import CommitResult, MarketAdmissionError
+
+    good_record = {
+        "event_ticker": "KXA-26JAN01",
+        "ticker_a": "KXA-26JAN01-A",
+        "ticker_b": "KXA-26JAN01-B",
+        "side_a": "no",
+        "side_b": "no",
+        "kalshi_event_ticker": "KXA-26JAN01",
+        "series_ticker": "KXA",
+        "fee_type": "quadratic_with_maker_fees",
+        "fee_rate": 0.0175,
+        "close_time": "2026-12-31T00:00:00Z",
+        "expected_expiration_time": None,
+    }
+    bad_record = {
+        "event_ticker": "KXF-26JAN01",
+        "ticker_a": "KXF-26JAN01-A",
+        "ticker_b": "KXF-26JAN01-B",
+        "side_a": "no",
+        "side_b": "no",
+        "kalshi_event_ticker": "KXF-26JAN01",
+        "series_ticker": "KXF",
+        "fee_type": "quadratic_with_maker_fees",
+        "fee_rate": 0.0175,
+        "close_time": "2026-12-31T00:00:00Z",
+        "expected_expiration_time": None,
+    }
+
+    result = await engine_fixture.add_pairs_from_selection([good_record, bad_record])
+
+    assert isinstance(result, CommitResult)
+    assert len(result.admitted) == 1
+    assert len(result.rejected) == 1
+    rejected_record, rejected_error = result.rejected[0]
+    assert rejected_record["event_ticker"] == "KXF-26JAN01"
+    assert isinstance(rejected_error, MarketAdmissionError)
+
+
+@pytest.mark.asyncio
+async def test_add_pairs_from_selection_all_admitted(engine_fixture):
+    """All-clean batch returns CommitResult with only admitted populated."""
+    from talos.game_manager import CommitResult
+
+    record = {
+        "event_ticker": "KXA-26JAN01",
+        "ticker_a": "KXA-26JAN01-A",
+        "ticker_b": "KXA-26JAN01-B",
+        "side_a": "no", "side_b": "no",
+        "kalshi_event_ticker": "KXA-26JAN01",
+        "series_ticker": "KXA",
+        "fee_type": "quadratic_with_maker_fees", "fee_rate": 0.0175,
+        "close_time": "2026-12-31T00:00:00Z", "expected_expiration_time": None,
+    }
+    result = await engine_fixture.add_pairs_from_selection([record])
+    assert isinstance(result, CommitResult)
+    assert len(result.admitted) == 1
+    assert result.rejected == []

@@ -25,7 +25,12 @@ from talos.bid_adjuster import BidAdjuster
 from talos.cpm import CPMTracker
 from talos.errors import KalshiAPIError, KalshiRateLimitError
 from talos.fees import MAKER_FEE_RATE, fee_adjusted_cost, fee_adjusted_edge
-from talos.game_manager import GameManager
+from talos.game_manager import (
+    CommitResult,
+    GameManager,
+    MarketAdmissionError,
+    validate_market_for_admission,
+)
 from talos.game_status import GameStatusResolver
 from talos.lifecycle_feed import LifecycleFeed
 from talos.market_feed import MarketFeed
@@ -3132,10 +3137,21 @@ class TradingEngine:
             self._notify(f"Added {len(pairs)} market pair(s)", toast=True)
         return pairs
 
-    async def add_pairs_from_selection(self, records: list[dict[str, Any]]) -> list[ArbPair]:
+    async def add_pairs_from_selection(self, records: list[dict[str, Any]]) -> CommitResult:
         """Commit path for tree-selected pairs.
 
-        Mirrors add_games (engine.py:~2839) step-for-step, with:
+        Returns a ``CommitResult`` summarising the outcome:
+          * ``admitted``: pairs that passed admission and flowed through the
+            full 6-step pipeline (including pre-existing no-op pairs).
+          * ``rejected``: ``(record, MarketAdmissionError)`` tuples for
+            records whose live market shape fails Phase 0 invariants.
+
+        Mirrors add_games (engine.py:~2839) step-for-step, with an
+        admission guard inserted BEFORE Step 1 on a per-record basis:
+          0. fetch fresh Market for ticker_a + ticker_b via _rest, run
+             validate_market_for_admission — MarketAdmissionError is
+             captured into ``result.rejected`` and the record is skipped.
+             Infrastructure errors (KalshiAPIError, etc.) propagate out.
           1. restore_game per record (inside suppress_on_change)
           1.5 seed _volumes_24h from record fields (not populated by restore_game)
           2. adjuster ledger wiring
@@ -3149,8 +3165,12 @@ class TradingEngine:
         any open feed subscriptions are reverted, and the exception is
         re-raised so the UI commit path can leave staging intact for retry.
         Without rollback, partial state would persist invisibly and a retry
-        would double-add.
+        would double-add. The rollback path re-raises before returning, so
+        ``result.rejected`` is never surfaced on an infrastructure failure —
+        callers see either ``CommitResult`` (success, possibly partial
+        admission) or an exception (infra failure).
         """
+        result = CommitResult()
         pairs: list[ArbPair] = []
         # Round-3 review fix #1: Track which pairs were already present
         # BEFORE this call so we can skip re-wiring them in steps 2-4.
@@ -3170,6 +3190,26 @@ class TradingEngine:
         # Steps 1 + 1.5: reconstitute + volume seeding, with on_change suppressed
         with self._game_manager.suppress_on_change():
             for r in records:
+                # Step 0: admission guard. Fetch fresh Market state for
+                # both sides and validate shape invariants (Phase 0: no
+                # fractional, no sub-cent tick). MarketAdmissionError is
+                # captured per-record into result.rejected; infrastructure
+                # errors (KalshiAPIError, timeouts, etc.) propagate out so
+                # the caller treats them as a hard commit failure and can
+                # preserve staged_changes for retry.
+                try:
+                    market_a = await self._rest.get_market(str(r["ticker_a"]))
+                    market_b = await self._rest.get_market(str(r["ticker_b"]))
+                    validate_market_for_admission(market_a, market_b)
+                except MarketAdmissionError as exc:
+                    logger.warning(
+                        "add_pair_admission_rejected",
+                        event_ticker=r.get("event_ticker"),
+                        reason=str(exc),
+                    )
+                    result.rejected.append((r, exc))
+                    continue
+
                 try:
                     pair = self._game_manager.restore_game(
                         {**r, "source": r.get("source", "tree")},
@@ -3341,7 +3381,12 @@ class TradingEngine:
                     pairs=len(new_pairs),
                 )
             raise
-        return pairs
+        # admitted = every pair returned by restore_game (including
+        # pre-existing no-op duplicates) so the TreeScreen commit UX sees
+        # the same "what's in the game manager for this selection" set
+        # the prior list[ArbPair] return contract guaranteed.
+        result.admitted = pairs
+        return result
 
     async def _rollback_partial_add(
         self,

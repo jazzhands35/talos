@@ -4,6 +4,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
+from talos.game_manager import CommitResult
 from talos.models.tree import ArbPairRecord, RemoveOutcome, StagedChanges
 from talos.ui.schedule_popup import SchedulePopup
 from talos.ui.tree_screen import TreeScreen
@@ -11,7 +12,7 @@ from talos.ui.tree_screen import TreeScreen
 
 class _FakeEngine:
     def __init__(self):
-        self.add_pairs_from_selection = AsyncMock(return_value=[])
+        self.add_pairs_from_selection = AsyncMock(return_value=CommitResult())
         self.remove_pairs_from_selection = AsyncMock(return_value=[])
 
 
@@ -306,7 +307,7 @@ async def test_commit_applies_manual_event_start_before_engine_add():
 
     async def _add(_records):
         order.append("engine_add")
-        return []
+        return CommitResult()
 
     engine.add_pairs_from_selection = _add  # type: ignore[method-assign]
 
@@ -563,7 +564,7 @@ async def test_commit_clear_deliberately_unticked_failure_preserves_staging(
         series_ticker="KX",
         category="Mentions",
     )
-    engine.add_pairs_from_selection.return_value = [added_record]
+    engine.add_pairs_from_selection.return_value = CommitResult(admitted=[added_record])
     md = _FakeMetadata()
     md.manual_event_start = lambda _et: "none"  # type: ignore[method-assign]
 
@@ -760,7 +761,7 @@ async def test_commit_triggers_refresh_volumes_on_added_pairs():
         series_ticker="KX",
         category="Mentions",
     )
-    engine.add_pairs_from_selection = AsyncMock(return_value=[added_record])
+    engine.add_pairs_from_selection = AsyncMock(return_value=CommitResult(admitted=[added_record]))
     md = _FakeMetadata()
     md.manual_event_start = lambda _et: "none"  # type: ignore[method-assign]
     screen = _make_screen(engine, md)

@@ -12,6 +12,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
+from talos.game_manager import CommitResult
 from talos.models.tree import RemoveOutcome, StagedChanges
 from talos.tree_metadata import TreeMetadataStore
 from talos.ui.tree_screen import TreeScreen
@@ -19,7 +20,7 @@ from talos.ui.tree_screen import TreeScreen
 
 class _FakeEngine:
     def __init__(self) -> None:
-        self.add_pairs_from_selection = AsyncMock(return_value=[])
+        self.add_pairs_from_selection = AsyncMock(return_value=CommitResult())
         self.remove_pairs_from_selection = AsyncMock(return_value=[])
 
 
