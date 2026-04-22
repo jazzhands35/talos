@@ -5,7 +5,9 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Callable
 from contextlib import contextmanager
+from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
+from typing import Any
 from urllib.parse import urlparse
 
 import structlog
@@ -19,6 +21,63 @@ from talos.rest_client import KalshiRESTClient
 from talos.scanner import ArbitrageScanner
 
 logger = structlog.get_logger()
+
+
+class MarketAdmissionError(Exception):
+    """Raised when a market is rejected at admission because its shape
+    violates the invariants the current trading path can safely handle.
+
+    Phase 0 rejections (bps/fp100 migration gate): fractional_trading_enabled
+    markets and sub-cent-tick markets. The reasons are load-bearing for
+    fractional inventory accounting and scanner-edge accuracy — see
+    docs/superpowers/specs/2026-04-17-bps-fp100-unit-migration-design.md.
+    """
+
+
+ONE_CENT_BPS = 100  # 1 cent = 100 basis points
+
+
+def validate_market_for_admission(market_a: Market, market_b: Market) -> None:
+    """Raise ``MarketAdmissionError`` if either market has a shape Talos
+    cannot currently handle safely.
+
+    Called from EVERY ingress path (scanner, manual add, market-picker,
+    tree commit, startup restore). A scanner-only guard is insufficient
+    because other paths bypass it.
+
+    Phase 0 checks: fractional_trading_enabled or sub-cent-tick.
+    Phase 1+2 will relax or remove these when the bps/fp100 migration
+    makes them safe to admit.
+    """
+    for m in (market_a, market_b):
+        if m.fractional_trading_enabled:
+            raise MarketAdmissionError(
+                f"{m.ticker}: fractional_trading_enabled markets are not "
+                f"supported until the bps/fp100 migration lands (Phase 1+2). "
+                f"See docs/superpowers/specs/"
+                f"2026-04-17-bps-fp100-unit-migration-design.md."
+            )
+        if m.tick_bps() < ONE_CENT_BPS:
+            raise MarketAdmissionError(
+                f"{m.ticker}: sub-cent-tick markets "
+                f"(tick={m.tick_bps()} bps) are not supported until "
+                f"Phase 1+2 of the bps/fp100 migration."
+            )
+
+
+@dataclass(slots=True)
+class CommitResult:
+    """Outcome of an ``add_pairs_from_selection`` call.
+
+    ``admitted``: pairs that passed admission and were registered.
+    ``rejected``: (original selection record, reason) pairs that failed
+    admission. Callers (especially TreeScreen.commit) MUST handle rejected
+    rows explicitly — leaving them staged and surfacing a partial-failure
+    dialog rather than the ordinary success toast.
+    """
+
+    admitted: list[Any] = field(default_factory=list)
+    rejected: list[tuple[dict[str, Any], MarketAdmissionError]] = field(default_factory=list)
 
 
 class MarketPickerNeeded(Exception):
