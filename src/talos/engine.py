@@ -1099,6 +1099,7 @@ class TradingEngine:
         if self._initial_games_full:
             cached_tickers = set()
             pairs = []
+            quarantined_any = False
             for data in self._initial_games_full:
                 try:
                     pair = self._game_manager.restore_game(data)
@@ -1119,6 +1120,41 @@ class TradingEngine:
                     if vol_b is not None:
                         self._game_manager._volumes_24h[pair.ticker_b] = int(vol_b)
                     self._apply_persisted_engine_state(pair)
+                    # F32: admission re-check for Phase-0-incompatible shapes.
+                    # A persisted pair whose market turned fractional/sub-cent
+                    # while Talos was offline must restore into exit_only so
+                    # new entries are blocked — exits + cancels still work.
+                    try:
+                        market_a = await self._rest.get_market(pair.ticker_a)
+                        if pair.ticker_b != pair.ticker_a:
+                            market_b = await self._rest.get_market(pair.ticker_b)
+                        else:
+                            # YES/NO arb on the same ticker — avoid double fetch
+                            market_b = market_a
+                        validate_market_for_admission(market_a, market_b)
+                    except MarketAdmissionError as exc:
+                        if pair.engine_state not in ("exit_only", "winding_down"):
+                            pair.engine_state = "exit_only"
+                        self._exit_only_events.add(pair.event_ticker)
+                        quarantined_any = True
+                        self._notify(
+                            f"{pair.event_ticker}: restored in exit_only — {exc}",
+                            "warning",
+                        )
+                        logger.warning(
+                            "restore_quarantine_applied",
+                            event_ticker=pair.event_ticker,
+                            reason=str(exc),
+                        )
+                    except Exception:
+                        # REST failure or unexpected error — log and leave the
+                        # pair in its persisted state. Transient network errors
+                        # must not trigger false-positive quarantine.
+                        logger.warning(
+                            "restore_admission_check_failed",
+                            event_ticker=pair.event_ticker,
+                            exc_info=True,
+                        )
                     pairs.append(pair)
                     cached_tickers.add(pair.event_ticker)
                 except Exception:
@@ -1129,6 +1165,19 @@ class TradingEngine:
                 await self._feed.subscribe_bulk(tickers)
             if pairs:
                 self._notify(f"Loaded {len(pairs)} game(s)")
+            # F37: durable persist the quarantine so a crash before the next
+            # scheduled save cannot resurrect a quarantined pair as active.
+            if quarantined_any:
+                try:
+                    self._persist_active_games()
+                except Exception:
+                    # In-memory quarantine still holds; next scheduled save
+                    # will pick it up. A crash before then would lose it —
+                    # tradeoff vs. crashing startup hard on a persist glitch.
+                    logger.warning(
+                        "restore_quarantine_persist_failed",
+                        exc_info=True,
+                    )
             # Log startup restores
             if self._data_collector is not None:
                 for pair in pairs:
