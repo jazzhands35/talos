@@ -1150,8 +1150,13 @@ class TreeScreen(Screen):
         # was blocked and why, without losing unrelated metadata for the
         # cleanly-processed pairs. Remove flows and metadata flags are
         # unrelated to admission and always clear on success.
+        # Raise KeyError loudly on a malformed record rather than silently
+        # dropping the row from re-staging (str(None) -> "None" would never
+        # match a real event_ticker and the rejected row would vanish).
+        # add_pairs_from_selection hands back the original r.model_dump()
+        # dict which always has event_ticker, so .get is unnecessary.
         rejected_event_tickers = {
-            str(rec.get("event_ticker")) for rec, _exc in rejected
+            rec["event_ticker"] for rec, _exc in rejected
         }
         self.staged_changes = StagedChanges.empty()
         if rejected_event_tickers:
