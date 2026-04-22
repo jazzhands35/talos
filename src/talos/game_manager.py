@@ -717,6 +717,18 @@ class GameManager:
                                 e.event, market, subscribe=False,
                             )
                             added.append(p)
+                        except MarketAdmissionError as adm_exc:
+                            # Phase 0 admission: fractional / sub-cent markets
+                            # reach this batch auto-picker path when the
+                            # operator adds a multi-market non-sports URL.
+                            # Log at WARNING so it's visible in logs even
+                            # though we can't bubble a per-market error out
+                            # of the batch shape.
+                            logger.warning(
+                                "auto_add_market_admission_rejected",
+                                ticker=market.ticker,
+                                reason=str(adm_exc),
+                            )
                         except Exception:
                             logger.debug("auto_add_market_failed", ticker=market.ticker)
                     return added
