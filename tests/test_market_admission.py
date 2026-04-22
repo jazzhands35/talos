@@ -231,3 +231,28 @@ async def test_add_pairs_from_selection_all_admitted(engine_fixture):
     assert isinstance(result, CommitResult)
     assert len(result.admitted) == 1
     assert result.rejected == []
+
+
+@pytest.mark.asyncio
+async def test_add_pairs_from_selection_rejects_sub_cent(engine_fixture):
+    """End-to-end: a sub-cent record flows through admission and lands in rejected."""
+    from talos.game_manager import CommitResult, MarketAdmissionError
+
+    subcent_record = {
+        "event_ticker": "KXS-26JAN01",
+        "ticker_a": "KXS-26JAN01-A",
+        "ticker_b": "KXS-26JAN01-B",
+        "side_a": "no", "side_b": "no",
+        "kalshi_event_ticker": "KXS-26JAN01",
+        "series_ticker": "KXS",
+        "fee_type": "quadratic_with_maker_fees", "fee_rate": 0.0175,
+        "close_time": "2026-12-31T00:00:00Z", "expected_expiration_time": None,
+    }
+    result = await engine_fixture.add_pairs_from_selection([subcent_record])
+    assert isinstance(result, CommitResult)
+    assert result.admitted == []
+    assert len(result.rejected) == 1
+    rejected_record, rejected_error = result.rejected[0]
+    assert rejected_record["event_ticker"] == "KXS-26JAN01"
+    assert isinstance(rejected_error, MarketAdmissionError)
+    assert "sub-cent" in str(rejected_error).lower() or "tick" in str(rejected_error).lower()

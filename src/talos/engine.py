@@ -3198,8 +3198,12 @@ class TradingEngine:
                 # the caller treats them as a hard commit failure and can
                 # preserve staged_changes for retry.
                 try:
-                    market_a = await self._rest.get_market(str(r["ticker_a"]))
-                    market_b = await self._rest.get_market(str(r["ticker_b"]))
+                    # Parallelize the two per-record REST calls so a batch
+                    # of N pairs costs ~N get_market latencies instead of 2N.
+                    market_a, market_b = await asyncio.gather(
+                        self._rest.get_market(str(r["ticker_a"])),
+                        self._rest.get_market(str(r["ticker_b"])),
+                    )
                     validate_market_for_admission(market_a, market_b)
                 except MarketAdmissionError as exc:
                     logger.warning(
