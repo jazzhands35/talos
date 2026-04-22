@@ -202,3 +202,71 @@ async def test_clean_batch_clears_staging_and_returns_true(
     assert ts.staged_changes.to_add == []
     # No partial-failure dialog
     assert not any("rejected" in m.lower() for m, _ in ts._notify_capture)
+
+
+@pytest.mark.asyncio
+async def test_commit_worker_suppresses_success_toast_on_any_rejection(
+    ts_with_commit_result,
+):
+    """Task 6 regression guard: _commit_worker must only fire the
+    'Commit complete.' toast when commit() returns True. If ANY row
+    was rejected (commit() returns False), the worker returns early
+    and the success toast is suppressed."""
+    admitted_record = _mk_record("KXA-26JAN01")
+    rejected_record = _mk_record("KXF-26JAN01")
+    admitted_pair = MagicMock(
+        event_ticker="KXA-26JAN01",
+        kalshi_event_ticker="KXA-26JAN01",
+    )
+    cr = CommitResult(
+        admitted=[admitted_pair],
+        rejected=[
+            (
+                {"event_ticker": "KXF-26JAN01", "ticker_a": "KXF-26JAN01-A"},
+                MarketAdmissionError("KXF-26JAN01-A: fractional_trading_enabled ..."),
+            ),
+        ],
+    )
+    ts = ts_with_commit_result(cr, [admitted_record, rejected_record])
+    # _commit_worker calls self._rebuild_tree only on success — stub it so
+    # the fixture doesn't crash if that path is accidentally reached.
+    ts._rebuild_tree = lambda: None
+    ts._commit_in_flight = True  # worker's finally clause expects this attr
+
+    await ts._commit_worker()
+
+    success_toasts = [
+        m for m, _ in ts._notify_capture if m == "Commit complete."
+    ]
+    assert success_toasts == [], (
+        f"success toast must not fire when any row was rejected, got: "
+        f"{ts._notify_capture}"
+    )
+    # The partial-failure notify fired from commit(), captured via app_stub.
+    assert any("KXF-26JAN01" in m for m, _ in ts._notify_capture)
+
+
+@pytest.mark.asyncio
+async def test_commit_worker_fires_success_toast_on_clean_batch(
+    ts_with_commit_result,
+):
+    """Complement of the rejection case: a clean commit DOES fire the
+    success toast so we know the suppression logic is specific."""
+    record = _mk_record("KXA-26JAN01")
+    admitted_pair = MagicMock(
+        event_ticker="KXA-26JAN01",
+        kalshi_event_ticker="KXA-26JAN01",
+    )
+    cr = CommitResult(admitted=[admitted_pair], rejected=[])
+    ts = ts_with_commit_result(cr, [record])
+    ts._rebuild_tree = lambda: None
+    ts._commit_in_flight = True
+
+    await ts._commit_worker()
+
+    success_toasts = [
+        m for m, _ in ts._notify_capture if m == "Commit complete."
+    ]
+    assert len(success_toasts) == 1, (
+        f"expected one success toast on clean commit, got: {ts._notify_capture}"
+    )
