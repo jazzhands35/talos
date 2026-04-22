@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from decimal import Decimal, InvalidOperation
 from typing import Any
 
 from pydantic import BaseModel, model_validator
@@ -17,11 +18,30 @@ class OrderBookLevel(BaseModel):
     quantity: int
 
 
+class PriceRange(BaseModel, extra="ignore"):
+    """One row of Kalshi's market ``price_ranges`` metadata.
+
+    Stored as raw dollar strings because the values may be sub-cent and
+    we do not want to round at parse time. Consumers use Decimal math
+    to compute bps.
+    """
+
+    min_price_dollars: str = "0.01"
+    max_price_dollars: str = "0.99"
+    tick_dollars: str = "0.01"
+
+
 class Market(BaseModel):
     """A Kalshi market (contract).
 
     Post March 12, 2026: integer cents fields removed from API responses.
     The validator converts _dollars/_fp string fields to int cents/int counts.
+
+    Phase 0 additions (2026-04-21): ``fractional_trading_enabled``,
+    ``price_level_structure``, and ``price_ranges`` are shape metadata used
+    by ``validate_market_for_admission`` to reject markets whose shape
+    would trigger the fractional-count truncation or sub-cent-rounding
+    bugs documented in the bps/fp100 migration spec.
     """
 
     ticker: str
@@ -42,6 +62,32 @@ class Market(BaseModel):
     result: str = ""
     market_type: str = "binary"
     expected_expiration_time: str | None = None
+    # Phase 0 shape metadata (bps/fp100 migration admission guard).
+    fractional_trading_enabled: bool = False
+    price_level_structure: str = ""
+    price_ranges: list[PriceRange] = []
+
+    def tick_bps(self) -> int:
+        """Return the market's minimum tick size in basis points.
+
+        1 cent = 100 bps. A whole-cent-tick market returns 100. A market
+        with a 0.1¢ (0.001 dollar) tick returns 10. Defaults to 100 bps
+        when ``price_ranges`` is empty (typical cent-only markets).
+
+        If the market declares multiple ranges with different ticks,
+        returns the minimum — the admission guard needs to reject if ANY
+        portion of the range would produce sub-cent prices.
+        """
+        if not self.price_ranges:
+            return 100
+        ticks_bps: list[int] = []
+        for pr in self.price_ranges:
+            try:
+                d = Decimal(pr.tick_dollars)
+            except InvalidOperation:
+                continue
+            ticks_bps.append(int((d * Decimal(10_000)).to_integral_value()))
+        return min(ticks_bps) if ticks_bps else 100
 
     @model_validator(mode="before")
     @classmethod
