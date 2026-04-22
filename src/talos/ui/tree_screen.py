@@ -934,19 +934,18 @@ class TreeScreen(Screen):
         # re-raises. Catch here so the user gets a toast and staged_changes
         # are preserved for retry — propagating to the worker would log the
         # exception silently inside Textual and look like a hang.
+        from talos.game_manager import MarketAdmissionError
+
         added: list[Any] = []
+        rejected: list[tuple[dict[str, Any], MarketAdmissionError]] = []
         remove_outcomes: list[Any] = []
         if staged.to_add:
             try:
-                # Task 4 band-aid: unwrap CommitResult.admitted to keep
-                # the old list contract until Task 5 restructures commit()
-                # to consume CommitResult fully (partial-failure dialog,
-                # selective staging clear).
-                added = (
-                    await self._engine.add_pairs_from_selection(
-                        [r.model_dump() for r in staged.to_add]
-                    )
-                ).admitted
+                commit_result = await self._engine.add_pairs_from_selection(
+                    [r.model_dump() for r in staged.to_add]
+                )
+                added = commit_result.admitted
+                rejected = commit_result.rejected
             except PersistenceError as exc:
                 # Narrow catch (round-4 v0.1.1 finding #4): only catch
                 # PersistenceError. Engine bugs (KeyError, AttributeError,
@@ -1146,7 +1145,49 @@ class TreeScreen(Screen):
             return False
 
         # 4. Clear staged.
+        # F34 + F35: selective staging clear. Admitted pairs leave staging;
+        # rejected pairs remain staged so the operator can see exactly what
+        # was blocked and why, without losing unrelated metadata for the
+        # cleanly-processed pairs. Remove flows and metadata flags are
+        # unrelated to admission and always clear on success.
+        rejected_event_tickers = {
+            str(rec.get("event_ticker")) for rec, _exc in rejected
+        }
         self.staged_changes = StagedChanges.empty()
+        if rejected_event_tickers:
+            # Re-stage only the rejected rows from the ORIGINAL pre-commit
+            # staged.to_add list (we already captured it into local `staged`
+            # at the top of commit()).
+            self.staged_changes.to_add = [
+                r for r in staged.to_add
+                if r.event_ticker in rejected_event_tickers
+            ]
+
+        # 4b. F34 + F35: if any record was rejected, surface a partial-
+        # failure notification listing each rejected row's reason and
+        # return False so _commit_worker suppresses the "Commit complete."
+        # success toast.
+        if rejected:
+            reasons = "\n".join(
+                f"  • {rec.get('event_ticker', '?')}: {exc}"
+                for rec, exc in rejected
+            )
+            # error severity when NOTHING was admitted; warning when partial.
+            severity = "error" if not added else "warning"
+            self.app.notify(
+                f"Commit rejected {len(rejected)} row(s) "
+                f"(remaining staged for review):\n{reasons}",
+                severity=severity,
+                timeout=30,
+            )
+            # Still trigger volume refresh for admitted pairs before returning
+            # (same background task that normally fires at the end of commit).
+            if added and self._engine is not None and hasattr(
+                self._engine, "refresh_volumes"
+            ):
+                import asyncio as _asyncio
+                _asyncio.create_task(self._engine.refresh_volumes())
+            return False
 
         # 5. Trigger an immediate volume refresh for newly-added pairs so
         # the operator sees real 24h volume in the OpportunitiesTable
