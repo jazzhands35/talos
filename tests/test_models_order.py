@@ -156,6 +156,222 @@ class TestFill:
         assert f.purchased_side == "no"
 
 
+class TestOrderDualBpsFp100Fields:
+    """Task 3b-Order: bps/fp100 fields populate alongside legacy cents/int."""
+
+    def test_dual_population_whole_cents(self) -> None:
+        """Wire '0.53' → yes_price==53 (legacy) AND yes_price_bps==5300 (new)."""
+        data = {
+            "order_id": "ord-dual-1",
+            "ticker": "MKT-1",
+            "side": "yes",
+            "yes_price_dollars": "0.53",
+            "no_price_dollars": "0.47",
+        }
+        o = Order.model_validate(data)
+        assert o.yes_price == 53
+        assert o.yes_price_bps == 5300
+        assert o.no_price == 47
+        assert o.no_price_bps == 4700
+
+    def test_subcent_price_retained_in_bps(self) -> None:
+        """Wire '0.0488' → yes_price==5 (lossy banker's round) AND yes_price_bps==488 (exact)."""
+        data = {
+            "order_id": "ord-dual-marj",
+            "ticker": "MARJ-MKT",
+            "side": "yes",
+            "yes_price_dollars": "0.0488",
+            "no_price_dollars": "0.9512",
+        }
+        o = Order.model_validate(data)
+        # Legacy path: 4.88¢ banker's-rounds to 5.
+        assert o.yes_price == 5
+        # New path: exact sub-cent retained.
+        assert o.yes_price_bps == 488
+        # Complement: 9512 bps = 95.12¢ → 95 (half-even from .12 → down).
+        assert o.no_price == 95
+        assert o.no_price_bps == 9512
+
+    def test_fractional_count_retained_in_fp100(self) -> None:
+        """Wire '1.89' → fill_count==1 (legacy truncation) AND fill_count_fp100==189 (exact).
+
+        This is the MARJ 1.89-contract maker-fill motivating bug: the legacy
+        int field silently truncates to 1; the fp100 field preserves 189.
+        """
+        data = {
+            "order_id": "ord-dual-frac",
+            "ticker": "MARJ-MKT",
+            "side": "yes",
+            "fill_count_fp": "1.89",
+            "remaining_count_fp": "8.11",
+            "initial_count_fp": "10.00",
+        }
+        o = Order.model_validate(data)
+        # Legacy path: fractional → floor.
+        assert o.fill_count == 1
+        assert o.remaining_count == 8
+        assert o.initial_count == 10
+        # New path: exact fractional retained.
+        assert o.fill_count_fp100 == 189
+        assert o.remaining_count_fp100 == 811
+        assert o.initial_count_fp100 == 1000
+
+    def test_fill_cost_and_fees_dual_fields(self) -> None:
+        """maker_fill_cost / taker_fill_cost / *_fees each get their _bps sibling."""
+        data = {
+            "order_id": "ord-dual-fees",
+            "ticker": "MKT-1",
+            "side": "no",
+            "taker_fees_dollars": "0.02",
+            "maker_fees_dollars": "0.0150",
+            "maker_fill_cost_dollars": "4.48",
+            "taker_fill_cost_dollars": "0.00",
+        }
+        o = Order.model_validate(data)
+        # Legacy cents (lossy for 1.50¢ → 2 half-even).
+        assert o.taker_fees == 2
+        assert o.maker_fees == 2
+        assert o.maker_fill_cost == 448
+        assert o.taker_fill_cost == 0
+        # New bps (exact).
+        assert o.taker_fees_bps == 200
+        assert o.maker_fees_bps == 150
+        assert o.maker_fill_cost_bps == 44800
+        assert o.taker_fill_cost_bps == 0
+
+    def test_zero_defaults_when_wire_field_absent(self) -> None:
+        """Wire omits price/count → BOTH legacy and new fields are 0."""
+        data = {
+            "order_id": "ord-empty",
+            "ticker": "MKT-1",
+            "side": "yes",
+        }
+        o = Order.model_validate(data)
+        assert o.yes_price == 0 and o.yes_price_bps == 0
+        assert o.no_price == 0 and o.no_price_bps == 0
+        assert o.initial_count == 0 and o.initial_count_fp100 == 0
+        assert o.remaining_count == 0 and o.remaining_count_fp100 == 0
+        assert o.fill_count == 0 and o.fill_count_fp100 == 0
+        assert o.taker_fees == 0 and o.taker_fees_bps == 0
+        assert o.maker_fees == 0 and o.maker_fees_bps == 0
+        assert o.maker_fill_cost == 0 and o.maker_fill_cost_bps == 0
+        assert o.taker_fill_cost == 0 and o.taker_fill_cost_bps == 0
+
+    def test_none_wire_field_yields_zero_in_both(self) -> None:
+        """Wire field explicitly None → BOTH fields stay at default 0."""
+        data = {
+            "order_id": "ord-none",
+            "ticker": "MKT-1",
+            "side": "yes",
+            "yes_price_dollars": None,
+            "fill_count_fp": None,
+        }
+        o = Order.model_validate(data)
+        assert o.yes_price == 0
+        assert o.yes_price_bps == 0
+        assert o.fill_count == 0
+        assert o.fill_count_fp100 == 0
+
+
+class TestFillDualBpsFp100Fields:
+    """Task 3b-Order: Fill dual-field parity with Order."""
+
+    def test_dual_population_whole_cents(self) -> None:
+        data = {
+            "trade_id": "trade-dual-1",
+            "order_id": "ord-1",
+            "ticker": "MKT-1",
+            "side": "no",
+            "yes_price_dollars": "0.40",
+            "no_price_dollars": "0.60",
+            "count_fp": "5",
+        }
+        f = Fill.model_validate(data)
+        assert f.yes_price == 40 and f.yes_price_bps == 4000
+        assert f.no_price == 60 and f.no_price_bps == 6000
+        assert f.count == 5 and f.count_fp100 == 500
+
+    def test_subcent_price_retained_in_bps(self) -> None:
+        data = {
+            "trade_id": "trade-marj",
+            "order_id": "ord-1",
+            "ticker": "MARJ-MKT",
+            "side": "yes",
+            "yes_price_dollars": "0.0488",
+            "no_price_dollars": "0.9512",
+        }
+        f = Fill.model_validate(data)
+        assert f.yes_price == 5  # lossy
+        assert f.yes_price_bps == 488  # exact
+        assert f.no_price_bps == 9512
+
+    def test_fractional_count_retained_in_fp100(self) -> None:
+        """Fill.count_fp='1.89' → count==1 (legacy trunc) AND count_fp100==189 (exact)."""
+        data = {
+            "trade_id": "trade-frac",
+            "order_id": "ord-1",
+            "ticker": "MARJ-MKT",
+            "side": "yes",
+            "count_fp": "1.89",
+        }
+        f = Fill.model_validate(data)
+        assert f.count == 1
+        assert f.count_fp100 == 189
+
+    def test_fee_cost_string_populates_bps(self) -> None:
+        """fee_cost='0.0130' → fee_cost==1 (rounded) AND fee_cost_bps==130 (exact)."""
+        data = {
+            "trade_id": "trade-fee",
+            "order_id": "ord-1",
+            "ticker": "MKT-1",
+            "side": "no",
+            "fee_cost": "0.0130",
+        }
+        f = Fill.model_validate(data)
+        assert f.fee_cost == 1  # legacy half-even round
+        assert f.fee_cost_bps == 130  # exact
+
+    def test_fee_cost_integer_passthrough_leaves_bps_default(self) -> None:
+        """Integer fee_cost path is passthrough (legacy-only) — fee_cost_bps stays default 0."""
+        data = {
+            "trade_id": "trade-fee-int",
+            "order_id": "ord-1",
+            "ticker": "MKT-1",
+            "side": "no",
+            "fee_cost": 5,
+        }
+        f = Fill.model_validate(data)
+        assert f.fee_cost == 5
+        # Integer path is the pre-migration shape; no bps promotion.
+        assert f.fee_cost_bps == 0
+
+    def test_zero_defaults_when_wire_field_absent(self) -> None:
+        data = {
+            "trade_id": "trade-empty",
+            "order_id": "ord-1",
+            "ticker": "MKT-1",
+            "side": "yes",
+        }
+        f = Fill.model_validate(data)
+        assert f.yes_price == 0 and f.yes_price_bps == 0
+        assert f.no_price == 0 and f.no_price_bps == 0
+        assert f.count == 0 and f.count_fp100 == 0
+        assert f.fee_cost == 0 and f.fee_cost_bps == 0
+
+    def test_none_wire_field_yields_zero_in_both(self) -> None:
+        data = {
+            "trade_id": "trade-none",
+            "order_id": "ord-1",
+            "ticker": "MKT-1",
+            "side": "yes",
+            "yes_price_dollars": None,
+            "count_fp": None,
+        }
+        f = Fill.model_validate(data)
+        assert f.yes_price == 0 and f.yes_price_bps == 0
+        assert f.count == 0 and f.count_fp100 == 0
+
+
 class TestBatchOrderResult:
     def test_success_result(self) -> None:
         data = {
