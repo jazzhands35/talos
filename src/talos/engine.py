@@ -1100,6 +1100,7 @@ class TradingEngine:
             cached_tickers = set()
             pairs = []
             quarantined_any = False
+            quarantined_tickers: list[str] = []
             for data in self._initial_games_full:
                 try:
                     pair = self._game_manager.restore_game(data)
@@ -1137,10 +1138,12 @@ class TradingEngine:
                             pair.engine_state = "exit_only"
                         self._exit_only_events.add(pair.event_ticker)
                         quarantined_any = True
-                        self._notify(
-                            f"{pair.event_ticker}: restored in exit_only — {exc}",
-                            "warning",
-                        )
+                        quarantined_tickers.append(pair.event_ticker)
+                        # Per-pair log kept for forensics; the operator toast
+                        # is consolidated below into one summary so a startup
+                        # that quarantines N pairs (we've seen N > 100 in
+                        # production when Kalshi flips a whole product line
+                        # to fractional overnight) doesn't flood the UI.
                         logger.warning(
                             "restore_quarantine_applied",
                             event_ticker=pair.event_ticker,
@@ -1168,6 +1171,16 @@ class TradingEngine:
             # F37: durable persist the quarantine so a crash before the next
             # scheduled save cannot resurrect a quarantined pair as active.
             if quarantined_any:
+                # One consolidated toast for the operator; forensics remain
+                # in the per-pair restore_quarantine_applied log lines.
+                preview = ", ".join(quarantined_tickers[:3])
+                if len(quarantined_tickers) > 3:
+                    preview += f", +{len(quarantined_tickers) - 3} more"
+                self._notify(
+                    f"{len(quarantined_tickers)} pair(s) restored in "
+                    f"exit_only (Phase 0 admission guard): {preview}",
+                    "warning",
+                )
                 try:
                     self._persist_active_games()
                 except Exception:
