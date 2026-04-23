@@ -62,7 +62,6 @@ from talos.units import (
     ONE_CONTRACT_FP100,
     ONE_DOLLAR_BPS,
     bps_to_cents_round,
-    cents_to_bps,
     format_bps_as_dollars_display,
 )
 
@@ -1613,51 +1612,27 @@ class TradingEngine:
         for order in self._orders_cache:
             if order.order_id == msg.order_id:
                 old_fill_count_fp100 = _order_fill_count_fp100(order)
-                msg_fill_fp100 = (
-                    msg.fill_count_fp100
-                    if msg.fill_count_fp100
-                    else msg.fill_count * ONE_CONTRACT_FP100
-                )
-                msg_remaining_fp100 = (
-                    msg.remaining_count_fp100
-                    if msg.remaining_count_fp100
-                    else msg.remaining_count * ONE_CONTRACT_FP100
-                )
 
                 # Monotonic update — WS can never decrease fills.
                 order.status = msg.status
                 order.fill_count_fp100 = max(
-                    _order_fill_count_fp100(order), msg_fill_fp100
+                    _order_fill_count_fp100(order), msg.fill_count_fp100
                 )
-                order.remaining_count_fp100 = msg_remaining_fp100
+                order.remaining_count_fp100 = msg.remaining_count_fp100
                 order.maker_fill_cost_bps = max(
-                    order.maker_fill_cost_bps,
-                    msg.maker_fill_cost_bps or cents_to_bps(msg.maker_fill_cost),
+                    order.maker_fill_cost_bps, msg.maker_fill_cost_bps
                 )
                 order.taker_fill_cost_bps = max(
-                    order.taker_fill_cost_bps,
-                    msg.taker_fill_cost_bps or cents_to_bps(msg.taker_fill_cost),
+                    order.taker_fill_cost_bps, msg.taker_fill_cost_bps
                 )
-                order.maker_fees_bps = max(
-                    order.maker_fees_bps,
-                    msg.maker_fees_bps or cents_to_bps(msg.maker_fees),
-                )
+                order.maker_fees_bps = max(order.maker_fees_bps, msg.maker_fees_bps)
 
                 new_fills_fp100 = _order_fill_count_fp100(order) - old_fill_count_fp100
                 new_fills = new_fills_fp100 // ONE_CONTRACT_FP100
                 if new_fills_fp100 > 0:
-                    if msg.side == "no":
-                        price_bps = (
-                            msg.no_price_bps
-                            if msg.no_price_bps
-                            else cents_to_bps(msg.no_price)
-                        )
-                    else:
-                        price_bps = (
-                            msg.yes_price_bps
-                            if msg.yes_price_bps
-                            else cents_to_bps(msg.yes_price)
-                        )
+                    price_bps = (
+                        msg.no_price_bps if msg.side == "no" else msg.yes_price_bps
+                    )
                     price = bps_to_cents_round(price_bps)
                     self._notify(
                         f"WS fill: {new_fills} @ {price}¢ on {msg.ticker}",
@@ -1702,13 +1677,7 @@ class TradingEngine:
                     # DB schema is integer cents / whole contracts; round from
                     # bps/fp100 for the log insert.
                     ws_price_bps = (
-                        (msg.no_price_bps if msg.no_price_bps else cents_to_bps(msg.no_price))
-                        if msg.side == "no"
-                        else (
-                            msg.yes_price_bps
-                            if msg.yes_price_bps
-                            else cents_to_bps(msg.yes_price)
-                        )
+                        msg.no_price_bps if msg.side == "no" else msg.yes_price_bps
                     )
                     self._data_collector.log_order(
                         event_ticker=event_ticker,
@@ -1717,11 +1686,13 @@ class TradingEngine:
                         side=msg.side,
                         status=msg.status,
                         price=bps_to_cents_round(ws_price_bps),
-                        initial_count=msg.fill_count + msg.remaining_count,
-                        fill_count=msg.fill_count,
-                        remaining_count=msg.remaining_count,
-                        maker_fill_cost=msg.maker_fill_cost,
-                        maker_fees=msg.maker_fees,
+                        initial_count=(
+                            msg.fill_count_fp100 + msg.remaining_count_fp100
+                        ) // ONE_CONTRACT_FP100,
+                        fill_count=msg.fill_count_fp100 // ONE_CONTRACT_FP100,
+                        remaining_count=msg.remaining_count_fp100 // ONE_CONTRACT_FP100,
+                        maker_fill_cost=bps_to_cents_round(msg.maker_fill_cost_bps),
+                        maker_fees=bps_to_cents_round(msg.maker_fees_bps),
                         source="ws_update",
                     )
                 return
@@ -1732,38 +1703,22 @@ class TradingEngine:
         ws_pair = self.find_pair(evt) if evt else None
         expected = ws_pair is not None and msg.side in {ws_pair.side_a, ws_pair.side_b}
         if expected and msg.status in ("resting", "executed"):
-            # Populate both legacy and bps/fp100 fields so consumers on either
-            # side of the migration see a coherent Order. Bps/fp100 fall back
-            # to cents-to-bps when the WS message was parsed from the legacy
-            # integer payload.
-            new_fill_fp100 = (
-                msg.fill_count_fp100
-                if msg.fill_count_fp100
-                else msg.fill_count * ONE_CONTRACT_FP100
-            )
-            new_remaining_fp100 = (
-                msg.remaining_count_fp100
-                if msg.remaining_count_fp100
-                else msg.remaining_count * ONE_CONTRACT_FP100
-            )
+            new_fill_fp100 = msg.fill_count_fp100
+            new_remaining_fp100 = msg.remaining_count_fp100
             new_order = Order(
                 order_id=msg.order_id,
                 ticker=msg.ticker,
                 action="buy",
                 side=msg.side,
                 status=msg.status,
-                no_price_bps=msg.no_price_bps or cents_to_bps(msg.no_price),
-                yes_price_bps=msg.yes_price_bps or cents_to_bps(msg.yes_price),
+                no_price_bps=msg.no_price_bps,
+                yes_price_bps=msg.yes_price_bps,
                 fill_count_fp100=new_fill_fp100,
                 remaining_count_fp100=new_remaining_fp100,
                 initial_count_fp100=new_fill_fp100 + new_remaining_fp100,
-                maker_fill_cost_bps=(
-                    msg.maker_fill_cost_bps or cents_to_bps(msg.maker_fill_cost)
-                ),
-                taker_fill_cost_bps=(
-                    msg.taker_fill_cost_bps or cents_to_bps(msg.taker_fill_cost)
-                ),
-                maker_fees_bps=msg.maker_fees_bps or cents_to_bps(msg.maker_fees),
+                maker_fill_cost_bps=msg.maker_fill_cost_bps,
+                taker_fill_cost_bps=msg.taker_fill_cost_bps,
+                maker_fees_bps=msg.maker_fees_bps,
             )
             self._orders_cache.append(new_order)
             logger.info(
@@ -1801,18 +1756,18 @@ class TradingEngine:
         position drift against Kalshi's authoritative post_position.
         """
         # Log cents rounded from the exact bps sibling so fractional-market
-        # fills don't silently lose precision in the legacy yes_price read.
-        msg_yes_bps = msg.yes_price_bps if msg.yes_price_bps else cents_to_bps(msg.yes_price)
+        # fills don't silently lose precision.
+        msg_yes_bps = msg.yes_price_bps
         logger.info(
             "ws_fill_detail",
             trade_id=msg.trade_id,
             order_id=msg.order_id,
             ticker=msg.market_ticker,
             side=msg.side,
-            count=msg.count,
+            count=msg.count_fp100 // ONE_CONTRACT_FP100,
             price=bps_to_cents_round(msg_yes_bps),
             is_taker=msg.is_taker,
-            post_position=msg.post_position,
+            post_position=msg.post_position_fp100 // ONE_CONTRACT_FP100,
         )
 
         # ── Mark dirty + enqueue reaction ──
@@ -1828,7 +1783,7 @@ class TradingEngine:
             self._reaction_queue.put_nowait(event_ticker)
 
         # ── Post-position drift check (observability only) ──
-        if fill_pair is not None and msg.post_position != 0:
+        if fill_pair is not None and msg.post_position_fp100 != 0:
             try:
                 ledger = self._adjuster.get_ledger(event_ticker)
                 side: Side | None = None
@@ -1841,7 +1796,7 @@ class TradingEngine:
                     elif msg.market_ticker == fill_pair.ticker_b:
                         side = Side.B
                 if side is not None:
-                    kalshi_pos = abs(msg.post_position)
+                    kalshi_pos = abs(msg.post_position_fp100 // ONE_CONTRACT_FP100)
                     ledger_pos = ledger.filled_count(side)
                     if kalshi_pos != ledger_pos:
                         logger.warning(
@@ -1850,7 +1805,7 @@ class TradingEngine:
                             side=side.value,
                             kalshi_post_position=kalshi_pos,
                             ledger_filled=ledger_pos,
-                            fill_count=msg.count,
+                            fill_count=msg.count_fp100 // ONE_CONTRACT_FP100,
                         )
             except KeyError:
                 pass
@@ -1869,10 +1824,10 @@ class TradingEngine:
                 ticker=msg.market_ticker,
                 side=msg.side,
                 price=bps_to_cents_round(msg_yes_bps),
-                count=msg.count,
-                fee_cost=msg.fee_cost if hasattr(msg, "fee_cost") else 0,
+                count=msg.count_fp100 // ONE_CONTRACT_FP100,
+                fee_cost=bps_to_cents_round(msg.fee_cost_bps),
                 is_taker=msg.is_taker,
-                post_position=msg.post_position,
+                post_position=msg.post_position_fp100 // ONE_CONTRACT_FP100,
                 queue_position=qp,
                 time_since_order=time_since,
             )

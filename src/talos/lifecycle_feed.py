@@ -47,13 +47,16 @@ class LifecycleFeed:
         ticker = msg.market_ticker
 
         if event_type == "determined" and self.on_determined:
-            if msg.settlement_value is None:
+            if msg.settlement_value_bps is None:
                 logger.warning(
                     "lifecycle_determined_missing_settlement",
                     ticker=ticker,
                 )
                 return
-            self.on_determined(ticker, msg.result, msg.settlement_value)
+            # Callback expects cents (legacy contract); round from exact bps.
+            self.on_determined(
+                ticker, msg.result, msg.settlement_value_bps // 100
+            )
         elif event_type == "settled" and self.on_settled:
             self.on_settled(ticker)
         elif event_type == "deactivated" and self.on_paused:
