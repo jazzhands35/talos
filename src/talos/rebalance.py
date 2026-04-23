@@ -14,8 +14,10 @@ import structlog
 
 from talos.errors import KalshiAPIError, KalshiRateLimitError
 from talos.fees import max_profitable_price
+from talos.models.order import Order
 from talos.models.proposal import Proposal, ProposalKey, ProposedRebalance
 from talos.position_ledger import PositionLedger, Side
+from talos.units import ONE_CONTRACT_FP100, bps_to_cents_round, cents_to_bps
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
@@ -32,6 +34,32 @@ if TYPE_CHECKING:
     CancelWithVerify = Callable[[str, ArbPair], Awaitable[None]]
 
 logger = structlog.get_logger()
+
+
+def _order_remaining_fp100(order: Order) -> int:
+    """Read remaining count preferring fp100, falling back to legacy contracts.
+
+    Order instances parsed from Kalshi wire (``Order._migrate_fp``) populate
+    BOTH legacy and fp100 fields. Test fixtures that construct Order directly
+    with legacy kwargs (``remaining_count=10``) leave ``remaining_count_fp100``
+    at default 0. The fallback keeps tests passing; removed by Task 13a-2
+    when the legacy field is deleted from the Order model.
+    """
+    if order.remaining_count_fp100:
+        return order.remaining_count_fp100
+    return order.remaining_count * ONE_CONTRACT_FP100
+
+
+def _order_remaining_contracts(order: Order) -> int:
+    """Whole-contract remaining count for display / REST-wire comparisons.
+
+    Rebalance produces whole-contract cancel/amend payloads (Kalshi's
+    amend_order / create_order on this path accept whole units only), so
+    we floor fp100 → contracts. Identical to the legacy field for
+    wire-parsed orders on cent-tick markets; exact for fractional markets
+    once the wire path is flowing.
+    """
+    return _order_remaining_fp100(order) // ONE_CONTRACT_FP100
 
 
 def _is_no_op(err: KalshiAPIError) -> bool:
@@ -469,17 +497,18 @@ async def execute_rebalance(
                 # Use decrease_order for quantity-only reductions (preserves
                 # queue position, simpler semantics than amend).
                 fresh_order = await rest_client.get_order(rebalance.order_id)
-                if fresh_order.remaining_count <= rebalance.target_resting:
+                fresh_remaining = _order_remaining_contracts(fresh_order)
+                if fresh_remaining <= rebalance.target_resting:
                     _notify(
                         f"Rebalance step 1: already at target"
-                        f" (remaining={fresh_order.remaining_count})",
+                        f" (remaining={fresh_remaining})",
                         "information",
                     )
                 else:
                     logger.info(
                         "rebalance_decrease",
                         order_id=rebalance.order_id,
-                        order_remaining=fresh_order.remaining_count,
+                        order_remaining=fresh_remaining,
                         target_resting=rebalance.target_resting,
                     )
                     await rest_client.decrease_order(
@@ -503,7 +532,7 @@ async def execute_rebalance(
                         pass
                     _notify(
                         f"Rebalance step 1: {rebalance.side} resting"
-                        f" {fresh_order.remaining_count}"
+                        f" {fresh_remaining}"
                         f" \u2192 {rebalance.target_resting}",
                         "information",
                     )
@@ -638,8 +667,15 @@ async def execute_rebalance(
                     rebalance.catchup_ticker, side=catchup_side_str
                 )
                 if fresh_level is not None:
-                    fresh_price = getattr(fresh_level, "price", 0)
-                    if isinstance(fresh_price, int) and fresh_price > 0:
+                    # Prefer exact-precision price_bps; fall back to legacy
+                    # cents for fixtures that only populate the legacy field.
+                    fresh_bps = (
+                        fresh_level.price_bps
+                        if fresh_level.price_bps
+                        else cents_to_bps(fresh_level.price)
+                    )
+                    if fresh_bps > 0:
+                        fresh_price = bps_to_cents_round(fresh_bps)
                         catchup_price = min(catchup_price, fresh_price)
             except Exception:
                 pass  # Fall back to proposal price
@@ -687,7 +723,7 @@ async def execute_rebalance(
             ledger.record_placement(
                 under_side,
                 order_id=created.order_id,
-                count=created.remaining_count,
+                count=_order_remaining_contracts(created),
                 price=catchup_price,
             )
             _notify(
@@ -770,24 +806,25 @@ async def _cancel_all_resting(
         for order in orders:
             if order.ticker != ticker:
                 continue
+            order_remaining_contracts = _order_remaining_contracts(order)
             if order.order_id == primary_order_id:
-                total_cancelled += order.remaining_count
+                total_cancelled += order_remaining_contracts
                 primary_counted = True
                 continue  # Already cancelled above
             if order.side != target_side or order.action != "buy":
                 continue
-            if order.remaining_count <= 0:
+            if order_remaining_contracts <= 0:
                 continue
             try:
                 await cancel_with_verify(order.order_id, pair)
-                total_cancelled += order.remaining_count
+                total_cancelled += order_remaining_contracts
                 cancelled_ids.append(order.order_id)
                 logger.info(
                     "orphan_order_cancelled",
                     event_ticker=event_ticker,
                     ticker=ticker,
                     order_id=order.order_id,
-                    remaining=order.remaining_count,
+                    remaining=order_remaining_contracts,
                 )
             except KalshiRateLimitError:
                 raise  # Propagate — don't silently skip resting orders
@@ -858,17 +895,18 @@ async def _cancel_duplicate_orders(
             continue
         if order.side != target_side or order.action != "buy":
             continue
-        if order.remaining_count <= 0:
+        order_remaining_contracts = _order_remaining_contracts(order)
+        if order_remaining_contracts <= 0:
             continue
         try:
             await cancel_with_verify(order.order_id, pair)
-            cancelled += order.remaining_count
+            cancelled += order_remaining_contracts
             logger.info(
                 "duplicate_order_cancelled",
                 event_ticker=event_ticker,
                 ticker=ticker,
                 order_id=order.order_id,
-                remaining=order.remaining_count,
+                remaining=order_remaining_contracts,
             )
             # Register so sync_from_orders filters it out
             try:
