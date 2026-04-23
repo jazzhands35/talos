@@ -69,6 +69,37 @@ def dollars_str_to_bps(val: Any) -> int:
     return int(scaled)
 
 
+def dollars_str_to_bps_round(val: Any) -> int:
+    """'20.168040' → 201680 bps (half-even rounded). None → 0.
+
+    Aggregate-safe parser for Kalshi money fields that represent SUMS
+    rather than per-contract prices. The Kalshi /portfolio endpoints
+    return values like ``event_exposure_dollars='20.168040'`` — six
+    decimal digits, i.e. hundredths of a bps — because they're summing
+    arbitrary-precision fractional-fill contributions. The strict
+    :func:`dollars_str_to_bps` fail-closes on that; for aggregates, a
+    half-even round to the nearest bps is safe (loses at most 0.5 bps
+    per value, which is below the cents-rounding tolerance the legacy
+    integer-cents path already tolerated).
+
+    Use this for: event_exposure, realized_pnl, total_cost, fees_paid,
+    market_exposure, total_traded — any value that is a SUM across
+    multiple trades/contracts.
+
+    Do NOT use for: per-contract prices (yes_bid/ask, last_price,
+    order price fields). Those should stay on the strict parser
+    because a 1-bps silent shift there IS a real price drift.
+    """
+    if val is None:
+        return 0
+    try:
+        d = Decimal(str(val))
+    except InvalidOperation as exc:
+        raise ValueError(f"invalid _dollars payload: {val!r}") from exc
+    scaled = d * _BPS_SCALE
+    return int(scaled.quantize(Decimal("1"), rounding=ROUND_HALF_EVEN))
+
+
 def fp_str_to_fp100(val: Any) -> int:
     """'1.89' → 189 fp100. None → 0. Raises on non-integral input.
 

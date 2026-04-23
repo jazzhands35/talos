@@ -547,3 +547,62 @@ class TestPortfolioDualFieldInvariants:
         s = Settlement.model_validate({"ticker": "MKT-1", "revenue": revenue_cents})
         assert s.revenue == revenue_cents
         assert s.revenue_bps == revenue_cents * 100
+
+
+class TestPortfolioAggregateSubBpsPrecision:
+    """Kalshi's /portfolio endpoints emit aggregate money fields (sums
+    across many trades) with 6-decimal precision — e.g.
+    event_exposure_dollars='20.168040' scales to 201680.4 bps, a
+    sub-bps value.
+
+    The strict :func:`dollars_to_bps` parser fail-closes on those,
+    which was correct for per-contract prices but wrong for aggregate
+    sums. Portfolio model validators route aggregate fields through
+    :func:`dollars_to_bps_round` (half-even to nearest bps) so these
+    payloads load cleanly.
+
+    Regression for the crash on production-like payload at runtime
+    (EventPosition validator refused '20.168040' at startup).
+    """
+
+    def test_event_position_accepts_sub_bps_aggregate_payload(self) -> None:
+        # Exact payload shape from the live Kalshi /portfolio/positions
+        # response that crashed Talos when this class first landed.
+        ep = EventPosition.model_validate({
+            "event_ticker": "KXTRUMPSAY-26APR27",
+            "event_exposure_dollars": "20.168040",    # 201680.4 bps — sub-bps
+            "fees_paid_dollars": "0.058000",          # 580 bps — exact
+            "realized_pnl_dollars": "2.636040",       # 26360.4 bps — sub-bps
+            "total_cost_dollars": "97.532000",        # 975320 bps — exact
+            "total_cost_shares_fp": "191.59",
+        })
+        # Half-even rounds: 201680.4 → 201680 ; 26360.4 → 26360 ; 580 / 975320 exact.
+        assert ep.event_exposure_bps == 201_680
+        assert ep.realized_pnl_bps == 26_360
+        assert ep.fees_paid_bps == 580
+        assert ep.total_cost_bps == 975_320
+        # Legacy cents path rounds the same value to 2017 cents (half-even of 20.168040).
+        assert ep.event_exposure == 2_017
+
+    def test_position_accepts_sub_bps_aggregate_payload(self) -> None:
+        p = Position.model_validate({
+            "ticker": "KXTRUMPSAY-26APR27-YES",
+            "position_fp": "100.00",
+            "total_traded_dollars": "15.432140",       # 154321.4 bps — sub-bps
+            "market_exposure_dollars": "0.500050",     # 5000.5 bps — sub-bps
+            "realized_pnl_dollars": "1.234560",        # 12345.6 bps — sub-bps
+            "fees_paid_dollars": "0.012340",           # 123.4 bps — sub-bps
+        })
+        assert p.total_traded_bps == 154_321
+        assert p.market_exposure_bps == 5_000      # 5000.5 → 5000 (half-even to even)
+        assert p.realized_pnl_bps == 12_346        # 12345.6 → 12346 (half-even)
+        assert p.fees_paid_bps == 123
+
+    def test_balance_accepts_sub_bps_payload(self) -> None:
+        b = Balance.model_validate({
+            "balance": 0, "portfolio_value": 0,
+            "balance_dollars": "1234.567890",        # 12345678.9 bps — sub-bps
+            "portfolio_value_dollars": "250.000050",  # 2500000.5 bps — sub-bps
+        })
+        assert b.balance_bps == 12_345_679
+        assert b.portfolio_value_bps == 2_500_000

@@ -7,6 +7,7 @@ from typing import Any
 from pydantic import BaseModel, model_validator
 
 from talos.models._converters import dollars_to_bps as _dollars_to_bps
+from talos.models._converters import dollars_to_bps_round as _dollars_to_bps_round
 from talos.models._converters import dollars_to_cents as _dollars_to_cents
 from talos.models._converters import fp_to_fp100 as _fp_to_fp100
 from talos.models._converters import fp_to_int as _fp_to_int
@@ -56,13 +57,14 @@ class Balance(BaseModel):
     def _migrate_fp(cls, data: Any) -> Any:
         if not isinstance(data, dict):
             return data
+        # Balance aggregates account-wide; use aggregate-rounded parser.
         for legacy, new_bps, wire in [
             ("balance", "balance_bps", "balance_dollars"),
             ("portfolio_value", "portfolio_value_bps", "portfolio_value_dollars"),
         ]:
             if wire in data and data[wire] is not None:
                 data[legacy] = _dollars_to_cents(data[wire])
-                data[new_bps] = _dollars_to_bps(data[wire])
+                data[new_bps] = _dollars_to_bps_round(data[wire])
         return data
 
 
@@ -104,7 +106,10 @@ class Position(BaseModel, extra="ignore"):
         if not isinstance(data, dict):
             return data
         log_unknown_fields("Position", data, cls.model_fields.keys() | _POSITION_FP_FIELDS)
-        # Dollars → cents (legacy, lossy) + bps (new, exact).
+        # Dollars → cents (legacy, lossy) + bps (new, AGGREGATE-rounded).
+        # These are sums across fills/trades — Kalshi legitimately emits
+        # sub-bps precision (6-decimal) values. Use the rounding parser;
+        # per-contract prices use the strict parser elsewhere.
         for legacy, new_bps, wire in [
             ("total_traded", "total_traded_bps", "total_traded_dollars"),
             ("market_exposure", "market_exposure_bps", "market_exposure_dollars"),
@@ -113,7 +118,7 @@ class Position(BaseModel, extra="ignore"):
         ]:
             if wire in data and data[wire] is not None:
                 data[legacy] = _dollars_to_cents(data[wire])
-                data[new_bps] = _dollars_to_bps(data[wire])
+                data[new_bps] = _dollars_to_bps_round(data[wire])
         # FP → int (legacy, floor) + fp100 (new, exact).
         for legacy, new_fp100, wire in [
             ("position", "position_fp100", "position_fp"),
@@ -160,7 +165,9 @@ class EventPosition(BaseModel, extra="ignore"):
         log_unknown_fields(
             "EventPosition", data, cls.model_fields.keys() | _EVENT_POSITION_FP_FIELDS
         )
-        # Dollars → cents (legacy, lossy) + bps (new, exact).
+        # Dollars → cents (legacy, lossy) + bps (new, AGGREGATE-rounded).
+        # Kalshi emits sums with 6-decimal precision (sub-bps); use the
+        # rounding parser rather than fail-closed strict.
         for legacy, new_bps, wire in [
             ("total_cost", "total_cost_bps", "total_cost_dollars"),
             ("event_exposure", "event_exposure_bps", "event_exposure_dollars"),
@@ -169,7 +176,7 @@ class EventPosition(BaseModel, extra="ignore"):
         ]:
             if wire in data and data[wire] is not None:
                 data[legacy] = _dollars_to_cents(data[wire])
-                data[new_bps] = _dollars_to_bps(data[wire])
+                data[new_bps] = _dollars_to_bps_round(data[wire])
         # FP → int (legacy, floor) + fp100 (new, exact).
         for legacy, new_fp100, wire in [
             ("total_cost_shares", "total_cost_shares_fp100", "total_cost_shares_fp"),
@@ -231,23 +238,26 @@ class Settlement(BaseModel, extra="ignore"):
         if "revenue" in data and isinstance(data["revenue"], int):
             data["revenue_bps"] = data["revenue"] * 100
         # fee_cost arrives as a dollars string from the API — convert to cents.
-        # Also handle fee_cost_dollars (FP variant) if present.
+        # Also handle fee_cost_dollars (FP variant) if present. Settlement
+        # aggregates fee across all fills on a market; use aggregate-rounded
+        # parser (Kalshi emits sub-bps precision on sums).
         if "fee_cost_dollars" in data and data["fee_cost_dollars"] is not None:
             wire_fee = data["fee_cost_dollars"]
             data["fee_cost"] = _dollars_to_cents(wire_fee)
-            data["fee_cost_bps"] = _dollars_to_bps(wire_fee)
+            data["fee_cost_bps"] = _dollars_to_bps_round(wire_fee)
         elif "fee_cost" in data and isinstance(data["fee_cost"], str):
             wire_fee = data["fee_cost"]
             data["fee_cost"] = _dollars_to_cents(wire_fee)
-            data["fee_cost_bps"] = _dollars_to_bps(wire_fee)
-        # Dollars → cents (legacy, lossy) + bps (new, exact).
+            data["fee_cost_bps"] = _dollars_to_bps_round(wire_fee)
+        # Dollars → cents (legacy, lossy) + bps (new, AGGREGATE-rounded).
+        # yes_total_cost / no_total_cost sum costs across fills.
         for legacy, new_bps, wire in [
             ("yes_total_cost", "yes_total_cost_bps", "yes_total_cost_dollars"),
             ("no_total_cost", "no_total_cost_bps", "no_total_cost_dollars"),
         ]:
             if wire in data and data[wire] is not None:
                 data[legacy] = _dollars_to_cents(data[wire])
-                data[new_bps] = _dollars_to_bps(data[wire])
+                data[new_bps] = _dollars_to_bps_round(data[wire])
         # FP → int (legacy, floor) + fp100 (new, exact).
         for legacy, new_fp100, wire in [
             ("yes_count", "yes_count_fp100", "yes_count_fp"),

@@ -38,6 +38,7 @@ from talos.units import (
     ONE_CONTRACT_FP100,
     bps_to_cents_round,
     dollars_str_to_bps,
+    dollars_str_to_bps_round,
     fp_str_to_fp100,
 )
 
@@ -72,20 +73,43 @@ def fp_to_fp100(val: Any) -> int:
     return fp_str_to_fp100(val)
 
 
+def dollars_to_bps_round(val: Any) -> int:
+    """Aggregate-safe Kalshi ``_dollars`` wire payload -> internal bps.
+
+    Use this for AGGREGATE money fields — sums like event_exposure,
+    realized_pnl, total_cost, fees_paid — where Kalshi legitimately
+    emits sub-bps precision (6-decimal values) because they're summing
+    fractional-fill contributions. Rounds half-even to the nearest bps.
+
+    Use :func:`dollars_to_bps` for per-contract prices where strict
+    fail-closed precision matters.
+
+    Thin alias to :func:`talos.units.dollars_str_to_bps_round`.
+    """
+    return dollars_str_to_bps_round(val)
+
+
 # ── Deprecated legacy names (return cents / whole contracts) ──────
 def dollars_to_cents(val: Any) -> int:
     """DEPRECATED. Convert a ``_dollars`` payload to integer cents.
 
     Retained so callers not yet migrated to bps keep working. Goes
-    through the exact Decimal parser, then rounds (half-even) to cents
-    for legacy-scale output. Sub-cent precision is therefore silently
-    lost on the output — which was the pre-migration behavior, and is
-    only reachable by markets that Phase 0 admission rejects.
+    through the aggregate-rounding Decimal parser and then half-even
+    rounds to cents. Rounding is safe on this path because cents is
+    already a coarser unit than bps — a value that rounds to N bps
+    will round to the same cents value whether it came from strict
+    or rounded bps parsing.
 
-    Migrate callers to :func:`dollars_to_bps` as part of Phase 1+2.
-    Removed entirely in the final migration task.
+    Also accepts payloads with sub-bps precision (Kalshi aggregate
+    fields like event_exposure_dollars='20.168040') — the strict
+    parser would raise on those, but the legacy cents path has always
+    silently rounded them.
+
+    Migrate callers to :func:`dollars_to_bps` (strict, per-contract
+    prices) or :func:`dollars_to_bps_round` (aggregate sums) as part
+    of Phase 1+2. Removed entirely in the final migration task.
     """
-    return bps_to_cents_round(dollars_str_to_bps(val))
+    return bps_to_cents_round(dollars_str_to_bps_round(val))
 
 
 def fp_to_int(val: Any) -> int:
