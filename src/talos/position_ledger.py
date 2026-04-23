@@ -25,7 +25,9 @@ and fractional-fill wire-boundary parsers will feed into.
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+import asyncio
+from collections.abc import Callable, Mapping
+from dataclasses import dataclass
 from enum import Enum
 from typing import TYPE_CHECKING
 
@@ -38,6 +40,7 @@ from talos.fees import (
     fee_adjusted_profit_matched,
     quadratic_fee,
 )
+from talos.models.order import Fill
 from talos.models.position import EventPositionSummary, LegSummary
 from talos.units import (
     ONE_CENT_BPS,
@@ -48,6 +51,7 @@ from talos.units import (
 if TYPE_CHECKING:
     from talos.cpm import CPMTracker
     from talos.models.strategy import ArbPair
+    from talos.rest_client import KalshiRESTClient
 
 logger = structlog.get_logger()
 
@@ -59,6 +63,66 @@ class Side(Enum):
     @property
     def other(self) -> Side:
         return Side.B if self is Side.A else Side.A
+
+
+@dataclass(frozen=True, slots=True)
+class LedgerSnapshot:
+    """Immutable full-state snapshot for the persistence envelope + reconcile apply.
+
+    Built by :meth:`PositionLedger._snapshot_with_rebuild_applied` without
+    touching live ledger state. :meth:`PositionLedger._apply_snapshot`
+    overwrites the live ledger fields from the snapshot in a single sync
+    block — no await, no interleaving window (v11 atomicity).
+
+    ``stale_*`` flags and ``reconcile_mismatch_pending`` are in-memory only
+    per Section 7 / 8a of the bps/fp100 migration spec — they never travel
+    in a snapshot.
+    """
+
+    # Side A historical
+    filled_count_fp100_a: int
+    filled_total_cost_bps_a: int
+    filled_fees_bps_a: int
+    closed_count_fp100_a: int
+    closed_total_cost_bps_a: int
+    closed_fees_bps_a: int
+    # Side A resting
+    resting_id_a: str | None
+    resting_count_fp100_a: int
+    resting_price_bps_a: int
+    # Side B historical
+    filled_count_fp100_b: int
+    filled_total_cost_bps_b: int
+    filled_fees_bps_b: int
+    closed_count_fp100_b: int
+    closed_total_cost_bps_b: int
+    closed_fees_bps_b: int
+    # Side B resting
+    resting_id_b: str | None
+    resting_count_fp100_b: int
+    resting_price_bps_b: int
+    # Persisted flag (only one that travels on disk).
+    legacy_migration_pending: bool = False
+
+
+class ReconcileOutcome(Enum):
+    OK = "ok"
+    MISMATCH = "mismatch"
+    ERROR = "error"
+
+
+@dataclass(frozen=True, slots=True)
+class ReconcileResult:
+    outcome: ReconcileOutcome
+    rebuilt: LedgerSnapshot | None = None
+    error: str | None = None
+
+
+class StaleMismatchError(Exception):
+    """Raised by :meth:`PositionLedger.accept_pending_mismatch` when the
+    captured mismatch is stale — the ledger mutated between detection and
+    operator click. Operator must re-invoke reconcile to see a fresh diff.
+    """
 
 
 class _SideState:
@@ -142,6 +206,32 @@ class PositionLedger:
         # returned as "resting" by GET due to Kalshi's eventual consistency.
         # sync_from_orders filters these out until they disappear from the GET.
         self._recently_cancelled: set[str] = set()
+
+        # ── bps/fp100 migration: staleness + reconcile infrastructure ──
+        # In-memory only (never persisted) — always recomputed on load.
+        self.stale_fills_unconfirmed: bool = False
+        self.stale_resting_unconfirmed: bool = False
+        self.reconcile_mismatch_pending: bool = False
+        # Persisted (may carry across restart if operator closes mid-reconcile).
+        self.legacy_migration_pending: bool = False
+
+        # Monotonically-increasing counter bumped by every sync mutator.
+        # Used by accept_pending_mismatch for stale-rebuild detection (F19).
+        # Plain int — sync mutators run atomically under the single event
+        # loop, so no lock is required (v11 simplification).
+        self._mutation_generation: int = 0
+
+        # Fresh-pair minimum gate — set by the first sync_from_orders
+        # completion (Section 8 startup sequence step 2).
+        self._first_orders_sync: asyncio.Event = asyncio.Event()
+
+        # Reconcile state (F16 — in-session only, never persisted).
+        self._pending_mismatch: LedgerSnapshot | None = None
+        self._pending_mismatch_gen: int = -1
+
+        # Retained after a v1 load so the next save can embed the blob
+        # under the v2 envelope while legacy_migration_pending is True.
+        self._legacy_v1_snapshot: dict[str, object] | None = None
 
     # ── Sync generation (stale-sync protection) ────────────────────
 
@@ -285,6 +375,25 @@ class PositionLedger:
             self._sides[Side.A]._placed_at_gen is not None
             or self._sides[Side.B]._placed_at_gen is not None
         )
+
+    # ── Startup confirmation gate (Section 8) ──────────────────────
+
+    def ready(self) -> bool:
+        """True iff all startup confirmation flags have cleared.
+
+        Risk-increasing operations (``create_order``, ``amend_order``) must
+        block while any flag is set. Cancel is NOT gated (F31 carve-out —
+        wired in Task 6b-2).
+        """
+        if self.stale_fills_unconfirmed:
+            return False
+        if self.stale_resting_unconfirmed:
+            return False
+        if self.legacy_migration_pending:
+            return False
+        if self.reconcile_mismatch_pending:
+            return False
+        return self._first_orders_sync.is_set()
 
     # ── Safety gate ─────────────────────────────────────────────────
 
@@ -448,6 +557,7 @@ class PositionLedger:
             if s.resting_count_fp100 == 0:
                 s.resting_order_id = None
         self._reconcile_closed(path="fill")
+        self._mutation_generation += 1
 
     def record_resting(self, side: Side, order_id: str, count: int, price: int) -> None:
         """Record a new resting order (legacy cents/contracts signature)."""
@@ -471,6 +581,7 @@ class PositionLedger:
         s.resting_order_id = order_id
         s.resting_count_fp100 = count_fp100
         s.resting_price_bps = price_bps
+        self._mutation_generation += 1
 
     def record_placement(self, side: Side, order_id: str, count: int, price: int) -> None:
         """Record optimistic resting state (legacy cents/contracts signature).
@@ -500,6 +611,7 @@ class PositionLedger:
         s.resting_count_fp100 = count_fp100
         s.resting_price_bps = price_bps
         s._placed_at_gen = self._sync_gen
+        self._mutation_generation += 1
 
     def record_cancel(self, side: Side, order_id: str) -> None:
         """Record an order cancellation.
@@ -519,6 +631,7 @@ class PositionLedger:
         # bump_sync_gen in the current cycle, so sync_gen is already N.
         # The next cycle bumps to N+1; we need N+1 >= N+1 to hold.
         s._placed_at_gen = self._sync_gen + 1
+        self._mutation_generation += 1
 
     def mark_side_pending(self, side: Side) -> None:
         """Mark a side as having an unconfirmed change (stale-sync guard).
@@ -529,6 +642,7 @@ class PositionLedger:
         block new bids until the next confirmed sync.
         """
         self._sides[side]._placed_at_gen = self._sync_gen + 1
+        self._mutation_generation += 1
 
     def mark_order_cancelled(self, order_id: str) -> None:
         """Register an order_id as confirmed cancelled on Kalshi.
@@ -537,6 +651,7 @@ class PositionLedger:
         stops returning it (eventual consistency propagation).
         """
         self._recently_cancelled.add(order_id)
+        self._mutation_generation += 1
 
     def reset_pair(self) -> None:
         """Clear state after both sides complete. Ready for next pair."""
@@ -564,8 +679,9 @@ class PositionLedger:
         """
         a = self._sides[Side.A]
         b = self._sides[Side.B]
-        return {
+        envelope: dict[str, object] = {
             "schema_version": 2,
+            "legacy_migration_pending": self.legacy_migration_pending,
             "ledger": {
                 "filled_count_fp100_a": a.filled_count_fp100,
                 "filled_total_cost_bps_a": a.filled_total_cost_bps,
@@ -587,6 +703,40 @@ class PositionLedger:
                 "resting_price_bps_b": b.resting_price_bps,
             },
         }
+        # Retain the original v1 payload as a sibling field until reconcile
+        # clears legacy_migration_pending. See spec Section 7 save-path rules.
+        if self.legacy_migration_pending and self._legacy_v1_snapshot is not None:
+            envelope["legacy_v1_snapshot"] = dict(self._legacy_v1_snapshot)
+        return envelope
+
+    def _compute_staleness_on_load(self) -> None:
+        """Set ``stale_*_unconfirmed`` flags based on loaded state.
+
+        Called at the end of :meth:`seed_from_saved` regardless of v1/v2
+        path. The flags themselves are in-memory only — always recomputed
+        on load, never persisted.
+        """
+        fills_nonzero = any(
+            getattr(self._sides[side], field) != 0
+            for side in (Side.A, Side.B)
+            for field in (
+                "filled_count_fp100",
+                "filled_total_cost_bps",
+                "filled_fees_bps",
+                "closed_count_fp100",
+                "closed_total_cost_bps",
+                "closed_fees_bps",
+            )
+        )
+        resting_nonzero = any(
+            (
+                self._sides[side].resting_count_fp100 > 0
+                or self._sides[side].resting_order_id is not None
+            )
+            for side in (Side.A, Side.B)
+        )
+        self.stale_fills_unconfirmed = fills_nonzero
+        self.stale_resting_unconfirmed = resting_nonzero
 
     def seed_from_saved(self, data: Mapping[str, object] | None) -> None:
         """Seed full ledger state from persisted data (v1 or v2).
@@ -619,6 +769,14 @@ class PositionLedger:
                     event_ticker=self.event_ticker,
                 )
                 return
+            # Legacy-migration metadata travels on the v2 envelope; the
+            # embedded v1 snapshot (if any) survives for the next save.
+            self.legacy_migration_pending = bool(
+                data.get("legacy_migration_pending", False)
+            )
+            embedded_v1 = data.get("legacy_v1_snapshot")
+            if self.legacy_migration_pending and isinstance(embedded_v1, dict):
+                self._legacy_v1_snapshot = dict(embedded_v1)
             a = self._sides[Side.A]
             b = self._sides[Side.B]
             for side_state, prefix in ((a, "a"), (b, "b")):
@@ -654,9 +812,13 @@ class PositionLedger:
             logger.info(
                 "ledger_restored_v2",
                 event_ticker=self.event_ticker,
+                legacy_migration_pending=self.legacy_migration_pending,
             )
             # Terminal reconcile — idempotent in normal-restart case.
             self._reconcile_closed(path="seed_from_saved")
+            # Staleness flags are derived, not persisted — compute last.
+            self._compute_staleness_on_load()
+            self._mutation_generation += 1
             return
 
         # ── v1 path (legacy cents/contracts) ───────────────────────
@@ -767,6 +929,20 @@ class PositionLedger:
         # migration case. Required by the spec invariant: every mutation that
         # increases filled_count must reconcile.
         self._reconcile_closed(path="seed_from_saved")
+
+        # F22: legacy_migration_pending gates on any nonzero safety-relevant
+        # field after conversion. Zero-state v1 payloads convert trivially
+        # and MUST NOT set this flag (otherwise the gate permanently blocks
+        # a ledger that had nothing to reconcile). The staleness rule below
+        # uses the same nonzero criterion.
+        self._compute_staleness_on_load()
+        if self.stale_fills_unconfirmed or self.stale_resting_unconfirmed:
+            self.legacy_migration_pending = True
+            # Retain the ORIGINAL v1 payload verbatim for the next save's
+            # v2 envelope embedding. Freeze a shallow copy — the caller's
+            # mapping may otherwise be mutated elsewhere.
+            self._legacy_v1_snapshot = {str(k): data[k] for k in data}
+        self._mutation_generation += 1
 
     def sync_from_orders(self, orders: list, ticker_a: str, ticker_b: str) -> None:
         """Reconcile ledger against polled order state from Kalshi.
@@ -934,6 +1110,16 @@ class PositionLedger:
         # Two-source sync (orders + positions) keeps the ledger accurate.
         self._reconcile_closed(path="sync_orders")
 
+        # Orders endpoint authoritatively confirms live resting state — any
+        # completion (including empty response) clears the flag. Does NOT
+        # clear stale_fills_unconfirmed or legacy_migration_pending — see
+        # spec Section 7 F20: orders-endpoint data is archival-incomplete
+        # for historical economics.
+        self.stale_resting_unconfirmed = False
+        # Fresh-pair minimum gate (Section 8 startup step 2).
+        self._first_orders_sync.set()
+        self._mutation_generation += 1
+
     def sync_from_positions(
         self,
         position_fills: dict[Side, int],
@@ -993,6 +1179,10 @@ class PositionLedger:
                 s._fees_from_api = True
 
         self._reconcile_closed(path="sync_positions")
+        # positions data is count-only — does NOT clear any staleness flag
+        # (spec Section 8 startup step 3). Still bump the mutation counter
+        # so reconcile's stale-rebuild detection covers this path too.
+        self._mutation_generation += 1
 
     def format_position(self, side: Side) -> str:
         """Human-readable position string for proposals."""
@@ -1007,6 +1197,345 @@ class PositionLedger:
             resting_price_cents = bps_to_cents_round(s.resting_price_bps)
             parts.append(f"{resting_whole} resting @ {resting_price_cents}c")
         return ", ".join(parts) if parts else "empty"
+
+    # ── Fills-based reconcile (spec Section 8a) ────────────────────
+
+    def _rebuild_from_fills(
+        self,
+        fills_a: list[Fill],
+        fills_b: list[Fill],
+    ) -> LedgerSnapshot:
+        """Aggregate per-fill records into a full-state snapshot.
+
+        Same-ticker pairs: ``fills_b`` is empty; side assignment comes from
+        each fill's ``side`` string against the pair's configured
+        ``_side_a_str`` / ``_side_b_str``.
+
+        Cross-ticker pairs: each list maps to the matching side (fills_a →
+        Side.A, fills_b → Side.B). Only ``action == "buy"`` contributions
+        are counted (matches ``sync_from_orders`` filtering).
+
+        ``closed_*`` and ``resting_*`` state is carried over from the live
+        ledger unchanged — reconcile rebuilds the historical ``filled_*``
+        state only. Closed state is the cumulative locked-in matched-pair
+        bucket, which does not rebuild from fills directly; later sync
+        paths re-flush via :meth:`_reconcile_closed` as usual.
+        """
+        sums_count: dict[Side, int] = {Side.A: 0, Side.B: 0}
+        sums_cost: dict[Side, int] = {Side.A: 0, Side.B: 0}
+        sums_fees: dict[Side, int] = {Side.A: 0, Side.B: 0}
+
+        def _side_for_fill(fill: Fill) -> Side | None:
+            if self._is_same_ticker:
+                if fill.ticker != self._ticker_a:
+                    return None
+                if fill.side == self._side_a_str:
+                    return Side.A
+                if fill.side == self._side_b_str:
+                    return Side.B
+                return None
+            # cross-ticker: side assignment is by the caller's list split.
+            # Fills in fills_a belong to Side.A; in fills_b → Side.B.
+            return None  # unused; caller routes by list
+
+        def _price_bps_for(fill: Fill) -> int:
+            # Reconcile treats the price as the leg-side execution price.
+            # sync_from_orders uses no_price for "no" side, yes_price for "yes".
+            return fill.no_price_bps if fill.side == "no" else fill.yes_price_bps
+
+        if self._is_same_ticker:
+            for fill in fills_a:
+                if fill.action and fill.action != "buy":
+                    continue
+                side = _side_for_fill(fill)
+                if side is None:
+                    continue
+                sums_count[side] += fill.count_fp100
+                sums_cost[side] += (
+                    fill.count_fp100 * _price_bps_for(fill) // ONE_CONTRACT_FP100
+                )
+                sums_fees[side] += fill.fee_cost_bps
+        else:
+            for side, fills in ((Side.A, fills_a), (Side.B, fills_b)):
+                for fill in fills:
+                    if fill.action and fill.action != "buy":
+                        continue
+                    sums_count[side] += fill.count_fp100
+                    sums_cost[side] += (
+                        fill.count_fp100 * _price_bps_for(fill) // ONE_CONTRACT_FP100
+                    )
+                    sums_fees[side] += fill.fee_cost_bps
+
+        a = self._sides[Side.A]
+        b = self._sides[Side.B]
+        return LedgerSnapshot(
+            filled_count_fp100_a=sums_count[Side.A],
+            filled_total_cost_bps_a=sums_cost[Side.A],
+            filled_fees_bps_a=sums_fees[Side.A],
+            closed_count_fp100_a=a.closed_count_fp100,
+            closed_total_cost_bps_a=a.closed_total_cost_bps,
+            closed_fees_bps_a=a.closed_fees_bps,
+            resting_id_a=a.resting_order_id,
+            resting_count_fp100_a=a.resting_count_fp100,
+            resting_price_bps_a=a.resting_price_bps,
+            filled_count_fp100_b=sums_count[Side.B],
+            filled_total_cost_bps_b=sums_cost[Side.B],
+            filled_fees_bps_b=sums_fees[Side.B],
+            closed_count_fp100_b=b.closed_count_fp100,
+            closed_total_cost_bps_b=b.closed_total_cost_bps,
+            closed_fees_bps_b=b.closed_fees_bps,
+            resting_id_b=b.resting_order_id,
+            resting_count_fp100_b=b.resting_count_fp100,
+            resting_price_bps_b=b.resting_price_bps,
+            legacy_migration_pending=self.legacy_migration_pending,
+        )
+
+    def _significantly_differs(self, rebuilt: LedgerSnapshot) -> bool:
+        """Return True if ``rebuilt`` differs from live state on any
+        safety-relevant filled field.
+
+        Tolerance: exact-zero on ``count_fp100``; up to 1 bps drift on
+        cost/fees (integer rounding in cents-to-bps conversion of legacy
+        data). Resting and closed state are not compared — neither is
+        rebuilt by this path.
+        """
+        a = self._sides[Side.A]
+        b = self._sides[Side.B]
+        if rebuilt.filled_count_fp100_a != a.filled_count_fp100:
+            return True
+        if rebuilt.filled_count_fp100_b != b.filled_count_fp100:
+            return True
+        if abs(rebuilt.filled_total_cost_bps_a - a.filled_total_cost_bps) > 1:
+            return True
+        if abs(rebuilt.filled_total_cost_bps_b - b.filled_total_cost_bps) > 1:
+            return True
+        if abs(rebuilt.filled_fees_bps_a - a.filled_fees_bps) > 1:
+            return True
+        return abs(rebuilt.filled_fees_bps_b - b.filled_fees_bps) > 1
+
+    def _snapshot_with_rebuild_applied(
+        self,
+        rebuilt: LedgerSnapshot,
+        *,
+        clear_fills_stale: bool,
+        clear_resting_stale: bool,
+        clear_legacy_pending: bool,
+    ) -> LedgerSnapshot:
+        """Pure function: combine rebuilt overlay with current live state,
+        apply flag clears, return immutable proposed snapshot.
+
+        Does NOT mutate the ledger. Resting state + closed state carry
+        over from the live ledger; filled state comes from the rebuild.
+        """
+        a = self._sides[Side.A]
+        b = self._sides[Side.B]
+        # ``clear_*_stale`` are read but only represent information already
+        # baked into the snapshot's legacy_migration_pending field. The
+        # in-memory stale_* flags are not part of LedgerSnapshot — they're
+        # set by _apply_snapshot when it runs.
+        _ = clear_fills_stale
+        _ = clear_resting_stale
+        new_legacy_pending = (
+            False if clear_legacy_pending else self.legacy_migration_pending
+        )
+        return LedgerSnapshot(
+            filled_count_fp100_a=rebuilt.filled_count_fp100_a,
+            filled_total_cost_bps_a=rebuilt.filled_total_cost_bps_a,
+            filled_fees_bps_a=rebuilt.filled_fees_bps_a,
+            closed_count_fp100_a=a.closed_count_fp100,
+            closed_total_cost_bps_a=a.closed_total_cost_bps,
+            closed_fees_bps_a=a.closed_fees_bps,
+            resting_id_a=a.resting_order_id,
+            resting_count_fp100_a=a.resting_count_fp100,
+            resting_price_bps_a=a.resting_price_bps,
+            filled_count_fp100_b=rebuilt.filled_count_fp100_b,
+            filled_total_cost_bps_b=rebuilt.filled_total_cost_bps_b,
+            filled_fees_bps_b=rebuilt.filled_fees_bps_b,
+            closed_count_fp100_b=b.closed_count_fp100,
+            closed_total_cost_bps_b=b.closed_total_cost_bps,
+            closed_fees_bps_b=b.closed_fees_bps,
+            resting_id_b=b.resting_order_id,
+            resting_count_fp100_b=b.resting_count_fp100,
+            resting_price_bps_b=b.resting_price_bps,
+            legacy_migration_pending=new_legacy_pending,
+        )
+
+    def _apply_snapshot(self, snapshot: LedgerSnapshot) -> None:
+        """Synchronous overwrite of live ledger fields from ``snapshot``.
+
+        No ``await``. Atomic relative to every other coroutine on the
+        event loop (v11 atomicity — single sync block). Bumps
+        ``_mutation_generation`` at the end.
+
+        Flag clears: ``legacy_migration_pending`` comes from the snapshot.
+        The ``stale_*`` flags are cleared here unconditionally under the
+        assumption the caller has verified state (this is only invoked
+        from :meth:`reconcile_from_fills` OK or :meth:`accept_pending_mismatch`,
+        both of which mean fills have been confirmed authoritative).
+        """
+        a = self._sides[Side.A]
+        b = self._sides[Side.B]
+        a.filled_count_fp100 = snapshot.filled_count_fp100_a
+        a.filled_total_cost_bps = snapshot.filled_total_cost_bps_a
+        a.filled_fees_bps = snapshot.filled_fees_bps_a
+        a.closed_count_fp100 = snapshot.closed_count_fp100_a
+        a.closed_total_cost_bps = snapshot.closed_total_cost_bps_a
+        a.closed_fees_bps = snapshot.closed_fees_bps_a
+        a.resting_order_id = snapshot.resting_id_a
+        a.resting_count_fp100 = snapshot.resting_count_fp100_a
+        a.resting_price_bps = snapshot.resting_price_bps_a
+        b.filled_count_fp100 = snapshot.filled_count_fp100_b
+        b.filled_total_cost_bps = snapshot.filled_total_cost_bps_b
+        b.filled_fees_bps = snapshot.filled_fees_bps_b
+        b.closed_count_fp100 = snapshot.closed_count_fp100_b
+        b.closed_total_cost_bps = snapshot.closed_total_cost_bps_b
+        b.closed_fees_bps = snapshot.closed_fees_bps_b
+        b.resting_order_id = snapshot.resting_id_b
+        b.resting_count_fp100 = snapshot.resting_count_fp100_b
+        b.resting_price_bps = snapshot.resting_price_bps_b
+
+        self.legacy_migration_pending = snapshot.legacy_migration_pending
+        # Fills have been confirmed authoritative — clear the fills flag.
+        # Resting staleness is NOT cleared by fills reconcile (spec
+        # Section 8 step 5); it requires sync_from_orders completion.
+        self.stale_fills_unconfirmed = False
+        # Drop the v1 payload if legacy reconciliation has now completed.
+        if not self.legacy_migration_pending:
+            self._legacy_v1_snapshot = None
+        self._mutation_generation += 1
+
+    async def reconcile_from_fills(
+        self,
+        rest: KalshiRESTClient,
+        persist_cb: Callable[[LedgerSnapshot, str], None],
+    ) -> ReconcileResult:
+        """Authoritative rebuild from per-fill ground truth.
+
+        Fetch phase is async (``rest.get_all_fills``). Mutation phase is a
+        single sync block — no ``await`` inside — so it runs atomically
+        relative to every other coroutine on the event loop (v11 atomicity).
+
+        ``persist_cb(snapshot, event_ticker)`` is SYNC (not async) and is
+        called before the snapshot is applied to the live ledger. If
+        ``persist_cb`` raises, live state stays untouched and the result
+        is ``ERROR`` (F13 — durable before success).
+
+        On ``MISMATCH``, retains ``_pending_mismatch`` and sets
+        ``reconcile_mismatch_pending`` without calling ``persist_cb``. The
+        mismatch state is in-session only (F16); on restart the operator
+        re-invokes reconcile.
+        """
+        # Step 1: fetch. No mutation, no lock.
+        try:
+            fills_a = await rest.get_all_fills(ticker=self._ticker_a)
+            fills_b = (
+                []
+                if self._is_same_ticker
+                else await rest.get_all_fills(ticker=self._ticker_b)
+            )
+        except Exception as exc:
+            logger.warning(
+                "reconcile_fetch_failed",
+                event_ticker=self.event_ticker,
+                error=str(exc),
+            )
+            return ReconcileResult(outcome=ReconcileOutcome.ERROR, error=str(exc))
+
+        rebuilt = self._rebuild_from_fills(fills_a, fills_b)
+
+        # Step 2: mutation phase — single sync block, no await inside.
+        if self._significantly_differs(rebuilt):
+            # F16 — in-session only, never persisted.
+            self._pending_mismatch = rebuilt
+            self.reconcile_mismatch_pending = True
+            self._pending_mismatch_gen = self._mutation_generation
+            logger.warning(
+                "reconcile_mismatch",
+                event_ticker=self.event_ticker,
+                gen=self._mutation_generation,
+                loaded_count_a=self._sides[Side.A].filled_count_fp100,
+                rebuilt_count_a=rebuilt.filled_count_fp100_a,
+                loaded_count_b=self._sides[Side.B].filled_count_fp100,
+                rebuilt_count_b=rebuilt.filled_count_fp100_b,
+            )
+            return ReconcileResult(outcome=ReconcileOutcome.MISMATCH, rebuilt=rebuilt)
+
+        proposed = self._snapshot_with_rebuild_applied(
+            rebuilt,
+            clear_fills_stale=True,
+            clear_resting_stale=False,
+            clear_legacy_pending=True,
+        )
+
+        # Durable persist before live apply (F13).
+        try:
+            persist_cb(proposed, self.event_ticker)
+        except Exception as exc:
+            logger.exception(
+                "reconcile_persist_failed", event_ticker=self.event_ticker
+            )
+            return ReconcileResult(outcome=ReconcileOutcome.ERROR, error=str(exc))
+
+        # Sync apply. Still no await. _mutation_generation bumped inside.
+        self._apply_snapshot(proposed)
+        logger.info(
+            "ledger_reconciled_from_fills",
+            event_ticker=self.event_ticker,
+            fills_count=len(fills_a) + len(fills_b),
+            gen=self._mutation_generation,
+        )
+        return ReconcileResult(outcome=ReconcileOutcome.OK, rebuilt=rebuilt)
+
+    async def accept_pending_mismatch(
+        self,
+        persist_cb: Callable[[LedgerSnapshot, str], None],
+    ) -> None:
+        """Explicitly apply a previously-detected fills-rebuild.
+
+        Generation guard: if the ledger mutated between mismatch detection
+        and operator click, raises :class:`StaleMismatchError`. Operator
+        must re-invoke :meth:`reconcile_from_fills` to see a fresh diff (F19).
+
+        If ``persist_cb`` raises, live state is untouched and
+        ``_pending_mismatch`` is retained — operator can retry after
+        resolving the persistence issue.
+        """
+        if not self.reconcile_mismatch_pending or self._pending_mismatch is None:
+            raise RuntimeError("no pending mismatch to accept")
+
+        captured_gen = self._pending_mismatch_gen
+        if self._mutation_generation != captured_gen:
+            # Ledger moved on — discard the stale rebuild and force the
+            # operator to re-invoke reconcile.
+            self._pending_mismatch = None
+            self.reconcile_mismatch_pending = False
+            self._pending_mismatch_gen = -1
+            raise StaleMismatchError(
+                f"pending mismatch is stale "
+                f"(gen {captured_gen} → {self._mutation_generation}) — "
+                f"re-run reconcile to see current diff"
+            )
+
+        rebuilt = self._pending_mismatch
+        proposed = self._snapshot_with_rebuild_applied(
+            rebuilt,
+            clear_fills_stale=True,
+            clear_resting_stale=False,
+            clear_legacy_pending=True,
+        )
+
+        # Durable persist before live apply.
+        persist_cb(proposed, self.event_ticker)
+
+        self._apply_snapshot(proposed)
+        self.reconcile_mismatch_pending = False
+        self._pending_mismatch = None
+        self._pending_mismatch_gen = -1
+        logger.info(
+            "mismatch_accepted_by_operator",
+            event_ticker=self.event_ticker,
+            gen=self._mutation_generation,
+        )
 
 
 def _prorate(total: int, portion: int, denominator: int) -> int:
