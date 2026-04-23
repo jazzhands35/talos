@@ -860,7 +860,11 @@ class TestOrderGroups:
 
         _, kwargs = client._http.request.call_args
         assert kwargs["json"]["name"] == "test-group"
-        assert kwargs["json"]["contracts_limit_fp"] == "10"
+        # Post-migration: _fp fields emit spec-exact 2-decimal fixed-point
+        # ("10.00" not "10"), matching Kalshi's documented schema. Was "10"
+        # pre-migration — Kalshi accepted both; spec-exact is strictly more
+        # correct. Same change as Task 8 commit 03dd771.
+        assert kwargs["json"]["contracts_limit_fp"] == "10.00"
 
     async def test_create_order_with_group_id(self, client: KalshiRESTClient):
         mock_data = {

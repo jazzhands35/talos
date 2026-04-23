@@ -485,9 +485,31 @@ class PositionLedger:
         b = self._sides[Side.B]
         open_a_fp100 = a.filled_count_fp100 - a.closed_count_fp100
         open_b_fp100 = b.filled_count_fp100 - b.closed_count_fp100
+        # Defensive: if closed > filled on either side (corruption — e.g.
+        # a reconcile rebuild that didn't preserve closed-bucket invariants,
+        # or a bad v1→v2 migration), open_* goes negative; matchable_whole
+        # stays negative after floor-div; units_to_close stays negative;
+        # the loop below would then divide by a negative open_count_fp100,
+        # raising ZeroDivisionError or silently rebuilding with wrong sign.
+        # The `<= 0` guard catches both the normal "nothing to close" case
+        # and the corruption path. Log once at WARNING for forensic visibility
+        # so a corruption-induced skip doesn't hide.
+        if open_a_fp100 < 0 or open_b_fp100 < 0:
+            logger.warning(
+                "ledger_closed_exceeds_filled",
+                event_ticker=self.event_ticker,
+                path=path,
+                open_a_fp100=open_a_fp100,
+                open_b_fp100=open_b_fp100,
+                filled_a_fp100=a.filled_count_fp100,
+                closed_a_fp100=a.closed_count_fp100,
+                filled_b_fp100=b.filled_count_fp100,
+                closed_b_fp100=b.closed_count_fp100,
+            )
+            return
         matchable_whole = min(open_a_fp100, open_b_fp100) // ONE_CONTRACT_FP100
         units_to_close = matchable_whole // self.unit_size
-        if units_to_close == 0:
+        if units_to_close <= 0:
             return
         contracts_whole = units_to_close * self.unit_size
         contracts_fp100 = contracts_whole * ONE_CONTRACT_FP100
@@ -654,9 +676,18 @@ class PositionLedger:
         self._mutation_generation += 1
 
     def reset_pair(self) -> None:
-        """Clear state after both sides complete. Ready for next pair."""
+        """Clear state after both sides complete. Ready for next pair.
+
+        Bumps ``_mutation_generation`` so any pending reconcile mismatch
+        captured before the reset is correctly flagged as stale on the
+        next ``accept_pending_mismatch`` call (F19 invariant — the
+        mutation counter must advance on EVERY state-changing operation,
+        otherwise an operator clicking Accept after a reset would apply
+        a pre-reset rebuild to a cleared ledger).
+        """
         self._sides[Side.A].reset()
         self._sides[Side.B].reset()
+        self._mutation_generation += 1
 
     # ── Persistence ────────────────────────────────────────────────
 

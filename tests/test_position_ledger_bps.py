@@ -179,3 +179,62 @@ class TestPersistenceMixedRoundTrip:
         assert dest.resting_order_id(Side.B) == "ord-b"
         assert dest.resting_count(Side.B) == 5
         assert dest.resting_price(Side.B) == 46
+
+
+# ── 6. Task 13d defensive bug fixes ──────────────────────────────────
+class TestResetPairBumpsMutationGeneration:
+    """13d-2: reset_pair() must bump _mutation_generation so any pending
+    reconcile mismatch captured before the reset is flagged stale on
+    accept_pending_mismatch (F19 generation guard).
+    """
+
+    def test_reset_pair_increments_generation(self) -> None:
+        ledger = PositionLedger("EVT-RESET", unit_size=5)
+        ledger.record_fill(Side.A, count=5, price=50)
+        gen_before = ledger._mutation_generation
+        ledger.reset_pair()
+        assert ledger._mutation_generation == gen_before + 1
+
+    def test_reset_pair_invalidates_pending_mismatch_gen(self) -> None:
+        """Before 13d-2, reset_pair left _mutation_generation unchanged, so a
+        pending mismatch captured at gen G could still be accepted after a
+        reset (which should have invalidated any pre-reset rebuild).
+        """
+        ledger = PositionLedger("EVT-RESET-GEN", unit_size=5)
+        ledger.record_fill(Side.A, count=5, price=50)
+        # Simulate a captured pending mismatch at the current gen.
+        ledger._pending_mismatch_gen = ledger._mutation_generation
+        ledger.reset_pair()
+        # After reset, the captured gen is now stale relative to current.
+        assert ledger._pending_mismatch_gen != ledger._mutation_generation
+
+
+class TestReconcileClosedNegativeStateGuard:
+    """13d-1: _reconcile_closed must defensively skip when closed > filled
+    on either side (corruption state) instead of dividing by a negative
+    open_count_fp100. Before the guard, the divide-by-zero / negative-rebuild
+    path could silently produce wrong closed-bucket values.
+    """
+
+    def test_closed_exceeds_filled_skips_without_crash(self, caplog) -> None:
+        import logging
+        caplog.set_level(logging.WARNING)
+        ledger = PositionLedger("EVT-NEG", unit_size=5)
+        # Manually induce a corruption state: closed > filled on Side A.
+        # (Normally unreachable via public API; tests the defensive path.)
+        s = ledger._sides[Side.A]
+        s.filled_count_fp100 = 500   # 5 contracts
+        s.closed_count_fp100 = 600   # 6 contracts — impossible state
+        s.filled_total_cost_bps = 25000
+        s.closed_total_cost_bps = 30000
+        # Give Side B a normal state so unit-close logic would otherwise fire.
+        b = ledger._sides[Side.B]
+        b.filled_count_fp100 = 500
+        b.filled_total_cost_bps = 23500
+        # Must NOT raise ZeroDivisionError or silently apply a negative rebuild.
+        ledger._reconcile_closed(path="test")
+        # Closed-bucket values unchanged (defensive early-return).
+        assert s.closed_count_fp100 == 600
+        assert s.closed_total_cost_bps == 30000
+        # Warning logged for forensic visibility.
+        assert any("closed_exceeds_filled" in r.getMessage() for r in caplog.records)

@@ -569,12 +569,38 @@ class KalshiRESTClient:
 
     # --- Order Groups ---
 
-    async def create_order_group(self, name: str, contracts_limit: int) -> str:
-        """Create an order group with a fill limit. Returns the order_group_id."""
+    async def create_order_group(
+        self,
+        name: str,
+        contracts_limit: int | None = None,
+        *,
+        contracts_limit_fp100: int | None = None,
+    ) -> str:
+        """Create an order group with a fill limit. Returns the order_group_id.
+
+        Accepts either a legacy whole-contract ``contracts_limit`` OR the
+        exact-precision ``contracts_limit_fp100`` kwarg (1 contract = 100
+        fp100). When both are passed, fp100 wins — matches the resolution
+        rule on :meth:`create_order` / :meth:`amend_order` / :meth:`decrease_order`
+        (migration commit 03dd771).
+
+        Wire format: the ``contracts_limit_fp`` wire field is a fixed-point
+        dollars-style string (``"5.00"``, not ``"5"``), matching Kalshi's
+        documented schema. Pre-migration the serializer was ``str(N)`` which
+        emitted ``"5"`` — Kalshi accepted both, but spec-exact form is
+        strictly more correct and matches every other ``_fp`` field Talos
+        sends post-migration.
+        """
+        if contracts_limit_fp100 is None:
+            if contracts_limit is None:
+                raise ValueError(
+                    "create_order_group requires either contracts_limit or contracts_limit_fp100"
+                )
+            contracts_limit_fp100 = contracts_limit * ONE_CONTRACT_FP100
         data = await self._request(
             "POST",
             "/portfolio/order_groups",
-            json={"name": name, "contracts_limit_fp": str(contracts_limit)},
+            json={"name": name, "contracts_limit_fp": fp100_to_fp_str(contracts_limit_fp100)},
         )
         return data["order_group"]["order_group_id"]
 
