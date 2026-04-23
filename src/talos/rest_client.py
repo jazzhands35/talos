@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import uuid
+from dataclasses import dataclass
 from typing import Any
 
 import httpx
@@ -16,6 +17,7 @@ from talos.models.market import Event, Market, OrderBook, Series, Trade
 from talos.models.order import BatchOrderResult, Fill, Order
 from talos.models.portfolio import Balance, EventPosition, ExchangeStatus, Position, Settlement
 from talos.units import (
+    MAX_FILLS_PAGES,
     ONE_CENT_BPS,
     ONE_CONTRACT_FP100,
     bps_to_dollars_str,
@@ -23,6 +25,19 @@ from talos.units import (
 )
 
 logger = structlog.get_logger()
+
+
+@dataclass(frozen=True, slots=True)
+class FillsPage:
+    """Single page of fills with next-page cursor.
+
+    Unlike the hot-path :meth:`KalshiRESTClient.get_fills` (which drops
+    the cursor), this carries the next-page cursor so the reconcile
+    path can exhaust the chain.
+    """
+
+    fills: list[Fill]
+    cursor: str | None  # None iff this is the last page
 
 
 class KalshiRESTClient:
@@ -650,6 +665,75 @@ class KalshiRESTClient:
             params["cursor"] = cursor
         data = await self._request("GET", "/portfolio/fills", params=params)
         return [Fill.model_validate(f) for f in data["fills"]]
+
+    async def get_fills_page(
+        self,
+        *,
+        ticker: str | None = None,
+        order_id: str | None = None,
+        limit: int = 100,
+        cursor: str | None = None,
+    ) -> FillsPage:
+        """Fetch one page of fills with the next-page cursor.
+
+        Unlike :meth:`get_fills`, this returns the structured page so
+        :meth:`get_all_fills` can exhaust the cursor chain.
+        """
+        params: dict[str, Any] = {"limit": limit}
+        if ticker:
+            params["ticker"] = ticker
+        if order_id:
+            params["order_id"] = order_id
+        if cursor:
+            params["cursor"] = cursor
+        data = await self._request("GET", "/portfolio/fills", params=params)
+        next_cursor = data.get("cursor") or None  # Kalshi returns "" on last page
+        return FillsPage(
+            fills=[Fill.model_validate(f) for f in data["fills"]],
+            cursor=next_cursor,
+        )
+
+    async def get_all_fills(
+        self,
+        *,
+        ticker: str | None = None,
+        order_id: str | None = None,
+    ) -> list[Fill]:
+        """Exhaust all pages of fills. Raises on pagination overrun.
+
+        Used by the reconcile path to rebuild authoritative ledger state
+        from per-fill ground truth. The hot path uses :meth:`get_fills`,
+        which returns a single page.
+
+        Raises:
+            KalshiAPIError: if pagination exceeds :data:`MAX_FILLS_PAGES`.
+        """
+        all_fills: list[Fill] = []
+        cursor: str | None = None
+        pages = 0
+        while True:
+            page = await self.get_fills_page(ticker=ticker, order_id=order_id, cursor=cursor)
+            all_fills.extend(page.fills)
+            pages += 1
+            cursor = page.cursor
+            if cursor is None:
+                break
+            if pages >= MAX_FILLS_PAGES:
+                message = (
+                    f"get_all_fills exceeded MAX_FILLS_PAGES={MAX_FILLS_PAGES} "
+                    f"(ticker={ticker!r}, order_id={order_id!r}) — abort reconcile"
+                )
+                # Client-side pagination guard — no HTTP response; status_code=0
+                # signals a synthetic (non-transport) error.
+                raise KalshiAPIError(status_code=0, body=None, message=message)
+        logger.info(
+            "get_all_fills_complete",
+            ticker=ticker,
+            order_id=order_id,
+            pages=pages,
+            fills=len(all_fills),
+        )
+        return all_fills
 
     async def get_settlements(
         self,
