@@ -18,6 +18,14 @@ constants below, gated by ``fee_type`` only to zero out fee-free markets.
 
 from __future__ import annotations
 
+from talos.units import (
+    ONE_CENT_BPS,
+    ONE_CONTRACT_FP100,
+    ONE_DOLLAR_BPS,
+    complement_bps,
+    quadratic_fee_bps,
+)
+
 KALSHI_FEE_RATE = 0.0175
 KALSHI_MAKER_REBATE_RATE = 0.00875
 
@@ -194,3 +202,156 @@ def fee_adjusted_profit_matched(
     if matched <= 0:
         return 0.0
     return matched * 100 - cost_a_total - cost_b_total - fees_a - fees_b
+
+
+# ==================================================================
+# Bps-aware variants (Phase 1+2 migration).
+# See docs/superpowers/specs/2026-04-17-bps-fp100-unit-migration-design.md.
+# Legacy cents functions above are deprecated; removed in Task 13 when
+# all callers have migrated to the _bps variants.
+# ==================================================================
+
+# ``complement_bps`` is re-exported here purely so downstream readers of
+# this module can see the bps primitives used below without chasing
+# ``talos.units``. No behavioral change.
+_ = complement_bps  # noqa: F401 — explicit re-export for doc purposes
+
+
+def flat_fee_bps(price_bps: int, *, rate: float) -> int:
+    """Per-contract fee in bps for the flat fee model.
+
+    Bps equivalent of ``flat_fee()``: ``fee_dollars = price_dollars * rate``.
+    In bps: ``fee_bps = round(price_bps * rate)``.
+    """
+    from decimal import Decimal
+
+    return int((Decimal(price_bps) * Decimal(str(rate))).to_integral_value())
+
+
+def compute_fee_bps(
+    price_bps: int,
+    *,
+    fee_type: str = "quadratic_with_maker_fees",
+    rate: float = MAKER_FEE_RATE,
+) -> int:
+    """Dispatch fee calculation by type. Returns per-contract fee in bps."""
+    if fee_type in ("quadratic", "quadratic_with_maker_fees"):
+        return quadratic_fee_bps(price_bps, rate=rate)
+    if fee_type == "flat":
+        return flat_fee_bps(price_bps, rate=rate)
+    if fee_type in ("fee_free", "no_fee"):
+        return 0
+    return quadratic_fee_bps(price_bps, rate=rate)
+
+
+def fee_adjusted_cost_bps(price_bps: int, *, rate: float = MAKER_FEE_RATE) -> int:
+    """Effective cost per contract in bps including quadratic fill fee."""
+    return price_bps + quadratic_fee_bps(price_bps, rate=rate)
+
+
+def max_profitable_price_bps(
+    other_avg_price_bps: int, *, rate: float = MAKER_FEE_RATE
+) -> int:
+    """Highest integer-cent-aligned bps price at which a catch-up bid is profitable.
+
+    Analog of ``max_profitable_price`` but in bps space. Scans whole-cent prices
+    (100 bps increments) from 99¢ down — Talos places whole-cent orders only,
+    so the candidate space is the 99 integer cents. Returns 0 if no profitable
+    price exists.
+    """
+    import math
+
+    other_bps_rounded = (
+        math.ceil(other_avg_price_bps / ONE_CENT_BPS) * ONE_CENT_BPS
+    )
+    other_cost_bps = fee_adjusted_cost_bps(other_bps_rounded, rate=rate)
+    budget_bps = ONE_DOLLAR_BPS - other_cost_bps
+    if budget_bps <= ONE_CENT_BPS:
+        return 0
+    for cents in range(99, 0, -1):
+        candidate_bps = cents * ONE_CENT_BPS
+        if fee_adjusted_cost_bps(candidate_bps, rate=rate) < budget_bps:
+            return candidate_bps
+    return 0
+
+
+def american_odds_bps(
+    price_bps: int, *, rate: float = MAKER_FEE_RATE
+) -> float | None:
+    """Fee-adjusted American odds for a NO contract, given price in bps.
+
+    Returns ``None`` for degenerate prices (0 or ``ONE_DOLLAR_BPS``).
+    """
+    if price_bps <= 0 or price_bps >= ONE_DOLLAR_BPS:
+        return None
+    eff_bps = fee_adjusted_cost_bps(price_bps, rate=rate)
+    win_bps = ONE_DOLLAR_BPS - eff_bps
+    if win_bps <= 0:
+        return None
+    if eff_bps >= win_bps:
+        return -(eff_bps / win_bps) * 100
+    return (win_bps / eff_bps) * 100
+
+
+def fee_adjusted_edge_bps(
+    no_a_bps: int, no_b_bps: int, *, rate: float = MAKER_FEE_RATE
+) -> int:
+    """Fee-adjusted edge in bps for a NO+NO pair.
+
+    ``edge_bps = ONE_DOLLAR_BPS - fee_adjusted_cost_bps(a) - fee_adjusted_cost_bps(b)``.
+    Return type is ``int`` (exact bps); legacy ``fee_adjusted_edge`` returns
+    float cents, so a direct equivalence test compares ``edge_bps`` ≈
+    ``edge_cents * 100`` within rounding drift.
+    """
+    return (
+        ONE_DOLLAR_BPS
+        - fee_adjusted_cost_bps(no_a_bps, rate=rate)
+        - fee_adjusted_cost_bps(no_b_bps, rate=rate)
+    )
+
+
+def scenario_pnl_bps(
+    filled_a_fp100: int,
+    total_cost_bps_a: int,
+    filled_b_fp100: int,
+    total_cost_bps_b: int,
+    fees_bps_a: int = 0,
+    fees_bps_b: int = 0,
+) -> tuple[int, int]:
+    """Net P&L in bps for each outcome of a NO+NO position.
+
+    Parallel to ``scenario_pnl()``. Counts are fp100 (1 contract = 100 fp100);
+    costs and fees are bps ($1 = 10_000 bps). Winner-side payout is
+    ``count_fp100 * ONE_DOLLAR_BPS / ONE_CONTRACT_FP100`` — i.e. each
+    contract (100 fp100) pays ``ONE_DOLLAR_BPS``.
+
+    Returns ``(net_if_a_wins_bps, net_if_b_wins_bps)``.
+    """
+    total_outlay_bps = total_cost_bps_a + total_cost_bps_b + fees_bps_a + fees_bps_b
+    net_a_bps = (filled_b_fp100 * ONE_DOLLAR_BPS) // ONE_CONTRACT_FP100 - total_outlay_bps
+    net_b_bps = (filled_a_fp100 * ONE_DOLLAR_BPS) // ONE_CONTRACT_FP100 - total_outlay_bps
+    return (net_a_bps, net_b_bps)
+
+
+def fee_adjusted_profit_matched_bps(
+    matched_fp100: int,
+    cost_a_total_bps: int,
+    cost_b_total_bps: int,
+    fees_bps_a: int = 0,
+    fees_bps_b: int = 0,
+) -> int:
+    """Guaranteed bps profit for matched pairs after fees.
+
+    ``matched_fp100`` contracts (in fp100) pay out
+    ``(matched_fp100 * ONE_DOLLAR_BPS / ONE_CONTRACT_FP100)`` at settlement,
+    regardless of which side wins.
+    """
+    if matched_fp100 <= 0:
+        return 0
+    return (
+        (matched_fp100 * ONE_DOLLAR_BPS) // ONE_CONTRACT_FP100
+        - cost_a_total_bps
+        - cost_b_total_bps
+        - fees_bps_a
+        - fees_bps_b
+    )
