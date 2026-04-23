@@ -14,6 +14,20 @@ from talos.models.market import Trade
 from talos.units import ONE_CONTRACT_FP100
 
 
+def _trade_count_fp100(trade: Trade) -> int:
+    """Read trade count preferring fp100, falling back to legacy contracts.
+
+    Trade instances parsed from Kalshi wire populate BOTH ``count`` and
+    ``count_fp100`` via the validator. Test fixtures that construct Trade
+    directly with legacy ``count=`` kwarg leave ``count_fp100`` at default 0.
+    The fallback keeps the legacy-kwarg fixtures working; removed in
+    Task 13a-2 when the legacy ``count`` field is deleted.
+    """
+    if trade.count_fp100:
+        return trade.count_fp100
+    return trade.count * ONE_CONTRACT_FP100
+
+
 def _parse_iso(ts: str) -> float:
     """Parse ISO 8601 timestamp to Unix seconds."""
     try:
@@ -80,7 +94,7 @@ class CPMTracker:
                 continue
             self._seen.add(t.trade_id)
             ts = _parse_iso(t.created_time)
-            events.append((ts, float(t.count_fp100) / ONE_CONTRACT_FP100))
+            events.append((ts, float(_trade_count_fp100(t)) / ONE_CONTRACT_FP100))
         # Cap per-key to avoid unbounded growth
         if len(events) > self._MAX_EVENTS_PER_KEY:
             self._events[ticker] = events[-self._MAX_EVENTS_PER_KEY :]
