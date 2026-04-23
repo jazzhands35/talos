@@ -14,11 +14,6 @@ from talos.models.market import Trade
 from talos.units import ONE_CONTRACT_FP100
 
 
-def _trade_count_fp100(trade: Trade) -> int:
-    """Read trade count in fp100 (post-13a-2b: direct passthrough)."""
-    return trade.count_fp100
-
-
 def _parse_iso(ts: str) -> float:
     """Parse ISO 8601 timestamp to Unix seconds."""
     try:
@@ -85,7 +80,7 @@ class CPMTracker:
                 continue
             self._seen.add(t.trade_id)
             ts = _parse_iso(t.created_time)
-            events.append((ts, float(_trade_count_fp100(t)) / ONE_CONTRACT_FP100))
+            events.append((ts, float(t.count_fp100) / ONE_CONTRACT_FP100))
         # Cap per-key to avoid unbounded growth
         if len(events) > self._MAX_EVENTS_PER_KEY:
             self._events[ticker] = events[-self._MAX_EVENTS_PER_KEY :]

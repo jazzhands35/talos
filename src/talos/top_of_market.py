@@ -14,18 +14,6 @@ from talos.units import bps_to_cents_round
 logger = structlog.get_logger()
 
 
-def _order_remaining_fp100(order: Order) -> int:
-    """Read remaining count as fp100 (post-13a-2a: direct passthrough)."""
-    return order.remaining_count_fp100
-
-
-def _order_price_bps(order: Order, side: str) -> int:
-    """Read order price in bps for the given side."""
-    if side == "no":
-        return order.no_price_bps
-    return order.yes_price_bps
-
-
 class TopOfMarketTracker:
     """Detects when resting bids are no longer at the best book price.
 
@@ -57,12 +45,14 @@ class TopOfMarketTracker:
                 continue
             if order.status not in ACTIVE_STATUSES:
                 continue
-            if _order_remaining_fp100(order) <= 0:
+            if order.remaining_count_fp100 <= 0:
                 continue
             expected_sides = tracked.get(order.ticker)
             if expected_sides is None or order.side not in expected_sides:
                 continue
-            price = bps_to_cents_round(_order_price_bps(order, order.side))
+            price = bps_to_cents_round(
+                order.no_price_bps if order.side == "no" else order.yes_price_bps
+            )
             key = (order.ticker, order.side)
             prev = new_resting.get(key, 0)
             new_resting[key] = max(prev, price)

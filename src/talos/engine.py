@@ -97,39 +97,9 @@ def _merge_queue(existing: int | None, incoming: int) -> int:
 
 
 # ── bps/fp100 helpers ─────────────────────────────────────────────
-# Post 13a-2a: Order legacy fields deleted; these helpers now pass through
-# to the ``_bps`` / ``_fp100`` fields directly. Retained as thin adapters
-# until 13a-2e deletes them outright.
-
-
-def _order_remaining_fp100(order: Order) -> int:
-    """Remaining count in fp100 units."""
-    return order.remaining_count_fp100
-
-
-def _order_remaining_contracts(order: Order) -> int:
-    """Whole-contract remaining count (floor of fp100)."""
-    return _order_remaining_fp100(order) // ONE_CONTRACT_FP100
-
-
-def _order_fill_count_fp100(order: Order) -> int:
-    """Fill count in fp100 units."""
-    return order.fill_count_fp100
-
-
-def _order_fill_count_contracts(order: Order) -> int:
-    """Whole-contract fill count (floor of fp100)."""
-    return _order_fill_count_fp100(order) // ONE_CONTRACT_FP100
-
-
-def _order_price_bps(order: Order) -> int:
-    """Per-contract price in bps, respecting the order's side.
-
-    For ``side == "no"`` returns ``no_price_bps``; otherwise ``yes_price_bps``.
-    """
-    if order.side == "no":
-        return order.no_price_bps
-    return order.yes_price_bps
+# Post 13a-2e: legacy-field fallback helpers deleted. Only
+# ``_order_maker_fees_bps`` remains — it's a thin readability alias that
+# isn't part of the 13a-2 dual-field removal.
 
 
 def _order_maker_fees_bps(order: Order) -> int:
@@ -1403,7 +1373,7 @@ class TradingEngine:
 
             # Fetch queue positions and merge into cache
             try:
-                tickers = list({o.ticker for o in orders if _order_remaining_fp100(o) > 0})
+                tickers = list({o.ticker for o in orders if o.remaining_count_fp100 > 0})
                 if tickers:
                     new_qp = await self._rest.get_queue_positions(market_tickers=tickers)
                     for oid, qp in new_qp.items():
@@ -1419,7 +1389,7 @@ class TradingEngine:
                     order.queue_position = qp
 
             # Prune cache entries for orders no longer active
-            active_ids = {o.order_id for o in orders if _order_remaining_fp100(o) > 0}
+            active_ids = {o.order_id for o in orders if o.remaining_count_fp100 > 0}
             self._queue_cache = {
                 oid: v for oid, v in self._queue_cache.items() if oid in active_ids
             }
@@ -1488,10 +1458,12 @@ class TradingEngine:
                 {
                     "ticker": o.ticker,
                     "side": o.side,
-                    "price": bps_to_cents_round(_order_price_bps(o)),
-                    "filled": _order_fill_count_contracts(o),
+                    "price": bps_to_cents_round(
+                        o.no_price_bps if o.side == "no" else o.yes_price_bps
+                    ),
+                    "filled": o.fill_count_fp100 // ONE_CONTRACT_FP100,
                     "total": o.initial_count_fp100 // ONE_CONTRACT_FP100,
-                    "remaining": _order_remaining_contracts(o),
+                    "remaining": o.remaining_count_fp100 // ONE_CONTRACT_FP100,
                     "status": o.status,
                     "time": (o.created_time[11:16] if len(o.created_time) > 16 else o.created_time),
                     "queue_pos": o.queue_position,
@@ -1611,12 +1583,12 @@ class TradingEngine:
         """
         for order in self._orders_cache:
             if order.order_id == msg.order_id:
-                old_fill_count_fp100 = _order_fill_count_fp100(order)
+                old_fill_count_fp100 = order.fill_count_fp100
 
                 # Monotonic update — WS can never decrease fills.
                 order.status = msg.status
                 order.fill_count_fp100 = max(
-                    _order_fill_count_fp100(order), msg.fill_count_fp100
+                    order.fill_count_fp100, msg.fill_count_fp100
                 )
                 order.remaining_count_fp100 = msg.remaining_count_fp100
                 order.maker_fill_cost_bps = max(
@@ -1627,7 +1599,7 @@ class TradingEngine:
                 )
                 order.maker_fees_bps = max(order.maker_fees_bps, msg.maker_fees_bps)
 
-                new_fills_fp100 = _order_fill_count_fp100(order) - old_fill_count_fp100
+                new_fills_fp100 = order.fill_count_fp100 - old_fill_count_fp100
                 new_fills = new_fills_fp100 // ONE_CONTRACT_FP100
                 if new_fills_fp100 > 0:
                     price_bps = (
@@ -1642,7 +1614,7 @@ class TradingEngine:
                         order_id=msg.order_id,
                         ticker=msg.ticker,
                         new_fills=new_fills,
-                        total_fills=_order_fill_count_contracts(order),
+                        total_fills=order.fill_count_fp100 // ONE_CONTRACT_FP100,
                     )
                     # Enqueue WS reaction for immediate processing
                     if self._initial_sync_done:
@@ -1743,7 +1715,7 @@ class TradingEngine:
             self.recompute_positions()
             # Enqueue reaction if new order arrived with fills
             if (
-                _order_fill_count_fp100(new_order) > 0
+                new_order.fill_count_fp100 > 0
                 and self._initial_sync_done
                 and ws_pair is not None
             ):
@@ -2155,8 +2127,8 @@ class TradingEngine:
                     side = ticker_to_side.get(order.ticker)
                     if side is None:
                         continue
-                order_fill_contracts = _order_fill_count_contracts(order)
-                order_remaining_contracts = _order_remaining_contracts(order)
+                order_fill_contracts = order.fill_count_fp100 // ONE_CONTRACT_FP100
+                order_remaining_contracts = order.remaining_count_fp100 // ONE_CONTRACT_FP100
                 if order_fill_contracts > 0:
                     kalshi_fills[side] += order_fill_contracts
                 if order_remaining_contracts > 0 and order.status in (
@@ -3147,13 +3119,13 @@ class TradingEngine:
                 ledger.record_placement(
                     Side.A,
                     order_a.order_id,
-                    _order_remaining_contracts(order_a),
+                    order_a.remaining_count_fp100 // ONE_CONTRACT_FP100,
                     bid.no_a,
                 )
                 ledger.record_placement(
                     Side.B,
                     order_b.order_id,
-                    _order_remaining_contracts(order_b),
+                    order_b.remaining_count_fp100 // ONE_CONTRACT_FP100,
                     bid.no_b,
                 )
             # Track placement time for fill latency calculation
@@ -3167,7 +3139,9 @@ class TradingEngine:
             # Log to data collector (schema is integer cents / whole contracts).
             if self._data_collector is not None:
                 for order in (order_a, order_b):
-                    price_bps = _order_price_bps(order)
+                    price_bps = (
+                        order.no_price_bps if order.side == "no" else order.yes_price_bps
+                    )
                     self._data_collector.log_order(
                         event_ticker=pair.api_event_ticker,
                         order_id=order.order_id,
@@ -3176,8 +3150,8 @@ class TradingEngine:
                         status=order.status,
                         price=bps_to_cents_round(price_bps),
                         initial_count=order.initial_count_fp100 // ONE_CONTRACT_FP100,
-                        fill_count=_order_fill_count_contracts(order),
-                        remaining_count=_order_remaining_contracts(order),
+                        fill_count=order.fill_count_fp100 // ONE_CONTRACT_FP100,
+                        remaining_count=order.remaining_count_fp100 // ONE_CONTRACT_FP100,
                         source="auto_accept" if self._auto_config.enabled else "manual",
                     )
         except KalshiRateLimitError:
@@ -4353,10 +4327,12 @@ class TradingEngine:
             # Update fills from amend response (exact-precision via bps/fp100
             # siblings of the ledger accessors + Order fields).
             fill_delta_fp100 = (
-                _order_fill_count_fp100(old_order) - ledger.filled_count_fp100(side)
+                old_order.fill_count_fp100 - ledger.filled_count_fp100(side)
             )
             if fill_delta_fp100 > 0:
-                old_price_bps = _order_price_bps(old_order)
+                old_price_bps = (
+                    old_order.no_price_bps if old_order.side == "no" else old_order.yes_price_bps
+                )
                 fee_delta_bps = (
                     _order_maker_fees_bps(old_order) - ledger.filled_fees_bps(side)
                 )
@@ -4368,11 +4344,15 @@ class TradingEngine:
                 )
 
             # Update ledger with new resting state (exact-precision sibling).
-            amended_price_bps = _order_price_bps(amended_order)
+            amended_price_bps = (
+                amended_order.no_price_bps
+                if amended_order.side == "no"
+                else amended_order.yes_price_bps
+            )
             ledger.record_resting_bps(
                 side,
                 order_id=amended_order.order_id,
-                count_fp100=_order_remaining_fp100(amended_order),
+                count_fp100=amended_order.remaining_count_fp100,
                 price_bps=amended_price_bps,
             )
 

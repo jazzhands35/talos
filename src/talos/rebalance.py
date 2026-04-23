@@ -14,7 +14,6 @@ import structlog
 
 from talos.errors import KalshiAPIError, KalshiRateLimitError
 from talos.fees import max_profitable_price
-from talos.models.order import Order
 from talos.models.proposal import Proposal, ProposalKey, ProposedRebalance
 from talos.position_ledger import PositionLedger, Side
 from talos.units import ONE_CONTRACT_FP100, bps_to_cents_round
@@ -34,21 +33,6 @@ if TYPE_CHECKING:
     CancelWithVerify = Callable[[str, ArbPair], Awaitable[None]]
 
 logger = structlog.get_logger()
-
-
-def _order_remaining_fp100(order: Order) -> int:
-    """Read remaining count as fp100 (post-13a-2a: direct passthrough)."""
-    return order.remaining_count_fp100
-
-
-def _order_remaining_contracts(order: Order) -> int:
-    """Whole-contract remaining count for display / REST-wire comparisons.
-
-    Rebalance produces whole-contract cancel/amend payloads (Kalshi's
-    amend_order / create_order on this path accept whole units only), so
-    we floor fp100 → contracts.
-    """
-    return _order_remaining_fp100(order) // ONE_CONTRACT_FP100
 
 
 def _is_no_op(err: KalshiAPIError) -> bool:
@@ -486,7 +470,7 @@ async def execute_rebalance(
                 # Use decrease_order for quantity-only reductions (preserves
                 # queue position, simpler semantics than amend).
                 fresh_order = await rest_client.get_order(rebalance.order_id)
-                fresh_remaining = _order_remaining_contracts(fresh_order)
+                fresh_remaining = fresh_order.remaining_count_fp100 // ONE_CONTRACT_FP100
                 if fresh_remaining <= rebalance.target_resting:
                     _notify(
                         f"Rebalance step 1: already at target"
@@ -704,7 +688,7 @@ async def execute_rebalance(
             ledger.record_placement(
                 under_side,
                 order_id=created.order_id,
-                count=_order_remaining_contracts(created),
+                count=created.remaining_count_fp100 // ONE_CONTRACT_FP100,
                 price=catchup_price,
             )
             _notify(
@@ -787,7 +771,7 @@ async def _cancel_all_resting(
         for order in orders:
             if order.ticker != ticker:
                 continue
-            order_remaining_contracts = _order_remaining_contracts(order)
+            order_remaining_contracts = order.remaining_count_fp100 // ONE_CONTRACT_FP100
             if order.order_id == primary_order_id:
                 total_cancelled += order_remaining_contracts
                 primary_counted = True
@@ -876,7 +860,7 @@ async def _cancel_duplicate_orders(
             continue
         if order.side != target_side or order.action != "buy":
             continue
-        order_remaining_contracts = _order_remaining_contracts(order)
+        order_remaining_contracts = order.remaining_count_fp100 // ONE_CONTRACT_FP100
         if order_remaining_contracts <= 0:
             continue
         try:

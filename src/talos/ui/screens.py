@@ -27,32 +27,6 @@ from talos.units import (
     format_bps_as_dollars_display,
 )
 
-
-# ── Settlement helpers (post-13a-2c: direct passthrough) ─────────────
-def _settlement_revenue_bps(s: Settlement) -> int:
-    return s.revenue_bps
-
-
-def _settlement_fee_cost_bps(s: Settlement) -> int:
-    return s.fee_cost_bps
-
-
-def _settlement_yes_total_cost_bps(s: Settlement) -> int:
-    return s.yes_total_cost_bps
-
-
-def _settlement_no_total_cost_bps(s: Settlement) -> int:
-    return s.no_total_cost_bps
-
-
-def _settlement_yes_count_fp100(s: Settlement) -> int:
-    return s.yes_count_fp100
-
-
-def _settlement_no_count_fp100(s: Settlement) -> int:
-    return s.no_count_fp100
-
-
 # Duplicated from widgets.py to avoid circular imports
 _SPORT_LEAGUE: dict[str, tuple[str, str]] = {
     "KXNHLGAME": ("HOC", "NHL"),
@@ -598,15 +572,13 @@ class SettlementHistoryScreen(ModalScreen[None]):
             for _, legs, _ in day_events:
                 for s in legs:
                     implicit_bps = (
-                        min(_settlement_yes_count_fp100(s), _settlement_no_count_fp100(s))
+                        min(s.yes_count_fp100, s.no_count_fp100)
                         * ONE_DOLLAR_BPS
                     ) // 100
-                    cost_bps = (
-                        _settlement_no_total_cost_bps(s) + _settlement_yes_total_cost_bps(s)
-                    )
+                    cost_bps = s.no_total_cost_bps + s.yes_total_cost_bps
                     day_pnl_bps += (
-                        _settlement_revenue_bps(s) + implicit_bps
-                        - cost_bps - _settlement_fee_cost_bps(s)
+                        s.revenue_bps + implicit_bps
+                        - cost_bps - s.fee_cost_bps
                     )
 
             # Day separator row
@@ -657,18 +629,18 @@ class SettlementHistoryScreen(ModalScreen[None]):
         # Same-ticker pairs: add implicit payout for netted YES+NO pairs.
         # Bps arithmetic: fp100 × bps / fp100 = bps.
         total_revenue_bps = sum(
-            _settlement_revenue_bps(s)
+            s.revenue_bps
             + (
-                min(_settlement_yes_count_fp100(s), _settlement_no_count_fp100(s))
+                min(s.yes_count_fp100, s.no_count_fp100)
                 * ONE_DOLLAR_BPS
             ) // 100
             for s in legs
         )
         total_cost_bps = sum(
-            _settlement_no_total_cost_bps(s) + _settlement_yes_total_cost_bps(s)
+            s.no_total_cost_bps + s.yes_total_cost_bps
             for s in legs
         )
-        total_fees_bps = sum(_settlement_fee_cost_bps(s) for s in legs)
+        total_fees_bps = sum(s.fee_cost_bps for s in legs)
         actual_pnl_bps = total_revenue_bps - total_cost_bps - total_fees_bps
         actual_pnl = bps_to_cents_round(actual_pnl_bps)
 
@@ -746,8 +718,8 @@ class SettlementHistoryScreen(ModalScreen[None]):
             return RichText("—", style="dim", justify="right")
         # Average NO price per contract: (total_cost_bps * fp100) / (count_fp100 * bps)
         # Display in whole cents (rounded).
-        no_total_bps = _settlement_no_total_cost_bps(leg)
-        no_count_fp100 = _settlement_no_count_fp100(leg)
+        no_total_bps = leg.no_total_cost_bps
+        no_count_fp100 = leg.no_count_fp100
         if no_count_fp100 == 0:
             return RichText("—", style="dim", justify="right")
         avg_bps = (no_total_bps * 100) // no_count_fp100
@@ -763,9 +735,7 @@ class SettlementHistoryScreen(ModalScreen[None]):
     def _fmt_cost(leg: Settlement | None) -> RichText:
         if leg is None:
             return RichText("—", style="dim", justify="right")
-        cost_bps = (
-            _settlement_no_total_cost_bps(leg) + _settlement_yes_total_cost_bps(leg)
-        )
+        cost_bps = leg.no_total_cost_bps + leg.yes_total_cost_bps
         return RichText(format_bps_as_dollars_display(cost_bps), justify="right")
 
     @staticmethod
