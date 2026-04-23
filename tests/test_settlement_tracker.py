@@ -112,8 +112,8 @@ class TestSettlementCache:
         s = Settlement(
             ticker="MKT-A",
             event_ticker="EVT-1",
-            revenue=1000,
-            no_total_cost=380,
+            revenue_bps=100_000,  # 1000 cents = $10.00
+            no_total_cost_bps=38_000,
             settled_time="2026-03-20T12:00:00Z",
         )
         cache.upsert(s, est_pnl_cents=70, sub_title="A vs B")
@@ -121,7 +121,7 @@ class TestSettlementCache:
         assert len(result) == 1
         settlement, est, sub = result[0]
         assert settlement.ticker == "MKT-A"
-        assert settlement.revenue == 1000
+        assert settlement.revenue_bps == 100_000
         assert est == 70
         assert sub == "A vs B"
         cache.close()

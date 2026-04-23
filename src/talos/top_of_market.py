@@ -9,6 +9,7 @@ import structlog
 from talos.models.order import ACTIVE_STATUSES, Order
 from talos.models.strategy import ArbPair
 from talos.orderbook import OrderBookManager
+from talos.units import bps_to_cents_round, cents_to_bps
 
 logger = structlog.get_logger()
 
@@ -44,12 +45,15 @@ class TopOfMarketTracker:
                 continue
             if order.status not in ACTIVE_STATUSES:
                 continue
-            if order.remaining_count <= 0:
+            if order.remaining_count_fp100 <= 0:
                 continue
             expected_sides = tracked.get(order.ticker)
             if expected_sides is None or order.side not in expected_sides:
                 continue
-            price = order.no_price if order.side == "no" else order.yes_price
+            price_bps = (
+                order.no_price_bps if order.side == "no" else order.yes_price_bps
+            )
+            price = bps_to_cents_round(price_bps)
             key = (order.ticker, order.side)
             prev = new_resting.get(key, 0)
             new_resting[key] = max(prev, price)
@@ -76,7 +80,11 @@ class TopOfMarketTracker:
         if best is None:
             return
 
-        now_at_top = best.price <= resting_price
+        best_price_bps = (
+            best.price_bps if best.price_bps else cents_to_bps(best.price)
+        )
+        best_price_cents = bps_to_cents_round(best_price_bps)
+        now_at_top = best_price_cents <= resting_price
         was_at_top = self._at_top.get(key)
 
         self._at_top[key] = now_at_top
@@ -89,7 +97,7 @@ class TopOfMarketTracker:
                 side=side,
                 at_top=now_at_top,
                 resting=resting_price,
-                book_top=best.price,
+                book_top=best_price_cents,
             )
             if self.on_change:
                 self.on_change(ticker, side, now_at_top)
@@ -121,4 +129,7 @@ class TopOfMarketTracker:
     def book_top_price(self, ticker: str, side: str = "no") -> int | None:
         """Query the current best price on the book for a (ticker, side)."""
         best = self._books.best_ask(ticker, side=side)
-        return best.price if best else None
+        if best is None:
+            return None
+        best_bps = best.price_bps if best.price_bps else cents_to_bps(best.price)
+        return bps_to_cents_round(best_bps)

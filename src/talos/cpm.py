@@ -11,6 +11,7 @@ import time
 from datetime import datetime
 
 from talos.models.market import Trade
+from talos.units import ONE_CONTRACT_FP100
 
 
 def _parse_iso(ts: str) -> float:
@@ -79,7 +80,7 @@ class CPMTracker:
                 continue
             self._seen.add(t.trade_id)
             ts = _parse_iso(t.created_time)
-            events.append((ts, float(t.count)))
+            events.append((ts, float(t.count_fp100) / ONE_CONTRACT_FP100))
         # Cap per-key to avoid unbounded growth
         if len(events) > self._MAX_EVENTS_PER_KEY:
             self._events[ticker] = events[-self._MAX_EVENTS_PER_KEY :]

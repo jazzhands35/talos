@@ -15,6 +15,7 @@ from zoneinfo import ZoneInfo
 import structlog
 
 from talos.models.portfolio import Settlement
+from talos.units import ONE_CONTRACT_FP100, bps_to_cents_round
 
 logger = structlog.get_logger()
 
@@ -88,12 +89,12 @@ class SettlementCache:
                 settlement.ticker,
                 settlement.event_ticker,
                 settlement.market_result,
-                settlement.revenue,
-                settlement.fee_cost,
-                settlement.no_count,
-                settlement.no_total_cost,
-                settlement.yes_count,
-                settlement.yes_total_cost,
+                bps_to_cents_round(settlement.revenue_bps),
+                bps_to_cents_round(settlement.fee_cost_bps),
+                settlement.no_count_fp100 // ONE_CONTRACT_FP100,
+                bps_to_cents_round(settlement.no_total_cost_bps),
+                settlement.yes_count_fp100 // ONE_CONTRACT_FP100,
+                bps_to_cents_round(settlement.yes_total_cost_bps),
                 settlement.settled_time,
                 est_pnl_cents,
                 sub_title,
@@ -126,20 +127,30 @@ class SettlementCache:
         return [dict(zip(cols, row, strict=True)) for row in cur.fetchall()]
 
     def settlements_as_models(self) -> list[tuple[Settlement, int | None, str]]:
-        """Return cached data as (Settlement, est_pnl_cents, sub_title) tuples."""
+        """Return cached data as (Settlement, est_pnl_cents, sub_title) tuples.
+
+        The SQL columns store integer cents / whole contracts — promote
+        back to exact bps / fp100 at the Pydantic boundary.
+        """
         rows = self.all_settlements()
         result = []
         for r in rows:
+            revenue_cents = r["revenue"] or 0
+            fee_cost_cents = r["fee_cost"] or 0
+            no_total_cost_cents = r["no_total_cost"] or 0
+            yes_total_cost_cents = r["yes_total_cost"] or 0
+            no_count_whole = r["no_count"] or 0
+            yes_count_whole = r["yes_count"] or 0
             s = Settlement(
                 ticker=r["ticker"],
                 event_ticker=r["event_ticker"],
                 market_result=r["market_result"] or "",
-                revenue=r["revenue"] or 0,
-                fee_cost=r["fee_cost"] or 0,
-                no_count=r["no_count"] or 0,
-                no_total_cost=r["no_total_cost"] or 0,
-                yes_count=r["yes_count"] or 0,
-                yes_total_cost=r["yes_total_cost"] or 0,
+                revenue_bps=revenue_cents * 100,
+                fee_cost_bps=fee_cost_cents * 100,
+                no_count_fp100=no_count_whole * ONE_CONTRACT_FP100,
+                no_total_cost_bps=no_total_cost_cents * 100,
+                yes_count_fp100=yes_count_whole * ONE_CONTRACT_FP100,
+                yes_total_cost_bps=yes_total_cost_cents * 100,
                 settled_time=r["settled_time"] or "",
             )
             result.append((s, r.get("est_pnl_cents"), r.get("sub_title", "")))
