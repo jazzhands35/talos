@@ -16,6 +16,7 @@ from talos.data_collector import DataCollector
 from talos.models.proposal import Proposal, ProposalKey, ProposedBid
 from talos.models.strategy import ArbPair, Opportunity
 from talos.position_ledger import PositionLedger, Side
+from talos.units import ONE_CENT_BPS
 
 logger = structlog.get_logger()
 
@@ -29,6 +30,10 @@ class OpportunityProposer:
         data_collector: DataCollector | None = None,
     ) -> None:
         self._config = config
+        # Operator-facing edge threshold stays cents-facing on AutomationConfig;
+        # convert once at module entry so the internal gate does bps↔bps math
+        # (handles fractional-cent edges exactly, matches scanner's exact bps edge).
+        self._edge_threshold_bps = int(round(config.edge_threshold_cents * ONE_CENT_BPS))
         self._stable_since: dict[str, datetime] = {}  # event_ticker -> first seen
         self._rejected_at: dict[str, datetime] = {}  # event_ticker -> rejection time
         self._failed_at: dict[str, datetime] = {}  # event_ticker -> placement failure time
@@ -114,8 +119,16 @@ class OpportunityProposer:
             )
             return None
 
-        # Gate 1: edge threshold
-        if opportunity.fee_edge < self._config.edge_threshold_cents:
+        # Gate 1: edge threshold — bps-vs-bps comparison (exact; handles sub-cent
+        # edges without float-rounding drift). Falls back to legacy float-cent
+        # edge when the opportunity was produced before the scanner populated
+        # fee_edge_bps (pre-migration fixtures).
+        opp_fee_edge_bps = (
+            opportunity.fee_edge_bps
+            if opportunity.fee_edge_bps
+            else int(round(opportunity.fee_edge * ONE_CENT_BPS))
+        )
+        if opp_fee_edge_bps < self._edge_threshold_bps:
             # Edge dropped — reset stability timer
             self._stable_since.pop(event, None)
             self._emit(
@@ -273,10 +286,22 @@ class OpportunityProposer:
 
         # Gate 6: profitability — pair placements use the two NEW prices
         # (not new vs historical avg, which blocks re-entry after market moves).
-        # P16 unit gating still checked per-side.
-        from talos.fees import fee_adjusted_edge
+        # P16 unit gating still checked per-side. Internal math in bps space
+        # (exact); falls back to cents×100 when the opportunity lacks the
+        # exact-precision siblings (pre-migration fixture).
+        from talos.fees import fee_adjusted_edge_bps
 
-        if fee_adjusted_edge(opportunity.no_a, opportunity.no_b, rate=pair.fee_rate) < 0:
+        no_a_bps = (
+            opportunity.no_a_bps
+            if opportunity.no_a_bps
+            else opportunity.no_a * ONE_CENT_BPS
+        )
+        no_b_bps = (
+            opportunity.no_b_bps
+            if opportunity.no_b_bps
+            else opportunity.no_b * ONE_CENT_BPS
+        )
+        if fee_adjusted_edge_bps(no_a_bps, no_b_bps, rate=pair.fee_rate) < 0:
             self._emit(
                 event,
                 "block_unprofitable",

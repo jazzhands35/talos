@@ -13,11 +13,18 @@ import structlog
 from talos.automation_config import DEFAULT_UNIT_SIZE
 from talos.data_collector import DataCollector
 from talos.errors import KalshiAPIError
-from talos.fees import MAKER_FEE_RATE, fee_adjusted_cost
+from talos.fees import MAKER_FEE_RATE, fee_adjusted_cost_bps
 from talos.models.adjustment import ProposedAdjustment
 from talos.models.strategy import ArbPair
 from talos.orderbook import OrderBookManager
 from talos.position_ledger import PositionLedger, Side
+from talos.units import (
+    ONE_CENT_BPS,
+    ONE_CONTRACT_FP100,
+    ONE_DOLLAR_BPS,
+    bps_to_cents_round,
+    cents_to_bps,
+)
 
 logger = structlog.get_logger()
 
@@ -234,7 +241,14 @@ class BidAdjuster:
         book_top_price = None
         best_probe = self._books.best_ask(ticker, side=pair_side)
         if best_probe is not None:
-            book_top_price = best_probe.price
+            # Prefer exact-precision price_bps; fall back to legacy cents for
+            # fixtures that only populate the legacy field.
+            probe_bps = (
+                best_probe.price_bps
+                if best_probe.price_bps
+                else cents_to_bps(best_probe.price)
+            )
+            book_top_price = bps_to_cents_round(probe_bps)
         cur_resting_price = ledger.resting_price(adj_side)
         cur_resting_count = ledger.resting_count(adj_side)
 
@@ -303,7 +317,13 @@ class BidAdjuster:
                 exit_only=exit_only,
             )
             return None
-        new_price = best.price
+        # Internal profitability math runs in bps; the proposal's new_price is
+        # the whole-cent value Talos will submit to Kalshi (output boundary —
+        # Kalshi accepts whole-cent prices only for amend/place).
+        new_price_bps = (
+            best.price_bps if best.price_bps else cents_to_bps(best.price)
+        )
+        new_price = bps_to_cents_round(new_price_bps)
 
         # If new price equals current resting price, no action needed
         if new_price <= ledger.resting_price(adj_side):
@@ -336,25 +356,41 @@ class BidAdjuster:
                 ),
             )
 
-        # Profitability check (Principle 18)
+        # Profitability check (Principle 18) — internal math in bps; display
+        # float-cents values are derived at the end for log/reason strings.
         rate = pair.fee_rate
         other_side = adj_side.other
         if ledger.open_count(other_side) > 0:
-            other_effective = fee_adjusted_cost(
-                int(round(ledger.open_avg_filled_price(other_side))), rate=rate
-            )
+            # avg_filled_price_bps returns bps-per-whole-contract; round to the
+            # nearest whole cent (100 bps) for the per-contract fee formula.
+            other_avg_bps = ledger.avg_filled_price_bps(other_side)
+            other_price_bps = int(round(other_avg_bps / ONE_CENT_BPS)) * ONE_CENT_BPS
+            other_effective_bps = fee_adjusted_cost_bps(other_price_bps, rate=rate)
         elif ledger.resting_count(other_side) > 0:
             # Use top-of-market for other side (worst case / most conservative)
             other_ticker = pair.ticker_a if other_side is Side.A else pair.ticker_b
             other_pair_side = pair.side_a if other_side is Side.A else pair.side_b
             other_best = self._books.best_ask(other_ticker, side=other_pair_side)
-            other_book_price = other_best.price if other_best else ledger.resting_price(other_side)
-            other_effective = fee_adjusted_cost(other_book_price, rate=rate)
+            if other_best is not None:
+                other_price_bps = (
+                    other_best.price_bps
+                    if other_best.price_bps
+                    else cents_to_bps(other_best.price)
+                )
+            else:
+                other_price_bps = ledger.resting_price_bps(other_side)
+            other_effective_bps = fee_adjusted_cost_bps(other_price_bps, rate=rate)
         else:
-            other_effective = 0.0
+            other_effective_bps = 0
 
-        this_effective = fee_adjusted_cost(new_price, rate=rate)
-        if other_effective > 0 and this_effective + other_effective >= 100:
+        this_effective_bps = fee_adjusted_cost_bps(new_price_bps, rate=rate)
+        # Float-cent views for log fields and human-readable reason strings.
+        this_effective = this_effective_bps / ONE_CENT_BPS
+        other_effective = other_effective_bps / ONE_CENT_BPS
+        if (
+            other_effective_bps > 0
+            and this_effective_bps + other_effective_bps >= ONE_DOLLAR_BPS
+        ):
             # No fills on either side → withdraw both orders entirely.
             # With fills → hold and wait for market to return (P16).
             if ledger.filled_count(Side.A) == 0 and ledger.filled_count(Side.B) == 0:
@@ -594,11 +630,38 @@ class BidAdjuster:
                 self.clear_proposal(proposal.event_ticker, adj_side)
                 return
             raise
-        total_count = fresh_order.fill_count + fresh_order.remaining_count
+        # Exact-precision fp100 counts; fall back to legacy contract counts for
+        # fixtures that don't populate the _fp100 fields. The REST amend accepts
+        # whole-contract counts only (Talos never submits fractional contracts),
+        # so demote via integer-floor on the fp100 total.
+        fresh_fill_fp100 = (
+            fresh_order.fill_count_fp100
+            if fresh_order.fill_count_fp100
+            else fresh_order.fill_count * ONE_CONTRACT_FP100
+        )
+        fresh_remaining_fp100 = (
+            fresh_order.remaining_count_fp100
+            if fresh_order.remaining_count_fp100
+            else fresh_order.remaining_count * ONE_CONTRACT_FP100
+        )
+        total_count_fp100 = fresh_fill_fp100 + fresh_remaining_fp100
+        total_count = total_count_fp100 // ONE_CONTRACT_FP100
 
-        # Skip if the order is already at the target price (avoids AMEND_ORDER_NO_OP)
-        fresh_price = fresh_order.no_price if pair_side == "no" else fresh_order.yes_price
-        if fresh_price == proposal.new_price:
+        # Skip if the order is already at the target price (avoids AMEND_ORDER_NO_OP).
+        # Compare in bps: proposal.new_price is cents-valued, promote to bps.
+        if pair_side == "no":
+            fresh_price_bps = (
+                fresh_order.no_price_bps
+                if fresh_order.no_price_bps
+                else cents_to_bps(fresh_order.no_price)
+            )
+        else:
+            fresh_price_bps = (
+                fresh_order.yes_price_bps
+                if fresh_order.yes_price_bps
+                else cents_to_bps(fresh_order.yes_price)
+            )
+        if fresh_price_bps == cents_to_bps(proposal.new_price):
             logger.info(
                 "adjustment_already_at_target",
                 event_ticker=proposal.event_ticker,
@@ -611,12 +674,14 @@ class BidAdjuster:
         # Re-check P18 profitability with current ledger state.
         # Between proposal and execution, the other side may have filled
         # at a different price than expected at proposal time.
+        # is_placement_safe takes legacy (whole-contract, cents) — demote the
+        # exact fp100 remaining count to whole contracts for the gate call.
         pair_lookup = self.resolve_pair(ticker)
         if pair_lookup is not None:
             pair, _ = pair_lookup
             ok, reason = ledger.is_placement_safe(
                 adj_side,
-                fresh_order.remaining_count,
+                fresh_remaining_fp100 // ONE_CONTRACT_FP100,
                 proposal.new_price,
                 rate=pair.fee_rate,
                 catchup=True,
@@ -640,8 +705,8 @@ class BidAdjuster:
             old_price=proposal.cancel_price,
             new_price=proposal.new_price,
             total_count=total_count,
-            order_fills=fresh_order.fill_count,
-            order_remaining=fresh_order.remaining_count,
+            order_fills=fresh_fill_fp100 // ONE_CONTRACT_FP100,
+            order_remaining=fresh_remaining_fp100 // ONE_CONTRACT_FP100,
         )
 
         # Build side-aware amend kwargs
@@ -665,24 +730,67 @@ class BidAdjuster:
         # Update fills from amend response (handles fills that arrived during approval).
         # Compare against fresh_order (same order, pre-amend) — NOT the ledger
         # aggregate, which includes fills from other orders on this side.
-        fill_delta = old_order.fill_count - fresh_order.fill_count
-        if fill_delta > 0:
-            old_price = old_order.no_price if pair_side == "no" else old_order.yes_price
-            fee_delta = old_order.maker_fees - fresh_order.maker_fees
-            ledger.record_fill(
+        # Exact-precision fp100/bps reads with legacy fallback for fixtures.
+        old_fill_fp100 = (
+            old_order.fill_count_fp100
+            if old_order.fill_count_fp100
+            else old_order.fill_count * ONE_CONTRACT_FP100
+        )
+        fill_delta_fp100 = old_fill_fp100 - fresh_fill_fp100
+        if fill_delta_fp100 > 0:
+            if pair_side == "no":
+                old_price_bps = (
+                    old_order.no_price_bps
+                    if old_order.no_price_bps
+                    else cents_to_bps(old_order.no_price)
+                )
+            else:
+                old_price_bps = (
+                    old_order.yes_price_bps
+                    if old_order.yes_price_bps
+                    else cents_to_bps(old_order.yes_price)
+                )
+            old_maker_fees_bps = (
+                old_order.maker_fees_bps
+                if old_order.maker_fees_bps
+                else cents_to_bps(old_order.maker_fees)
+            )
+            fresh_maker_fees_bps = (
+                fresh_order.maker_fees_bps
+                if fresh_order.maker_fees_bps
+                else cents_to_bps(fresh_order.maker_fees)
+            )
+            fee_delta_bps = old_maker_fees_bps - fresh_maker_fees_bps
+            ledger.record_fill_bps(
                 adj_side,
-                count=fill_delta,
-                price=old_price,
-                fees=max(0, fee_delta),
+                count_fp100=fill_delta_fp100,
+                price_bps=old_price_bps,
+                fees_bps=max(0, fee_delta_bps),
             )
 
-        # Update ledger from amend response
-        amended_price = amended_order.no_price if pair_side == "no" else amended_order.yes_price
-        ledger.record_resting(
+        # Update ledger from amend response — exact-precision path.
+        if pair_side == "no":
+            amended_price_bps = (
+                amended_order.no_price_bps
+                if amended_order.no_price_bps
+                else cents_to_bps(amended_order.no_price)
+            )
+        else:
+            amended_price_bps = (
+                amended_order.yes_price_bps
+                if amended_order.yes_price_bps
+                else cents_to_bps(amended_order.yes_price)
+            )
+        amended_remaining_fp100 = (
+            amended_order.remaining_count_fp100
+            if amended_order.remaining_count_fp100
+            else amended_order.remaining_count * ONE_CONTRACT_FP100
+        )
+        ledger.record_resting_bps(
             adj_side,
             order_id=amended_order.order_id,
-            count=amended_order.remaining_count,
-            price=amended_price,
+            count_fp100=amended_remaining_fp100,
+            price_bps=amended_price_bps,
         )
 
         # Clear the proposal
@@ -721,7 +829,12 @@ class BidAdjuster:
         new_count: int,
         new_price: int,
     ) -> tuple[bool, str]:
-        """Check safety as if the existing resting order were already cancelled."""
+        """Check safety as if the existing resting order were already cancelled.
+
+        ``new_price`` is integer cents (Kalshi submission boundary). Internal
+        profitability math runs in bps and rounds back to whole cents for the
+        per-contract fee formula.
+        """
         # Simulate post-cancel state (use fills in current unit, not total)
         filled_in_unit = ledger.filled_count(side) % ledger.unit_size
         if filled_in_unit + new_count > ledger.unit_size:
@@ -733,16 +846,19 @@ class BidAdjuster:
         # Check profitability (open-unit scoped — same as is_placement_safe P18)
         other_side = side.other
         if ledger.open_count(other_side) > 0:
-            other_price = ledger.open_avg_filled_price(other_side)
+            other_avg_bps = ledger.avg_filled_price_bps(other_side)
+            other_price_bps = int(round(other_avg_bps / ONE_CENT_BPS)) * ONE_CENT_BPS
         elif ledger.resting_count(other_side) > 0:
-            other_price = ledger.resting_price(other_side)
+            other_price_bps = ledger.resting_price_bps(other_side)
         else:
             return True, ""
 
         rate = self._fee_rate_for(ledger.event_ticker)
-        effective_this = fee_adjusted_cost(new_price, rate=rate)
-        effective_other = fee_adjusted_cost(int(round(other_price)), rate=rate)
-        if effective_this + effective_other >= 100:
+        effective_this_bps = fee_adjusted_cost_bps(cents_to_bps(new_price), rate=rate)
+        effective_other_bps = fee_adjusted_cost_bps(other_price_bps, rate=rate)
+        if effective_this_bps + effective_other_bps >= ONE_DOLLAR_BPS:
+            effective_this = effective_this_bps / ONE_CENT_BPS
+            effective_other = effective_other_bps / ONE_CENT_BPS
             return (
                 False,
                 f"arb not profitable: {effective_this:.2f}+{effective_other:.2f} >= 100",
