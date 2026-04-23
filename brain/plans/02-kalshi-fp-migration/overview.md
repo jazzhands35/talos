@@ -1,15 +1,17 @@
 # Kalshi Fixed-Point Migration — SUPERSEDED
 
-> **Phase 0 (admission guard) landed 2026-04-22** — branch `feat/bps-fp100-migration`. Fractional and sub-cent markets are now blocked at every ingress path (scanner, engine commit, URL-add, market-picker, startup restore) pending Phase 1+2. Tracking: see `docs/superpowers/plans/2026-04-21-bps-fp100-phase-0-admission-guard.md`.
+> **Phase 1+2 of the successor migration SHIPPED 2026-04-23** — branch `feat/bps-fp100-migration`. Talos's internal money unit is now integer basis points (`$1 = 10,000 bps`) and contract counts are integer fp100 (`1 contract = 100 fp100`). Both motivating bugs below are fixed: fractional maker fills preserve exact fp100 counts through the full WS→ledger→engine pipeline; sub-cent markets produce correct `raw_edge_bps` from the scanner. Task 12 relaxed the Phase 0 admission guard; fractional and sub-cent markets now flow through normally.
+>
+> **Phase 0 (admission guard) landed 2026-04-22** — preceded Phase 1+2 to stop the bleeding on all ingress paths while the unit migration was in flight. The `MarketAdmissionError` + 5-ingress-path integration + F32 quarantine machinery stays in place as a general-purpose admission gate for future shape invariants.
 >
 > **⚠️ This plan is superseded. Do not use it as an implementation guide.**
 >
-> The March 2026 first-pass migration described here shipped successfully for the *wire-compat* goal it aimed at, but the boundary-only strategy it prescribed — specifically `_fp → int(float(val))` and `_dollars → int cents` — is the direct source of two later-discovered money-path bugs:
+> The March 2026 first-pass migration described here shipped successfully for the *wire-compat* goal it aimed at, but the boundary-only strategy it prescribed — specifically `_fp → int(float(val))` and `_dollars → int cents` — was the direct source of two later-discovered money-path bugs:
 >
 > 1. **Fractional inventory loss** on `fractional_trading_enabled` markets (observed live 2026-04-21 on `KXTRUMPSAYNICKNAME-26JUL01-MARJ`: a 1.89-contract partial maker fill was truncated to 1 contract, inflating cost-basis avg from ~52¢ to 60¢).
-> 2. **Silent sub-cent market drops** (e.g., DJT at 3.8¢/96.1¢ — the scanner's integer-cent edge gate discards these markets after rounding collapses their inside prices).
+> 2. **Silent sub-cent market drops** (e.g., DJT at 3.8¢/96.1¢ — the scanner's integer-cent edge gate discarded these markets after rounding collapsed their inside prices).
 >
-> The boundary-only strategy — keep cents/contracts internally, convert at the parser — is the wrong answer for these market shapes. The full-unit migration to basis points (`_bps`) for prices and fp100 for counts is specified in:
+> Both failures are fixed as of the Phase 1+2 landing. The boundary-only strategy — keep cents/contracts internally, convert at the parser — was the wrong answer for these market shapes. The full-unit migration to basis points (`_bps`) for prices and fp100 for counts is specified in:
 >
 > **→ [docs/superpowers/specs/2026-04-17-bps-fp100-unit-migration-design.md](../../../docs/superpowers/specs/2026-04-17-bps-fp100-unit-migration-design.md)**
 >
