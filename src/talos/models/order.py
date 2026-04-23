@@ -45,7 +45,9 @@ class Order(BaseModel, extra="ignore"):
     (``yes_price_bps``, ``fill_count_fp100``, ...). Both populate from
     the same wire payload. Downstream callers migrate from the legacy
     names to the ``_bps`` / ``_fp100`` names incrementally; the legacy
-    fields are deleted in Task 13 once all callers have migrated.
+    fields are deleted in Task 13 of
+    ``docs/superpowers/specs/2026-04-17-bps-fp100-unit-migration-design.md``
+    once all callers have migrated.
 
     Post March 12, 2026: integer wire fields removed. The validator
     converts ``_dollars`` / ``_fp`` string fields into both the legacy

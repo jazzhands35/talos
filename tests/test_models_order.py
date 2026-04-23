@@ -1,5 +1,7 @@
 """Tests for order Pydantic models."""
 
+import pytest
+
 from talos.models.order import BatchOrderResult, Fill, Order
 
 
@@ -370,6 +372,73 @@ class TestFillDualBpsFp100Fields:
         f = Fill.model_validate(data)
         assert f.yes_price == 0 and f.yes_price_bps == 0
         assert f.count == 0 and f.count_fp100 == 0
+
+
+class TestDualFieldInvariants:
+    """Parallel-field contract: for any whole-cent wire value, the _bps
+    field equals the legacy cents field × 100 exactly. This is the
+    invariant downstream callers depend on during the multi-commit
+    migration — making it explicit here means a regression breaks the
+    tests instead of leaking into production silently.
+    """
+
+    @pytest.mark.parametrize(
+        "wire_dollars,cents,bps",
+        [
+            ("0.01", 1, 100),
+            ("0.53", 53, 5_300),
+            ("1.00", 100, 10_000),
+            ("0.99", 99, 9_900),
+        ],
+    )
+    def test_order_bps_equals_cents_times_100_for_whole_cent(
+        self, wire_dollars: str, cents: int, bps: int
+    ) -> None:
+        o = Order.model_validate({
+            "order_id": "x",
+            "ticker": "y",
+            "side": "yes",
+            "yes_price_dollars": wire_dollars,
+        })
+        assert o.yes_price == cents
+        assert o.yes_price_bps == bps
+        assert o.yes_price_bps == o.yes_price * 100
+
+    @pytest.mark.parametrize(
+        "wire_dollars,cents,bps",
+        [
+            ("0.01", 1, 100),
+            ("0.53", 53, 5_300),
+            ("1.00", 100, 10_000),
+        ],
+    )
+    def test_fill_bps_equals_cents_times_100_for_whole_cent(
+        self, wire_dollars: str, cents: int, bps: int
+    ) -> None:
+        f = Fill.model_validate({
+            "trade_id": "t",
+            "order_id": "o",
+            "ticker": "y",
+            "side": "yes",
+            "yes_price_dollars": wire_dollars,
+        })
+        assert f.yes_price == cents
+        assert f.yes_price_bps == bps
+        assert f.yes_price_bps == f.yes_price * 100
+
+    def test_order_accepts_float_at_validation_time_for_whole_cent(self) -> None:
+        """Legacy JSON payloads sometimes arrive with floats. The parser
+        accepts them for whole-cent values (sub-cent floats are not
+        supported — the fail-closed trust boundary in units.py catches
+        the artifacts). Pin this compatibility path through the model."""
+        o = Order.model_validate({
+            "order_id": "x",
+            "ticker": "y",
+            "side": "yes",
+            "yes_price_dollars": 0.53,  # float, not str
+        })
+        assert o.yes_price == 53
+        assert o.yes_price_bps == 5_300
 
 
 class TestBatchOrderResult:
