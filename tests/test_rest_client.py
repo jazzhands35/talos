@@ -693,21 +693,21 @@ class TestQueuePositions:
 
 class TestPortfolioEndpoints:
     async def test_get_balance(self, client: KalshiRESTClient) -> None:
-        mock_data = {"balance": 500000, "portfolio_value": 750000}
+        mock_data = {"balance_dollars": "5000.00", "portfolio_value_dollars": "7500.00"}
         client._http = AsyncMock(spec=httpx.AsyncClient)
         client._http.request = AsyncMock(return_value=_mock_response(200, mock_data))
 
         balance = await client.get_balance()
-        assert balance.balance == 500000
+        assert balance.balance_bps == 50_000_000
 
     async def test_get_positions(self, client: KalshiRESTClient) -> None:
         mock_data = {
             "market_positions": [
                 {
                     "ticker": "KXBTC-26MAR-T50000",
-                    "position": 10,
-                    "total_traded": 25,
-                    "market_exposure": 650,
+                    "position_fp": "10",
+                    "total_traded_dollars": "0.25",
+                    "market_exposure_dollars": "6.50",
                 }
             ],
             "cursor": None,
@@ -717,7 +717,7 @@ class TestPortfolioEndpoints:
 
         positions = await client.get_positions()
         assert len(positions) == 1
-        assert positions[0].position == 10
+        assert positions[0].position_fp100 == 1000
 
     async def test_get_fills(self, client: KalshiRESTClient) -> None:
         mock_data = {
@@ -770,12 +770,12 @@ class TestGetSettlements:
         assert s.ticker == "MKT-YES"
         assert s.event_ticker == "EVT-1"
         assert s.market_result == "yes"
-        assert s.revenue == 500  # Already cents int — unchanged
-        assert s.fee_cost == 8  # "0.0770" → round(7.70) = 8 cents
-        assert s.yes_count == 10
-        assert s.no_count == 0
-        assert s.yes_total_cost == 450  # "4.50" → 450 cents
-        assert s.no_total_cost == 0
+        assert s.revenue_bps == 50_000  # revenue cents*100
+        assert s.fee_cost_bps == 770  # "0.0770" → 770 bps exact
+        assert s.yes_count_fp100 == 1000
+        assert s.no_count_fp100 == 0
+        assert s.yes_total_cost_bps == 45_000  # "4.50" → 45_000 bps
+        assert s.no_total_cost_bps == 0
 
     async def test_get_settlements_with_event_ticker_filter(self, client: KalshiRESTClient):
         mock_data = {"settlements": [], "cursor": None}

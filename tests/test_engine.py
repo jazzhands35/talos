@@ -240,7 +240,7 @@ class TestPolling:
     @pytest.mark.asyncio
     async def test_refresh_balance_updates_balance(self):
         engine, rest = _engine_with_pair()
-        rest.get_balance.return_value = Balance(balance=50000, portfolio_value=60000)
+        rest.get_balance.return_value = Balance(balance_bps=5_000_000, portfolio_value_bps=6_000_000)
 
         await engine.refresh_balance()
 
@@ -250,7 +250,7 @@ class TestPolling:
     @pytest.mark.asyncio
     async def test_refresh_account_fetches_all_orders(self):
         engine, rest = _engine_with_pair()
-        rest.get_balance.return_value = Balance(balance=1000, portfolio_value=1000)
+        rest.get_balance.return_value = Balance(balance_bps=100_000, portfolio_value_bps=100_000)
         rest.get_all_orders.return_value = []
         rest.get_queue_positions.return_value = {}
 
@@ -264,7 +264,7 @@ class TestPolling:
         orders = [
             _make_order("TK-A", order_id="ord-a", fill_count=5, remaining_count=5),
         ]
-        rest.get_balance.return_value = Balance(balance=1000, portfolio_value=1000)
+        rest.get_balance.return_value = Balance(balance_bps=100_000, portfolio_value_bps=100_000)
         # First call (resting) returns the order, second call (executed) returns empty
         rest.get_all_orders.return_value = orders
         rest.get_queue_positions.return_value = {}
@@ -288,7 +288,7 @@ class TestPolling:
             _make_order("TK-A", order_id="ord-a", fill_count=5, remaining_count=5, no_price=45),
             _make_order("TK-B", order_id="ord-b", fill_count=5, remaining_count=5, no_price=47),
         ]
-        rest.get_balance.return_value = Balance(balance=1000, portfolio_value=1000)
+        rest.get_balance.return_value = Balance(balance_bps=100_000, portfolio_value_bps=100_000)
         rest.get_all_orders.return_value = orders
         rest.get_queue_positions.return_value = {}
 
@@ -305,7 +305,7 @@ class TestPolling:
         orders = [
             _make_order("TK-A", order_id="ord-a", fill_count=3, remaining_count=7),
         ]
-        rest.get_balance.return_value = Balance(balance=1000, portfolio_value=1000)
+        rest.get_balance.return_value = Balance(balance_bps=100_000, portfolio_value_bps=100_000)
         rest.get_all_orders.return_value = orders
         rest.get_queue_positions.return_value = {}
 
@@ -322,7 +322,7 @@ class TestPolling:
         orders = [
             _make_order("TK-A", order_id="ord-a", fill_count=0, remaining_count=10),
         ]
-        rest.get_balance.return_value = Balance(balance=1000, portfolio_value=1000)
+        rest.get_balance.return_value = Balance(balance_bps=100_000, portfolio_value_bps=100_000)
         rest.get_all_orders.return_value = orders
         rest.get_queue_positions.return_value = {"ord-a": 50}
         await engine.refresh_account()
@@ -366,7 +366,7 @@ class TestPolling:
         # Seed cache with an old order
         engine._queue_cache["old-order"] = 10
 
-        rest.get_balance.return_value = Balance(balance=1000, portfolio_value=1000)
+        rest.get_balance.return_value = Balance(balance_bps=100_000, portfolio_value_bps=100_000)
         rest.get_all_orders.return_value = [
             _make_order("TK-A", order_id="new-order", remaining_count=10),
         ]
@@ -384,7 +384,7 @@ class TestPolling:
             _make_order("TK-A", order_id="ord-a", fill_count=0, remaining_count=10, no_price=45),
             _make_order("TK-B", order_id="ord-b", fill_count=0, remaining_count=10, no_price=48),
         ]
-        rest.get_balance.return_value = Balance(balance=1000, portfolio_value=1000)
+        rest.get_balance.return_value = Balance(balance_bps=100_000, portfolio_value_bps=100_000)
         rest.get_all_orders.return_value = orders
         rest.get_queue_positions.return_value = {}
 
@@ -400,13 +400,13 @@ class TestPolling:
         """Fills from archived orders are recovered via positions API."""
         engine, rest = _engine_with_pair()
         # Orders API returns nothing (orders archived)
-        rest.get_balance.return_value = Balance(balance=1000, portfolio_value=1000)
+        rest.get_balance.return_value = Balance(balance_bps=100_000, portfolio_value_bps=100_000)
         rest.get_all_orders.return_value = []
         rest.get_queue_positions.return_value = {}
         # Positions API shows actual holdings
         rest.get_all_positions.return_value = [
-            Position(ticker="TK-A", position=-30, total_traded=1380),
-            Position(ticker="TK-B", position=-10, total_traded=520),
+            Position(ticker="TK-A", position_fp100=-3000, total_traded_bps=138_000),
+            Position(ticker="TK-B", position_fp100=-1000, total_traded_bps=52_000),
         ]
 
         await engine.refresh_account()
@@ -918,7 +918,7 @@ class TestOpportunityProposerIntegration:
     async def test_refresh_account_calls_evaluate(self):
         """refresh_account calls evaluate_opportunities at end of cycle."""
         engine, rest = _engine_with_automation()
-        rest.get_balance.return_value = Balance(balance=1000, portfolio_value=1000)
+        rest.get_balance.return_value = Balance(balance_bps=100_000, portfolio_value_bps=100_000)
         rest.get_all_orders.return_value = []
         rest.get_queue_positions.return_value = {}
 
@@ -1395,7 +1395,7 @@ class TestStaleBookRecovery:
         assert book_a is not None
         book_a.last_update = time.time() - 121.0
 
-        rest.get_balance.return_value = Balance(balance=1000, portfolio_value=1000)
+        rest.get_balance.return_value = Balance(balance_bps=100_000, portfolio_value_bps=100_000)
         rest.get_all_orders.return_value = []
         rest.get_queue_positions.return_value = {}
 
@@ -1624,9 +1624,9 @@ class TestLifecycleFiltering:
             ticker="TK-A",
             event_ticker="EVT-1",
             market_result="no",
-            revenue=200,
-            fee_cost=10,
-            no_count=5,
+            revenue_bps=20_000,
+            fee_cost_bps=1000,
+            no_count_fp100=500,
         )
         rest.get_settlements = AsyncMock(return_value=[settlement])
         notifications: list[str] = []
@@ -1742,7 +1742,7 @@ class TestReconcileWithKalshi:
                 "TK-A", order_id="ord-a", fill_count=10, remaining_count=0, status="executed"
             ),
         ]
-        pos_map = {"TK-A": Position(ticker="TK-A", position=-15, total_traded=675)}
+        pos_map = {"TK-A": Position(ticker="TK-A", position_fp100=-1500, total_traded_bps=67_500)}
         engine._reconcile_with_kalshi(orders, pos_map)
         out = capsys.readouterr().out
         # Auth fills = max(10, 15) = 15, ledger has 10 → mismatch
@@ -1760,7 +1760,7 @@ class TestReconcileWithKalshi:
                 "TK-A", order_id="ord-a", fill_count=10, remaining_count=0, status="executed"
             ),
         ]
-        pos_map = {"TK-A": Position(ticker="TK-A", position=-15, total_traded=675)}
+        pos_map = {"TK-A": Position(ticker="TK-A", position_fp100=-1500, total_traded_bps=67_500)}
 
         engine._reconcile_with_kalshi(orders, pos_map)
         first = capsys.readouterr().out
@@ -1770,7 +1770,7 @@ class TestReconcileWithKalshi:
         second = capsys.readouterr().out
         assert "reconcile_fill_mismatch" not in second
 
-        pos_map = {"TK-A": Position(ticker="TK-A", position=-16, total_traded=720)}
+        pos_map = {"TK-A": Position(ticker="TK-A", position_fp100=-1600, total_traded_bps=72_000)}
         engine._reconcile_with_kalshi(orders, pos_map)
         third = capsys.readouterr().out
         assert "reconcile_fill_mismatch" in third
@@ -1788,7 +1788,7 @@ class TestReconcileWithKalshi:
         rest.get_all_orders.return_value = []
         rest.get_queue_positions.return_value = {}
         rest.get_all_positions.return_value = [
-            Position(ticker="TK-A", position=-15, total_traded=675),
+            Position(ticker="TK-A", position_fp100=-1500, total_traded_bps=67_500),
         ]
 
         await engine.refresh_account()
@@ -1819,7 +1819,7 @@ class TestReconcileWithKalshi:
                 status="executed",
             ),
         ]
-        pos_map = {"MKT-1": Position(ticker="MKT-1", position=2, total_traded=96)}
+        pos_map = {"MKT-1": Position(ticker="MKT-1", position_fp100=200, total_traded_bps=9600)}
 
         engine._reconcile_with_kalshi(orders, pos_map)
 
@@ -2037,7 +2037,7 @@ class TestStalePositionCleanup:
         ledger.record_fill(Side.B, 10, 43)
 
         # Minimal mocks for refresh_account
-        rest.get_balance.return_value = Balance(balance=5000, portfolio_value=5000)
+        rest.get_balance.return_value = Balance(balance_bps=500_000, portfolio_value_bps=500_000)
         rest.get_all_orders.return_value = []
         rest.get_queue_positions.return_value = {}
         return engine, rest
@@ -2083,7 +2083,7 @@ class TestStalePositionCleanup:
 
         # Next cycle: position reappears (transient gap resolved)
         rest.get_all_positions.return_value = [
-            Position(ticker="TK-A", position=-10, total_traded=450),
+            Position(ticker="TK-A", position_fp100=-1000, total_traded_bps=45_000),
         ]
         await engine.refresh_account()
 
@@ -2095,7 +2095,7 @@ class TestStalePositionCleanup:
     async def test_no_fills_in_ledger_not_flagged(self):
         """Pairs with zero fills (just resting orders) should not be flagged."""
         engine, rest = _engine_with_pair()  # No fills recorded
-        rest.get_balance.return_value = Balance(balance=5000, portfolio_value=5000)
+        rest.get_balance.return_value = Balance(balance_bps=500_000, portfolio_value_bps=500_000)
         rest.get_all_orders.return_value = []
         rest.get_queue_positions.return_value = {}
         rest.get_all_positions.return_value = []

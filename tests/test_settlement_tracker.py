@@ -62,10 +62,10 @@ class TestSettlementCache:
         s = Settlement(
             ticker="MKT-A",
             event_ticker="EVT-1",
-            revenue=1000,
-            no_total_cost=380,
+            revenue_bps=100_000,
+            no_total_cost_bps=38_000,
             market_result="no",
-            no_count=10,
+            no_count_fp100=1000,
             settled_time="2026-03-20T12:00:00Z",
         )
         cache.upsert(s, est_pnl_cents=70, sub_title="Team A vs Team B")
@@ -82,8 +82,8 @@ class TestSettlementCache:
         s = Settlement(
             ticker="MKT-A",
             event_ticker="EVT-1",
-            revenue=1000,
-            no_total_cost=380,
+            revenue_bps=100_000,
+            no_total_cost_bps=38_000,
             settled_time="2026-03-20T12:00:00Z",
         )
         cache.upsert(s, est_pnl_cents=70)

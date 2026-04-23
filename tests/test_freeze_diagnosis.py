@@ -30,7 +30,7 @@ from talos.ui.app import TalosApp
 
 def _make_rest() -> AsyncMock:
     rest = AsyncMock()
-    rest.get_balance.return_value = MagicMock(balance=10000, portfolio_value=10000)
+    rest.get_balance.return_value = MagicMock(balance_bps=1_000_000, portfolio_value_bps=1_000_000)
     rest.get_all_orders.return_value = []
     rest.get_positions.return_value = []
     rest.get_queue_positions.return_value = {}
@@ -387,7 +387,7 @@ class TestLevel7SlowREST:
 
         async def slow_balance():
             await asyncio.sleep(5.0)
-            return MagicMock(balance=10000, portfolio_value=10000)
+            return MagicMock(balance_bps=1_000_000, portfolio_value_bps=1_000_000)
 
         engine._rest.get_balance = slow_balance
         app = TalosApp(engine=engine)
@@ -442,7 +442,7 @@ class TestLevel7SlowREST:
 
         async def slow_any(*args, **kwargs):
             await asyncio.sleep(10.0)
-            return MagicMock(balance=0, portfolio_value=0)
+            return MagicMock(balance_bps=0, portfolio_value_bps=0)
 
         async def slow_list(*args, **kwargs):
             await asyncio.sleep(10.0)

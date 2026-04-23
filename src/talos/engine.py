@@ -1353,8 +1353,8 @@ class TradingEngine:
         """Fetch balance only — fast, independent of order/position sync."""
         try:
             balance = await self._rest.get_balance()
-            self._balance = balance.balance
-            self._portfolio_value = balance.portfolio_value
+            self._balance = balance.balance_bps // 100
+            self._portfolio_value = balance.portfolio_value_bps // 100
         except (KalshiAPIError, KalshiRateLimitError, httpx.HTTPError):
             logger.warning("balance_fetch_failed", exc_info=True)
 
@@ -1462,16 +1462,16 @@ class TradingEngine:
                     if not ledger.owns_tickers(pair.ticker_a, pair.ticker_b):
                         continue
                     fills = {
-                        Side.A: abs(pos_a.position) if pos_a else 0,
-                        Side.B: abs(pos_b.position) if pos_b else 0,
+                        Side.A: abs(pos_a.position_fp100 // 100) if pos_a else 0,
+                        Side.B: abs(pos_b.position_fp100 // 100) if pos_b else 0,
                     }
                     costs = {
-                        Side.A: pos_a.total_traded if pos_a else 0,
-                        Side.B: pos_b.total_traded if pos_b else 0,
+                        Side.A: pos_a.total_traded_bps // 100 if pos_a else 0,
+                        Side.B: pos_b.total_traded_bps // 100 if pos_b else 0,
                     }
                     fees = {
-                        Side.A: pos_a.fees_paid if pos_a else 0,
-                        Side.B: pos_b.fees_paid if pos_b else 0,
+                        Side.A: pos_a.fees_paid_bps // 100 if pos_a else 0,
+                        Side.B: pos_b.fees_paid_bps // 100 if pos_b else 0,
                     }
                     ledger.sync_from_positions(fills, costs, fees)
 
@@ -1959,10 +1959,8 @@ class TradingEngine:
                 logger.info("settlement_not_found", ticker=ticker)
                 return
             s = settlements[0]
-            # Format dollars via bps for exact precision — fall back to
-            # cents_to_bps for fixtures where only the legacy fields are set.
-            revenue_bps = s.revenue_bps if s.revenue_bps else cents_to_bps(s.revenue)
-            fee_cost_bps = s.fee_cost_bps if s.fee_cost_bps else cents_to_bps(s.fee_cost)
+            revenue_bps = s.revenue_bps
+            fee_cost_bps = s.fee_cost_bps
             net_bps = revenue_bps - fee_cost_bps
             self._notify(
                 f"Settlement {ticker}: "
@@ -1977,12 +1975,8 @@ class TradingEngine:
                 result=s.market_result,
                 revenue_bps=revenue_bps,
                 fee_cost_bps=fee_cost_bps,
-                no_count_fp100=(
-                    s.no_count_fp100 if s.no_count_fp100 else s.no_count * ONE_CONTRACT_FP100
-                ),
-                yes_count_fp100=(
-                    s.yes_count_fp100 if s.yes_count_fp100 else s.yes_count * ONE_CONTRACT_FP100
-                ),
+                no_count_fp100=s.no_count_fp100,
+                yes_count_fp100=s.yes_count_fp100,
             )
             # Cache settlement with our estimated P&L (still available at this point)
             if self._settlement_cache is not None:
@@ -2128,8 +2122,8 @@ class TradingEngine:
                 continue
             pos_a = pos_map.get(pair.ticker_a)
             pos_b = pos_map.get(pair.ticker_b)
-            both_zero = (pos_a is None or pos_a.position == 0) and (
-                pos_b is None or pos_b.position == 0
+            both_zero = (pos_a is None or pos_a.position_fp100 == 0) and (
+                pos_b is None or pos_b.position_fp100 == 0
             )
             if not both_zero:
                 continue
@@ -2227,7 +2221,7 @@ class TradingEngine:
                 for side, ticker in ((Side.A, pair.ticker_a), (Side.B, pair.ticker_b)):
                     pos = pos_map.get(ticker)
                     if pos is not None:
-                        pos_fills[side] = abs(pos.position)
+                        pos_fills[side] = abs(pos.position_fp100 // 100)
             # Authoritative fill count = max of all sources.
             # Ledger persists fills that may have dropped from Kalshi's
             # orders API time window (old fully-filled orders expire).
@@ -4485,16 +4479,16 @@ class TradingEngine:
                 pos_a = pos_map.get(pair.ticker_a)
                 pos_b = pos_map.get(pair.ticker_b)
                 fills = {
-                    Side.A: abs(pos_a.position) if pos_a else 0,
-                    Side.B: abs(pos_b.position) if pos_b else 0,
+                    Side.A: abs(pos_a.position_fp100 // 100) if pos_a else 0,
+                    Side.B: abs(pos_b.position_fp100 // 100) if pos_b else 0,
                 }
                 costs = {
-                    Side.A: pos_a.total_traded if pos_a else 0,
-                    Side.B: pos_b.total_traded if pos_b else 0,
+                    Side.A: pos_a.total_traded_bps // 100 if pos_a else 0,
+                    Side.B: pos_b.total_traded_bps // 100 if pos_b else 0,
                 }
                 fees = {
-                    Side.A: pos_a.fees_paid if pos_a else 0,
-                    Side.B: pos_b.fees_paid if pos_b else 0,
+                    Side.A: pos_a.fees_paid_bps // 100 if pos_a else 0,
+                    Side.B: pos_b.fees_paid_bps // 100 if pos_b else 0,
                 }
                 ledger.sync_from_positions(fills, costs, fees)
             logger.info(
@@ -4977,7 +4971,7 @@ class TradingEngine:
             summary.status = self._compute_event_status(summary.event_ticker)
             ep = self._event_positions.get(summary.event_ticker)
             if ep is not None:
-                summary.kalshi_pnl = ep.realized_pnl
+                summary.kalshi_pnl = ep.realized_pnl_bps // 100
 
         # Compute status for ALL pairs — use dict instead of O(N²) scan
         summary_index = {s.event_ticker: s for s in self._position_summaries}

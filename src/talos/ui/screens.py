@@ -24,42 +24,33 @@ from talos.units import (
     ONE_DOLLAR_BPS,
     bps_to_cents_round,
     cents_to_bps,
-    contracts_to_fp100,
     format_bps_as_dollars_display,
 )
 
 
-# ── Settlement fallback helpers (removed in 13a-2) ─────────────────
-# Direct-kwarg Settlement fixtures leave the _bps/_fp100 siblings at 0.
-# Prefer the exact-precision field; fall back to cents*100 / contracts*100.
+# ── Settlement helpers (post-13a-2c: direct passthrough) ─────────────
 def _settlement_revenue_bps(s: Settlement) -> int:
-    """Settlement.revenue_bps with legacy fallback (removed in 13a-2)."""
-    return s.revenue_bps if s.revenue_bps else cents_to_bps(s.revenue)
+    return s.revenue_bps
 
 
 def _settlement_fee_cost_bps(s: Settlement) -> int:
-    """Settlement.fee_cost_bps with legacy fallback (removed in 13a-2)."""
-    return s.fee_cost_bps if s.fee_cost_bps else cents_to_bps(s.fee_cost)
+    return s.fee_cost_bps
 
 
 def _settlement_yes_total_cost_bps(s: Settlement) -> int:
-    """Settlement.yes_total_cost_bps with legacy fallback (removed in 13a-2)."""
-    return s.yes_total_cost_bps if s.yes_total_cost_bps else cents_to_bps(s.yes_total_cost)
+    return s.yes_total_cost_bps
 
 
 def _settlement_no_total_cost_bps(s: Settlement) -> int:
-    """Settlement.no_total_cost_bps with legacy fallback (removed in 13a-2)."""
-    return s.no_total_cost_bps if s.no_total_cost_bps else cents_to_bps(s.no_total_cost)
+    return s.no_total_cost_bps
 
 
 def _settlement_yes_count_fp100(s: Settlement) -> int:
-    """Settlement.yes_count_fp100 with legacy fallback (removed in 13a-2)."""
-    return s.yes_count_fp100 if s.yes_count_fp100 else contracts_to_fp100(s.yes_count)
+    return s.yes_count_fp100
 
 
 def _settlement_no_count_fp100(s: Settlement) -> int:
-    """Settlement.no_count_fp100 with legacy fallback (removed in 13a-2)."""
-    return s.no_count_fp100 if s.no_count_fp100 else contracts_to_fp100(s.no_count)
+    return s.no_count_fp100
 
 
 # Duplicated from widgets.py to avoid circular imports
@@ -751,7 +742,7 @@ class SettlementHistoryScreen(ModalScreen[None]):
 
     @staticmethod
     def _fmt_no_price(leg: Settlement | None) -> RichText:
-        if leg is None or leg.no_count == 0:
+        if leg is None or leg.no_count_fp100 == 0:
             return RichText("—", style="dim", justify="right")
         # Average NO price per contract: (total_cost_bps * fp100) / (count_fp100 * bps)
         # Display in whole cents (rounded).
@@ -764,9 +755,9 @@ class SettlementHistoryScreen(ModalScreen[None]):
 
     @staticmethod
     def _fmt_qty(leg: Settlement | None) -> RichText:
-        if leg is None or leg.no_count == 0:
+        if leg is None or leg.no_count_fp100 == 0:
             return RichText("—", style="dim", justify="right")
-        return RichText(str(leg.no_count), justify="right")
+        return RichText(str(leg.no_count_fp100 // 100), justify="right")
 
     @staticmethod
     def _fmt_cost(leg: Settlement | None) -> RichText:

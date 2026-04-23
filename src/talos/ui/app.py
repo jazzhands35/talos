@@ -623,7 +623,7 @@ class TalosApp(App):
                 if pos is None:
                     continue
                 our_expected = int(pos.locked_profit_cents)
-                disc = reconcile_event(our_expected, s.revenue, s.event_ticker)
+                disc = reconcile_event(our_expected, s.revenue_bps // 100, s.event_ticker)
                 if disc is not None and abs(disc["difference"]) > 5:
                     self.query_one(ActivityLog).log_activity(
                         f"P&L DISCREPANCY {s.event_ticker}: "

@@ -601,16 +601,16 @@ async def execute_rebalance(
             if pos_a or pos_b:
                 ledger.sync_from_positions(
                     {
-                        Side.A: abs(pos_a.position) if pos_a else 0,
-                        Side.B: abs(pos_b.position) if pos_b else 0,
+                        Side.A: abs(pos_a.position_fp100 // 100) if pos_a else 0,
+                        Side.B: abs(pos_b.position_fp100 // 100) if pos_b else 0,
                     },
                     {
-                        Side.A: pos_a.total_traded if pos_a else 0,
-                        Side.B: pos_b.total_traded if pos_b else 0,
+                        Side.A: pos_a.total_traded_bps // 100 if pos_a else 0,
+                        Side.B: pos_b.total_traded_bps // 100 if pos_b else 0,
                     },
                     {
-                        Side.A: pos_a.fees_paid if pos_a else 0,
-                        Side.B: pos_b.fees_paid if pos_b else 0,
+                        Side.A: pos_a.fees_paid_bps // 100 if pos_a else 0,
+                        Side.B: pos_b.fees_paid_bps // 100 if pos_b else 0,
                     },
                 )
         except Exception as e:

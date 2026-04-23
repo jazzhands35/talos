@@ -26,10 +26,10 @@ def _make_settlement(
     return Settlement(
         ticker=ticker,
         event_ticker=event_ticker,
-        revenue=revenue,
-        no_total_cost=no_total_cost,
+        revenue_bps=revenue * 100,
+        no_total_cost_bps=no_total_cost * 100,
         market_result=market_result,
-        no_count=no_count,
+        no_count_fp100=no_count * 100,
         settled_time=settled_time,
     )
 
@@ -122,11 +122,12 @@ class TestSettlementPnL:
         # Event total: 620 + (-550) = 70
         s_a = _make_settlement("MKT-A", "EVT-1", 1000, 380)
         s_b = _make_settlement("MKT-B", "EVT-1", 0, 550, market_result="yes")
-        total_revenue = s_a.revenue + s_b.revenue
-        total_cost = (s_a.no_total_cost + s_a.yes_total_cost) + (
-            s_b.no_total_cost + s_b.yes_total_cost
+        total_revenue_bps = s_a.revenue_bps + s_b.revenue_bps
+        total_cost_bps = (s_a.no_total_cost_bps + s_a.yes_total_cost_bps) + (
+            s_b.no_total_cost_bps + s_b.yes_total_cost_bps
         )
-        assert total_revenue - total_cost == 70
+        # 70 cents profit = 7000 bps.
+        assert total_revenue_bps - total_cost_bps == 7000
 
     def test_result_column_win_loss(self) -> None:
         """market_result='no' → W (we buy NO), 'yes' → L."""

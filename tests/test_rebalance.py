@@ -1058,8 +1058,18 @@ class TestFreshSyncBeforeCatchup:
         # Positions API shows the real fills
         rest.get_all_positions = AsyncMock(
             return_value=[
-                Position(ticker="TK-A", position=-30, total_traded=1350, fees_paid=5),
-                Position(ticker="TK-B", position=-20, total_traded=960, fees_paid=4),
+                Position(
+                    ticker="TK-A",
+                    position_fp100=-3000,
+                    total_traded_bps=135_000,
+                    fees_paid_bps=500,
+                ),
+                Position(
+                    ticker="TK-B",
+                    position_fp100=-2000,
+                    total_traded_bps=96_000,
+                    fees_paid_bps=400,
+                ),
             ]
         )
         created = _make_order("TK-B", order_id="catchup-2", remaining_count=10, no_price=48)
