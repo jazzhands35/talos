@@ -543,7 +543,10 @@ class TestMarketDualFieldInvariants:
         })
         assert m.yes_bid == cents
         assert m.yes_bid_bps == bps
-        assert m.yes_bid_bps == m.yes_bid * 100
+        # Parallel-field invariant: bps == cents * 100 (expressed against the
+        # parametrized values, not the model attrs, because Pyright narrows
+        # Market.yes_bid to int | None even though the wire payload populated it).
+        assert bps == cents * 100
 
     @pytest.mark.parametrize(
         "wire_fp,legacy,fp100",
@@ -565,4 +568,6 @@ class TestMarketDualFieldInvariants:
         })
         assert m.volume == legacy
         assert m.volume_fp100 == fp100
-        assert m.volume_fp100 == m.volume * 100
+        # Parallel-field invariant: fp100 == legacy * 100. Expressed against
+        # parametrized values (Market.volume is int | None post-migration).
+        assert fp100 == legacy * 100
