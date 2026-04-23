@@ -19,6 +19,7 @@ from talos.models.market import Event, Market
 from talos.models.strategy import ArbPair
 from talos.rest_client import KalshiRESTClient
 from talos.scanner import ArbitrageScanner
+from talos.units import ONE_CONTRACT_FP100
 
 logger = structlog.get_logger()
 
@@ -838,7 +839,7 @@ class GameManager:
         for batch in results:
             for m in batch:
                 if m.volume_24h_fp100 is not None:
-                    self._volumes_24h[m.ticker] = m.volume_24h_fp100 // 100
+                    self._volumes_24h[m.ticker] = m.volume_24h_fp100 // ONE_CONTRACT_FP100
 
     async def scan_events(self, scan_mode: str = "sports") -> list[Event]:
         """Discover all open arb-eligible events not already monitored."""

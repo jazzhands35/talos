@@ -21,6 +21,8 @@ from talos.models.position import EventPositionSummary
 from talos.models.strategy import BidConfirmation, Opportunity
 from talos.ui.theme import GREEN, RED, SURFACE2, YELLOW
 from talos.units import (
+    ONE_CENT_BPS,
+    ONE_CONTRACT_FP100,
     ONE_DOLLAR_BPS,
     bps_to_cents_round,
     cents_to_bps,
@@ -574,7 +576,7 @@ class SettlementHistoryScreen(ModalScreen[None]):
                     implicit_bps = (
                         min(s.yes_count_fp100, s.no_count_fp100)
                         * ONE_DOLLAR_BPS
-                    ) // 100
+                    ) // ONE_CONTRACT_FP100
                     cost_bps = s.no_total_cost_bps + s.yes_total_cost_bps
                     day_pnl_bps += (
                         s.revenue_bps + implicit_bps
@@ -633,7 +635,7 @@ class SettlementHistoryScreen(ModalScreen[None]):
             + (
                 min(s.yes_count_fp100, s.no_count_fp100)
                 * ONE_DOLLAR_BPS
-            ) // 100
+            ) // ONE_CONTRACT_FP100
             for s in legs
         )
         total_cost_bps = sum(
@@ -722,14 +724,14 @@ class SettlementHistoryScreen(ModalScreen[None]):
         no_count_fp100 = leg.no_count_fp100
         if no_count_fp100 == 0:
             return RichText("—", style="dim", justify="right")
-        avg_bps = (no_total_bps * 100) // no_count_fp100
+        avg_bps = (no_total_bps * ONE_CONTRACT_FP100) // no_count_fp100
         return RichText(f"{bps_to_cents_round(avg_bps)}¢", justify="right")
 
     @staticmethod
     def _fmt_qty(leg: Settlement | None) -> RichText:
         if leg is None or leg.no_count_fp100 == 0:
             return RichText("—", style="dim", justify="right")
-        return RichText(str(leg.no_count_fp100 // 100), justify="right")
+        return RichText(str(leg.no_count_fp100 // ONE_CONTRACT_FP100), justify="right")
 
     @staticmethod
     def _fmt_cost(leg: Settlement | None) -> RichText:

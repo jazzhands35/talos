@@ -11,6 +11,8 @@ from talos.models.market import OrderBookLevel
 from talos.models.strategy import ArbPair, Opportunity
 from talos.orderbook import OrderBookManager
 from talos.units import (
+    ONE_CENT_BPS,
+    ONE_CONTRACT_FP100,
     ONE_DOLLAR_BPS,
     bps_to_cents_round,
     complement_bps,
@@ -144,7 +146,10 @@ class ArbitrageScanner:
         opposite = "yes" if side == "no" else "no"
         level = self._books.best_ask(ticker, side=opposite)
         if level:
-            return 100 - level.price_bps // 100, level.quantity_fp100 // 100
+            return (
+                100 - level.price_bps // ONE_CENT_BPS,
+                level.quantity_fp100 // ONE_CONTRACT_FP100,
+            )
         return None
 
     def _derive_price_bps(
@@ -183,12 +188,18 @@ class ArbitrageScanner:
             if existing is not None:
                 update: dict[str, object] = {"timestamp": datetime.now(UTC).isoformat()}
                 pa, qa = (
-                    (no_a.price_bps // 100, no_a.quantity_fp100 // 100)
+                    (
+                        no_a.price_bps // ONE_CENT_BPS,
+                        no_a.quantity_fp100 // ONE_CONTRACT_FP100,
+                    )
                     if no_a
                     else (None, 0)
                 )
                 pb, qb = (
-                    (no_b.price_bps // 100, no_b.quantity_fp100 // 100)
+                    (
+                        no_b.price_bps // ONE_CENT_BPS,
+                        no_b.quantity_fp100 // ONE_CONTRACT_FP100,
+                    )
                     if no_b
                     else (None, 0)
                 )
@@ -281,10 +292,10 @@ class ArbitrageScanner:
         # Preserve the historical float-cents semantics of ``fee_edge``:
         # pass the cent-rounded prices through the legacy formula so
         # whole-cent tests continue to see the exact same fractional value.
-        no_a_cents = pa_bps // 100
-        no_b_cents = pb_bps // 100
-        no_a_qty = qa_fp100 // 100
-        no_b_qty = qb_fp100 // 100
+        no_a_cents = pa_bps // ONE_CENT_BPS
+        no_b_cents = pb_bps // ONE_CENT_BPS
+        no_a_qty = qa_fp100 // ONE_CONTRACT_FP100
+        no_b_qty = qb_fp100 // ONE_CONTRACT_FP100
         fee_edge = fee_adjusted_edge(no_a_cents, no_b_cents, rate=pair.fee_rate)
         tradeable_qty = min(no_a_qty, no_b_qty)
         tradeable_qty_fp100 = min(qa_fp100, qb_fp100)

@@ -16,7 +16,7 @@ from talos.errors import KalshiAPIError, KalshiRateLimitError
 from talos.fees import max_profitable_price
 from talos.models.proposal import Proposal, ProposalKey, ProposedRebalance
 from talos.position_ledger import PositionLedger, Side
-from talos.units import ONE_CONTRACT_FP100, bps_to_cents_round
+from talos.units import ONE_CENT_BPS, ONE_CONTRACT_FP100, bps_to_cents_round
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
@@ -585,16 +585,16 @@ async def execute_rebalance(
             if pos_a or pos_b:
                 ledger.sync_from_positions(
                     {
-                        Side.A: abs(pos_a.position_fp100 // 100) if pos_a else 0,
-                        Side.B: abs(pos_b.position_fp100 // 100) if pos_b else 0,
+                        Side.A: abs(pos_a.position_fp100 // ONE_CONTRACT_FP100) if pos_a else 0,
+                        Side.B: abs(pos_b.position_fp100 // ONE_CONTRACT_FP100) if pos_b else 0,
                     },
                     {
-                        Side.A: pos_a.total_traded_bps // 100 if pos_a else 0,
-                        Side.B: pos_b.total_traded_bps // 100 if pos_b else 0,
+                        Side.A: pos_a.total_traded_bps // ONE_CENT_BPS if pos_a else 0,
+                        Side.B: pos_b.total_traded_bps // ONE_CENT_BPS if pos_b else 0,
                     },
                     {
-                        Side.A: pos_a.fees_paid_bps // 100 if pos_a else 0,
-                        Side.B: pos_b.fees_paid_bps // 100 if pos_b else 0,
+                        Side.A: pos_a.fees_paid_bps // ONE_CENT_BPS if pos_a else 0,
+                        Side.B: pos_b.fees_paid_bps // ONE_CENT_BPS if pos_b else 0,
                     },
                 )
         except Exception as e:

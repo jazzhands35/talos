@@ -28,6 +28,7 @@ from talos.milestones import MilestoneResolver
 from talos.models.proposal import ProposalKey
 from talos.models.strategy import BidConfirmation
 from talos.scanner import ArbitrageScanner
+from talos.units import ONE_CENT_BPS, ONE_CONTRACT_FP100
 from talos.tree_metadata import TreeMetadataStore
 from talos.ui.event_review import EventReviewScreen
 from talos.ui.proposal_panel import ProposalPanel
@@ -333,8 +334,8 @@ class TalosApp(App):
         resting_orders = [
             {
                 "ticker": o.ticker,
-                "no_price": o.no_price_bps // 100,
-                "remaining": o.remaining_count_fp100 // 100,
+                "no_price": o.no_price_bps // ONE_CENT_BPS,
+                "remaining": o.remaining_count_fp100 // ONE_CONTRACT_FP100,
                 "side": o.side,
                 "status": o.status,
             }
@@ -623,7 +624,9 @@ class TalosApp(App):
                 if pos is None:
                     continue
                 our_expected = int(pos.locked_profit_cents)
-                disc = reconcile_event(our_expected, s.revenue_bps // 100, s.event_ticker)
+                disc = reconcile_event(
+                    our_expected, s.revenue_bps // ONE_CENT_BPS, s.event_ticker
+                )
                 if disc is not None and abs(disc["difference"]) > 5:
                     self.query_one(ActivityLog).log_activity(
                         f"P&L DISCREPANCY {s.event_ticker}: "
@@ -860,32 +863,32 @@ class TalosApp(App):
                     "title": ev.title,
                     "sub_title": ev.sub_title,
                     "volume_a": (
-                        (active_mkts[0].volume_24h_fp100 or 0) // 100
+                        (active_mkts[0].volume_24h_fp100 or 0) // ONE_CONTRACT_FP100
                         if len(active_mkts) > 0
                         else 0
                     ),
                     "volume_b": (
-                        (active_mkts[1].volume_24h_fp100 or 0) // 100
+                        (active_mkts[1].volume_24h_fp100 or 0) // ONE_CONTRACT_FP100
                         if len(active_mkts) > 1
                         else 0
                     ),
                     "no_bid_a": (
-                        (active_mkts[0].no_bid_bps or 0) // 100
+                        (active_mkts[0].no_bid_bps or 0) // ONE_CENT_BPS
                         if len(active_mkts) > 0
                         else 0
                     ),
                     "no_ask_a": (
-                        (active_mkts[0].no_ask_bps or 0) // 100
+                        (active_mkts[0].no_ask_bps or 0) // ONE_CENT_BPS
                         if len(active_mkts) > 0
                         else 0
                     ),
                     "no_bid_b": (
-                        (active_mkts[1].no_bid_bps or 0) // 100
+                        (active_mkts[1].no_bid_bps or 0) // ONE_CENT_BPS
                         if len(active_mkts) > 1
                         else 0
                     ),
                     "no_ask_b": (
-                        (active_mkts[1].no_ask_bps or 0) // 100
+                        (active_mkts[1].no_ask_bps or 0) // ONE_CENT_BPS
                         if len(active_mkts) > 1
                         else 0
                     ),

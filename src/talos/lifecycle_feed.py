@@ -7,6 +7,7 @@ from collections.abc import Callable
 import structlog
 
 from talos.models.ws import MarketLifecycleMessage
+from talos.units import ONE_CENT_BPS
 from talos.ws_client import KalshiWSClient
 
 logger = structlog.get_logger()
@@ -55,7 +56,7 @@ class LifecycleFeed:
                 return
             # Callback expects cents (legacy contract); round from exact bps.
             self.on_determined(
-                ticker, msg.result, msg.settlement_value_bps // 100
+                ticker, msg.result, msg.settlement_value_bps // ONE_CENT_BPS
             )
         elif event_type == "settled" and self.on_settled:
             self.on_settled(ticker)

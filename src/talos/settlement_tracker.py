@@ -15,7 +15,7 @@ from zoneinfo import ZoneInfo
 import structlog
 
 from talos.models.portfolio import Settlement
-from talos.units import ONE_CONTRACT_FP100, bps_to_cents_round
+from talos.units import ONE_CENT_BPS, ONE_CONTRACT_FP100, bps_to_cents_round
 
 logger = structlog.get_logger()
 
@@ -145,12 +145,12 @@ class SettlementCache:
                 ticker=r["ticker"],
                 event_ticker=r["event_ticker"],
                 market_result=r["market_result"] or "",
-                revenue_bps=revenue_cents * 100,
-                fee_cost_bps=fee_cost_cents * 100,
+                revenue_bps=revenue_cents * ONE_CENT_BPS,
+                fee_cost_bps=fee_cost_cents * ONE_CENT_BPS,
                 no_count_fp100=no_count_whole * ONE_CONTRACT_FP100,
-                no_total_cost_bps=no_total_cost_cents * 100,
+                no_total_cost_bps=no_total_cost_cents * ONE_CENT_BPS,
                 yes_count_fp100=yes_count_whole * ONE_CONTRACT_FP100,
-                yes_total_cost_bps=yes_total_cost_cents * 100,
+                yes_total_cost_bps=yes_total_cost_cents * ONE_CENT_BPS,
                 settled_time=r["settled_time"] or "",
             )
             result.append((s, r.get("est_pnl_cents"), r.get("sub_title", "")))

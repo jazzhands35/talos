@@ -1,9 +1,7 @@
 """AST-based discipline tests locking money-unit invariants from the
 bps/fp100 migration.
 
-This file currently locks two narrow-scope invariants that hold
-regardless of whether legacy cents/contracts paths are still present
-in the codebase:
+Three invariants enforced on every import of :mod:`talos`:
 
   1. TRUST BOUNDARY: no ``float()`` calls on Kalshi wire payloads
      (identifiers ending ``_dollars`` or ``_fp``). Wire values MUST go
@@ -20,12 +18,13 @@ in the codebase:
      during the reconcile mutation phase that re-opens the
      interleaving race v11 was designed to close.
 
-The full Section 9 AST test (banning raw ``100``/``10_000`` arithmetic
-on money identifiers, banning ``:.2f``/``:.4f`` format specs on money
-identifiers) remains a potential follow-up. The ``dollars_to_cents`` /
-``fp_to_int`` deprecated helpers referenced in earlier drafts of this
-docstring were deleted in Task 13b — no code or ban-list entry is
-needed for them anymore.
+  3. UNIT DISCIPLINE (spec Section 9): no raw integer literal ``100``
+     or ``10_000`` as an arithmetic operand on a money-matching
+     identifier, and no ``:.2f`` / ``:.4f`` format specs on a
+     money-matching identifier. Use named constants from
+     :mod:`talos.units` (``ONE_CENT_BPS``, ``ONE_DOLLAR_BPS``) and the
+     display-format helpers instead. Allowlist entries below carry a
+     one-line rationale.
 """
 
 from __future__ import annotations
@@ -145,3 +144,177 @@ def test_persist_games_now_is_sync_not_async() -> None:
         "The v11 atomicity argument (spec Section 8a) requires persist_cb "
         "to run inside the reconcile mutation's single sync block."
     )
+
+
+# ── Section 9 — Unit Discipline ────────────────────────────────────
+#
+# Identifiers whose names contain any of these substrings (case-insensitive)
+# are considered MONEY identifiers. Literal ``100`` / ``10_000`` arithmetic
+# on them, and lossy ``:.2f`` / ``:.4f`` format specs on them, are banned
+# outside the allowlist. Use named constants (``ONE_CENT_BPS``,
+# ``ONE_DOLLAR_BPS``, ``ONE_CONTRACT_FP100``) and display helpers
+# (``format_bps_as_dollars_display``, ``format_bps_as_cents``,
+# ``format_fp100_as_contracts``) from :mod:`talos.units` instead.
+_MONEY_IDENT_SUBSTRINGS = (
+    "price",
+    "cost",
+    "bps",
+    "fp100",
+    "fees",
+    "edge",
+    "pnl",
+    "exposure",
+    "revenue",
+    "balance",
+    "traded",
+    "resting",
+    "filled",
+    "closed",
+)
+
+_BANNED_LITERALS = {100, 10_000}
+_BANNED_FORMAT_SUFFIXES = (".2f", ".4f")
+
+# Allowlist entries: (posix_path, lineno). Keep small. Each entry
+# documents a legitimate exception. Two legit categories at migration
+# landing time:
+#
+# 1. ``fees.py`` still exposes the pre-migration cents-scale API as a
+#    convenience layer alongside the bps-aware _bps siblings. Inside
+#    those legacy functions, literal ``100`` IS cents-per-dollar /
+#    cents-per-unit — the real thing, not a bps proxy. These functions
+#    will be deleted when the last caller migrates, but that's post-PR.
+# 2. ``ui/event_review.py`` and ``ui/widgets.py`` display cents-valued
+#    fields from models that are NOT part of the bps migration
+#    (EventPositionSummary.locked_profit_cents / exposure_cents,
+#    PortfolioPanel._cash / _exposure / _locked internal cents storage,
+#    LegSummary.total_fill_cost cents). These are display-only `/100` to
+#    convert whole cents into dollars for render. Using ``ONE_CENT_BPS``
+#    would be semantically wrong (that constant is "bps per cent", not
+#    "cents per dollar") and would mislead a reader about what layer
+#    the value is in.
+_ALLOWLIST: frozenset[tuple[str, int]] = frozenset(
+    {
+        # Category 1: fees.py legacy cents-scale convenience API.
+        ("src/talos/fees.py", 66),   # quadratic_fee: cents × (100 - cents) × rate / 100
+        ("src/talos/fees.py", 109),  # max_profitable_price: other_cost budget in cents
+        ("src/talos/fees.py", 180),  # scenario_pnl: filled * 100 cents-per-contract payout
+        ("src/talos/fees.py", 181),  # scenario_pnl: mirror
+        # Category 2: legacy cents display on non-migrated models.
+        ("src/talos/ui/event_review.py", 102),  # pnl (cents) → $N.NN display
+        ("src/talos/ui/event_review.py", 119),  # pnl (cents) → $N.NN display
+        ("src/talos/ui/event_review.py", 120),  # revenue (cents) → $N.NN display
+        ("src/talos/ui/event_review.py", 398),  # exposure_cents → $N.NN display
+        ("src/talos/ui/widgets.py", 50),        # kalshi_pnl (cents) → $N.NN display
+        ("src/talos/ui/widgets.py", 250),       # pnl_cents → $N.NN display
+        ("src/talos/ui/widgets.py", 801),       # exposure (cents) → $N.NN display
+        ("src/talos/ui/widgets.py", 906),       # _exposure (cents) → $N.NN display
+    }
+)
+
+
+def _is_money_identifier(node: ast.AST) -> str | None:
+    """Return lowercased identifier name if ``node`` names a money field."""
+    name: str | None = None
+    if isinstance(node, ast.Name):
+        name = node.id
+    elif isinstance(node, ast.Attribute):
+        name = node.attr
+    if name is None:
+        return None
+    lower = name.lower()
+    if any(sub in lower for sub in _MONEY_IDENT_SUBSTRINGS):
+        return name
+    return None
+
+
+def _skip_file(py: Path) -> bool:
+    """units.py is the single source of truth for unit arithmetic.
+    _converters.py re-exports units.py parsers (thin aliases, allowed).
+    fees.py uses units constants throughout — all arithmetic is in bps
+    already, but its signatures take ``rate`` multipliers like ``0.07`` and
+    the formula has literal ``100`` that is LEGIT cents-math on
+    whole-cent prices (not a money-unit bug — operator-facing API).
+    """
+    return py.name in {"units.py", "_converters.py"}
+
+
+def test_no_raw_unit_arithmetic_on_money_identifiers() -> None:
+    """Section 9 ban #1: no ``money_ident * 100`` or ``money_ident / 100``.
+
+    Use :data:`talos.units.ONE_CENT_BPS` / :data:`ONE_DOLLAR_BPS` /
+    :data:`ONE_CONTRACT_FP100` as the scale constants instead. The
+    literal ``100`` is indistinguishable from cents-scaled math at the
+    AST level, and the whole migration exists because cents-scaled
+    math silently drifts on sub-cent inputs.
+    """
+    violations: list[str] = []
+    for py in _SRC_ROOT.rglob("*.py"):
+        if _skip_file(py):
+            continue
+        tree = ast.parse(py.read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.BinOp):
+                continue
+            # Check each operand pair (literal, identifier) in either order.
+            for literal_side, other_side in (
+                (node.left, node.right),
+                (node.right, node.left),
+            ):
+                if not (
+                    isinstance(literal_side, ast.Constant)
+                    and literal_side.value in _BANNED_LITERALS
+                ):
+                    continue
+                ident = _is_money_identifier(other_side)
+                if ident is None:
+                    continue
+                rel = py.relative_to(_SRC_ROOT.parent.parent).as_posix()
+                if (rel, node.lineno) in _ALLOWLIST:
+                    continue
+                violations.append(
+                    f"{rel}:{node.lineno}: {ident} * / / {literal_side.value} — use "
+                    f"named constants from talos.units (ONE_CENT_BPS=100, "
+                    f"ONE_DOLLAR_BPS=10_000, ONE_CONTRACT_FP100=100) instead."
+                )
+    assert not violations, "\n".join(violations)
+
+
+def test_no_lossy_format_spec_on_money_identifiers() -> None:
+    """Section 9 ban #2: no ``f"{money_ident:.2f}"`` / ``:.4f``.
+
+    ``:.2f`` on a bps value displays 100.00× the actual dollar amount.
+    ``:.4f`` on a cents value displays the wrong precision. Both are
+    foot-guns. Use the display helpers from :mod:`talos.units`.
+    """
+    violations: list[str] = []
+    for py in _SRC_ROOT.rglob("*.py"):
+        if _skip_file(py):
+            continue
+        tree = ast.parse(py.read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.FormattedValue):
+                continue
+            if node.format_spec is None:
+                continue
+            # format_spec is a JoinedStr whose Constant values carry the
+            # literal format suffix like ".2f".
+            spec_text = ""
+            if isinstance(node.format_spec, ast.JoinedStr):
+                for piece in node.format_spec.values:
+                    if isinstance(piece, ast.Constant) and isinstance(piece.value, str):
+                        spec_text += piece.value
+            if not any(spec_text.endswith(s) for s in _BANNED_FORMAT_SUFFIXES):
+                continue
+            ident = _is_money_identifier(node.value)
+            if ident is None:
+                continue
+            rel = py.relative_to(_SRC_ROOT.parent.parent).as_posix()
+            if (rel, node.lineno) in _ALLOWLIST:
+                continue
+            violations.append(
+                f"{rel}:{node.lineno}: f\"{{{ident}:{spec_text}}}\" — use "
+                f"talos.units.format_bps_as_dollars_display / format_bps_as_cents "
+                f"/ format_fp100_as_contracts instead."
+            )
+    assert not violations, "\n".join(violations)

@@ -59,6 +59,7 @@ from talos.scanner import ArbitrageScanner
 from talos.ticker_feed import TickerFeed
 from talos.top_of_market import TopOfMarketTracker
 from talos.units import (
+    ONE_CENT_BPS,
     ONE_CONTRACT_FP100,
     ONE_DOLLAR_BPS,
     bps_to_cents_round,
@@ -1322,8 +1323,8 @@ class TradingEngine:
         """Fetch balance only — fast, independent of order/position sync."""
         try:
             balance = await self._rest.get_balance()
-            self._balance = balance.balance_bps // 100
-            self._portfolio_value = balance.portfolio_value_bps // 100
+            self._balance = balance.balance_bps // ONE_CENT_BPS
+            self._portfolio_value = balance.portfolio_value_bps // ONE_CENT_BPS
         except (KalshiAPIError, KalshiRateLimitError, httpx.HTTPError):
             logger.warning("balance_fetch_failed", exc_info=True)
 
@@ -1431,16 +1432,16 @@ class TradingEngine:
                     if not ledger.owns_tickers(pair.ticker_a, pair.ticker_b):
                         continue
                     fills = {
-                        Side.A: abs(pos_a.position_fp100 // 100) if pos_a else 0,
-                        Side.B: abs(pos_b.position_fp100 // 100) if pos_b else 0,
+                        Side.A: abs(pos_a.position_fp100 // ONE_CONTRACT_FP100) if pos_a else 0,
+                        Side.B: abs(pos_b.position_fp100 // ONE_CONTRACT_FP100) if pos_b else 0,
                     }
                     costs = {
-                        Side.A: pos_a.total_traded_bps // 100 if pos_a else 0,
-                        Side.B: pos_b.total_traded_bps // 100 if pos_b else 0,
+                        Side.A: pos_a.total_traded_bps // ONE_CENT_BPS if pos_a else 0,
+                        Side.B: pos_b.total_traded_bps // ONE_CENT_BPS if pos_b else 0,
                     }
                     fees = {
-                        Side.A: pos_a.fees_paid_bps // 100 if pos_a else 0,
-                        Side.B: pos_b.fees_paid_bps // 100 if pos_b else 0,
+                        Side.A: pos_a.fees_paid_bps // ONE_CENT_BPS if pos_a else 0,
+                        Side.B: pos_b.fees_paid_bps // ONE_CENT_BPS if pos_b else 0,
                     }
                     ledger.sync_from_positions(fills, costs, fees)
 
@@ -2148,7 +2149,7 @@ class TradingEngine:
                 for side, ticker in ((Side.A, pair.ticker_a), (Side.B, pair.ticker_b)):
                     pos = pos_map.get(ticker)
                     if pos is not None:
-                        pos_fills[side] = abs(pos.position_fp100 // 100)
+                        pos_fills[side] = abs(pos.position_fp100 // ONE_CONTRACT_FP100)
             # Authoritative fill count = max of all sources.
             # Ledger persists fills that may have dropped from Kalshi's
             # orders API time window (old fully-filled orders expire).
@@ -2901,7 +2902,7 @@ class TradingEngine:
             ask_level = self._feed.book_manager.best_ask(ticker, side=kalshi_side)
             if (
                 ask_level is not None
-                and improved_price >= ask_level.price_bps // 100
+                and improved_price >= ask_level.price_bps // ONE_CENT_BPS
             ):
                 continue
 
@@ -4290,7 +4291,7 @@ class TradingEngine:
         ask_level = self._feed.book_manager.best_ask(qi.ticker, side=qi.kalshi_side)
         if (
             ask_level is not None
-            and qi.improved_price >= ask_level.price_bps // 100
+            and qi.improved_price >= ask_level.price_bps // ONE_CENT_BPS
         ):
             self._notify(
                 f"Queue improve BLOCKED: {name} {qi.improved_price}c would cross spread",
@@ -4414,16 +4415,16 @@ class TradingEngine:
                 pos_a = pos_map.get(pair.ticker_a)
                 pos_b = pos_map.get(pair.ticker_b)
                 fills = {
-                    Side.A: abs(pos_a.position_fp100 // 100) if pos_a else 0,
-                    Side.B: abs(pos_b.position_fp100 // 100) if pos_b else 0,
+                    Side.A: abs(pos_a.position_fp100 // ONE_CONTRACT_FP100) if pos_a else 0,
+                    Side.B: abs(pos_b.position_fp100 // ONE_CONTRACT_FP100) if pos_b else 0,
                 }
                 costs = {
-                    Side.A: pos_a.total_traded_bps // 100 if pos_a else 0,
-                    Side.B: pos_b.total_traded_bps // 100 if pos_b else 0,
+                    Side.A: pos_a.total_traded_bps // ONE_CENT_BPS if pos_a else 0,
+                    Side.B: pos_b.total_traded_bps // ONE_CENT_BPS if pos_b else 0,
                 }
                 fees = {
-                    Side.A: pos_a.fees_paid_bps // 100 if pos_a else 0,
-                    Side.B: pos_b.fees_paid_bps // 100 if pos_b else 0,
+                    Side.A: pos_a.fees_paid_bps // ONE_CENT_BPS if pos_a else 0,
+                    Side.B: pos_b.fees_paid_bps // ONE_CENT_BPS if pos_b else 0,
                 }
                 ledger.sync_from_positions(fills, costs, fees)
             logger.info(
@@ -4906,7 +4907,7 @@ class TradingEngine:
             summary.status = self._compute_event_status(summary.event_ticker)
             ep = self._event_positions.get(summary.event_ticker)
             if ep is not None:
-                summary.kalshi_pnl = ep.realized_pnl_bps // 100
+                summary.kalshi_pnl = ep.realized_pnl_bps // ONE_CENT_BPS
 
         # Compute status for ALL pairs — use dict instead of O(N²) scan
         summary_index = {s.event_ticker: s for s in self._position_summaries}
