@@ -6,11 +6,48 @@ from datetime import UTC, datetime
 
 import structlog
 
-from talos.fees import fee_adjusted_edge
+from talos.fees import fee_adjusted_edge, fee_adjusted_edge_bps
+from talos.models.market import OrderBookLevel
 from talos.models.strategy import ArbPair, Opportunity
 from talos.orderbook import OrderBookManager
+from talos.units import (
+    ONE_CENT_BPS,
+    ONE_DOLLAR_BPS,
+    bps_to_cents_round,
+    cents_to_bps,
+    complement_bps,
+    contracts_to_fp100,
+)
 
 logger = structlog.get_logger()
+
+
+def _level_price_bps(level: OrderBookLevel) -> int:
+    """Exact bps price for a level, tolerating the legacy WS path.
+
+    Direct ``OrderBookLevel(price=..., quantity=...)`` construction (used
+    by ``orderbook.py`` when parsing integer-cents WS snapshots/deltas)
+    leaves ``price_bps`` at its default of 0. When that happens, fall
+    back to ``cents_to_bps(level.price)`` so whole-cent markets retain
+    correct behavior. Sub-cent markets must populate ``price_bps``
+    directly at the wire boundary (via Market/_dollars parsing) — the
+    fallback is lossy by construction.
+    """
+    return level.price_bps if level.price_bps else cents_to_bps(level.price)
+
+
+def _level_quantity_fp100(level: OrderBookLevel) -> int:
+    """Exact fp100 quantity for a level, tolerating the legacy WS path.
+
+    Mirrors :func:`_level_price_bps` — falls back to
+    ``contracts_to_fp100(level.quantity)`` when ``quantity_fp100`` is 0
+    (the default for levels built by the whole-contract WS path).
+    """
+    return (
+        level.quantity_fp100
+        if level.quantity_fp100
+        else contracts_to_fp100(level.quantity)
+    )
 
 
 class ArbitrageScanner:
@@ -83,6 +120,7 @@ class ArbitrageScanner:
                 qty_a=0,
                 qty_b=0,
                 raw_edge=0,
+                raw_edge_bps=0,
                 tradeable_qty=0,
                 timestamp=datetime.now(UTC).isoformat(),
                 close_time=close_time,
@@ -130,17 +168,38 @@ class ArbitrageScanner:
             return 100 - level.price, level.quantity
         return None
 
+    def _derive_price_bps(
+        self, ticker: str, side: str
+    ) -> tuple[int, int] | None:
+        """Bps/fp100 sibling of :meth:`_derive_price`.
+
+        Implied NO-ask in bps is ``ONE_DOLLAR_BPS - best_yes_bid_bps``.
+        Falls back to ``cents_to_bps(level.price)`` and
+        ``contracts_to_fp100(level.quantity)`` when the OrderBookLevel was
+        constructed from the legacy integer-cents WS path (``price_bps`` /
+        ``quantity_fp100`` default to 0 in that case — see
+        ``src/talos/orderbook.py::_parse_levels_sorted``).
+        """
+        opposite = "yes" if side == "no" else "no"
+        level = self._books.best_ask(ticker, side=opposite)
+        if level:
+            return (
+                complement_bps(_level_price_bps(level)),
+                _level_quantity_fp100(level),
+            )
+        return None
+
     def _evaluate_pair(self, pair: ArbPair) -> None:
         """Check one pair for arbitrage opportunity."""
         # Phase 0 admission guard — skip pairs whose shape violates the
         # bps/fp100 migration invariants (fractional trading or sub-cent
-        # tick). Local import avoids a circular dep with game_manager.
+        # tick). ``ONE_CENT_BPS`` is now imported from ``talos.units`` at
+        # module scope; the sentinel value is identical to
+        # ``game_manager.ONE_CENT_BPS`` (100 bps).
         # Assumes ArbPair shape fields are immutable post-registration;
         # early return before _sorted_cache reset is safe under that
         # invariant. Do NOT mutate pair.fractional_trading_enabled or
         # pair.tick_bps after add_pair without also invalidating the cache.
-        from talos.game_manager import ONE_CENT_BPS
-
         if pair.fractional_trading_enabled or pair.tick_bps < ONE_CENT_BPS:
             if pair.event_ticker not in self._admission_warned:
                 self._admission_warned.add(pair.event_ticker)
@@ -168,24 +227,61 @@ class ArbitrageScanner:
                 update: dict[str, object] = {"timestamp": datetime.now(UTC).isoformat()}
                 pa, qa = (no_a.price, no_a.quantity) if no_a else (None, 0)
                 pb, qb = (no_b.price, no_b.quantity) if no_b else (None, 0)
+                # Parallel bps / fp100 extraction — see _level_price_bps.
+                pa_bps: int | None = (
+                    _level_price_bps(no_a) if no_a else None
+                )
+                qa_fp100: int = (
+                    _level_quantity_fp100(no_a) if no_a else 0
+                )
+                pb_bps: int | None = (
+                    _level_price_bps(no_b) if no_b else None
+                )
+                qb_fp100: int = (
+                    _level_quantity_fp100(no_b) if no_b else 0
+                )
                 if pa is None:
                     derived = self._derive_price(pair.ticker_a, pair.side_a)
                     if derived:
                         pa, qa = derived
+                    derived_bps = self._derive_price_bps(
+                        pair.ticker_a, pair.side_a
+                    )
+                    if derived_bps:
+                        pa_bps, qa_fp100 = derived_bps
                 if pb is None:
                     derived = self._derive_price(pair.ticker_b, pair.side_b)
                     if derived:
                         pb, qb = derived
+                    derived_bps = self._derive_price_bps(
+                        pair.ticker_b, pair.side_b
+                    )
+                    if derived_bps:
+                        pb_bps, qb_fp100 = derived_bps
                 if pa is not None:
                     update["no_a"] = pa
                     update["qty_a"] = qa
                 if pb is not None:
                     update["no_b"] = pb
                     update["qty_b"] = qb
+                if pa_bps is not None:
+                    update["no_a_bps"] = pa_bps
+                    update["qty_a_fp100"] = qa_fp100
+                if pb_bps is not None:
+                    update["no_b_bps"] = pb_bps
+                    update["qty_b_fp100"] = qb_fp100
                 if pa is not None and pb is not None:
                     update["raw_edge"] = 100 - pa - pb
                     update["fee_edge"] = fee_adjusted_edge(pa, pb, rate=pair.fee_rate)
                     update["tradeable_qty"] = min(qa, qb)
+                if pa_bps is not None and pb_bps is not None:
+                    update["raw_edge_bps"] = (
+                        ONE_DOLLAR_BPS - pa_bps - pb_bps
+                    )
+                    update["fee_edge_bps"] = fee_adjusted_edge_bps(
+                        pa_bps, pb_bps, rate=pair.fee_rate
+                    )
+                    update["tradeable_qty_fp100"] = min(qa_fp100, qb_fp100)
                 self._all_snapshots[pair.event_ticker] = existing.model_copy(
                     update=update
                 )
@@ -208,7 +304,21 @@ class ArbitrageScanner:
             )
             return
 
-        raw_edge = 100 - no_a.price - no_b.price
+        # Exact bps edge — authoritative. Legacy cents `raw_edge` is a
+        # cents-rounded view of the exact edge (lossy on sub-cent markets).
+        pa_bps = _level_price_bps(no_a)
+        pb_bps = _level_price_bps(no_b)
+        qa_fp100 = _level_quantity_fp100(no_a)
+        qb_fp100 = _level_quantity_fp100(no_b)
+        raw_edge_bps = ONE_DOLLAR_BPS - pa_bps - pb_bps
+        raw_edge = bps_to_cents_round(raw_edge_bps)
+        fee_edge_bps = fee_adjusted_edge_bps(pa_bps, pb_bps, rate=pair.fee_rate)
+        # Preserve the historical float-cents semantics of ``fee_edge``:
+        # pass the legacy integer-cent prices through the legacy formula so
+        # whole-cent tests continue to see the exact same fractional value.
+        fee_edge = fee_adjusted_edge(no_a.price, no_b.price, rate=pair.fee_rate)
+        tradeable_qty = min(no_a.quantity, no_b.quantity)
+        tradeable_qty_fp100 = min(qa_fp100, qb_fp100)
 
         opp = Opportunity(
             event_ticker=pair.event_ticker,
@@ -219,20 +329,34 @@ class ArbitrageScanner:
             qty_a=no_a.quantity,
             qty_b=no_b.quantity,
             raw_edge=raw_edge,
-            fee_edge=fee_adjusted_edge(no_a.price, no_b.price, rate=pair.fee_rate),
-            tradeable_qty=min(no_a.quantity, no_b.quantity),
+            fee_edge=fee_edge,
+            tradeable_qty=tradeable_qty,
             timestamp=datetime.now(UTC).isoformat(),
             close_time=pair.close_time,
             fee_rate=pair.fee_rate,
+            no_a_bps=pa_bps,
+            no_b_bps=pb_bps,
+            qty_a_fp100=qa_fp100,
+            qty_b_fp100=qb_fp100,
+            raw_edge_bps=raw_edge_bps,
+            fee_edge_bps=fee_edge_bps,
+            tradeable_qty_fp100=tradeable_qty_fp100,
         )
         self._all_snapshots[pair.event_ticker] = opp
 
-        if raw_edge > 0:
+        # Admission check: gate on the exact bps edge, not the lossy
+        # cents view. On sub-cent markets (e.g. DJT at 3.8¢/96.1¢)
+        # ``raw_edge`` rounds to 0 while ``raw_edge_bps`` preserves the
+        # true edge (10 bps = 0.10¢). Without this fix, sub-cent
+        # opportunities are silently dropped — the entire point of the
+        # Task 7a migration.
+        if raw_edge_bps > 0:
             self._opportunities[pair.event_ticker] = opp
             logger.debug(
                 "scanner_opportunity",
                 event_ticker=pair.event_ticker,
                 edge=raw_edge,
+                edge_bps=raw_edge_bps,
                 qty=opp.tradeable_qty,
             )
         else:
@@ -244,10 +368,18 @@ class ArbitrageScanner:
 
     @property
     def opportunities(self) -> list[Opportunity]:
-        """Current opportunities, sorted by raw_edge descending."""
+        """Current opportunities, sorted by ``raw_edge_bps`` descending.
+
+        Sort key migrated from ``raw_edge`` (cents, lossy) to
+        ``raw_edge_bps`` (exact) so sub-cent opportunities order correctly
+        against each other. For whole-cent markets the ordering is
+        identical (each cent of edge corresponds to 100 bps).
+        """
         if self._sorted_cache is None:
             self._sorted_cache = sorted(
-                self._opportunities.values(), key=lambda o: o.raw_edge, reverse=True
+                self._opportunities.values(),
+                key=lambda o: o.raw_edge_bps,
+                reverse=True,
             )
         return self._sorted_cache
 

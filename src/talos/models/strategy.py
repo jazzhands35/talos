@@ -40,11 +40,22 @@ class ArbPair(BaseModel):
 
 
 class Opportunity(BaseModel):
-    """A detected NO+NO arbitrage opportunity."""
+    """A detected NO+NO arbitrage opportunity.
+
+    Dual-unit migration (bps/fp100): legacy integer-cents / integer-contract
+    fields (``no_a``, ``raw_edge``, ``qty_a``, ...) are shipped alongside
+    exact-precision bps / fp100 siblings (``no_a_bps``, ``raw_edge_bps``,
+    ``qty_a_fp100``, ...). Scanner populates both; legacy consumers
+    (bid_adjuster, opportunity_proposer) still read the cents fields and
+    see cents-rounded views of the exact edge. Legacy fields are deleted
+    in Task 13 of ``docs/superpowers/specs/2026-04-17-bps-fp100-unit-migration-design.md``
+    once all callers have migrated to the ``_bps`` / ``_fp100`` siblings.
+    """
 
     event_ticker: str
     ticker_a: str
     ticker_b: str
+    # Legacy integer-cents / integer-contract fields (lossy for sub-cent).
     no_a: int
     no_b: int
     qty_a: int
@@ -55,11 +66,24 @@ class Opportunity(BaseModel):
     timestamp: str
     close_time: str | None = None
     fee_rate: float = 0.0175
+    # New bps / fp100 fields (exact precision — preferred).
+    no_a_bps: int = 0
+    no_b_bps: int = 0
+    qty_a_fp100: int = 0
+    qty_b_fp100: int = 0
+    raw_edge_bps: int = 0
+    fee_edge_bps: int = 0
+    tradeable_qty_fp100: int = 0
 
     @property
     def cost(self) -> int:
         """Total NO cost per contract in cents."""
         return self.no_a + self.no_b
+
+    @property
+    def cost_bps(self) -> int:
+        """Total NO cost per contract in bps."""
+        return self.no_a_bps + self.no_b_bps
 
 
 class BidConfirmation(BaseModel):
