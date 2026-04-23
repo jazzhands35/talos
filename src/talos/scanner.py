@@ -11,7 +11,6 @@ from talos.models.market import OrderBookLevel
 from talos.models.strategy import ArbPair, Opportunity
 from talos.orderbook import OrderBookManager
 from talos.units import (
-    ONE_CENT_BPS,
     ONE_DOLLAR_BPS,
     bps_to_cents_round,
     cents_to_bps,
@@ -66,7 +65,6 @@ class ArbitrageScanner:
         self._all_snapshots: dict[str, Opportunity] = {}
         self._sorted_cache: list[Opportunity] | None = None
         self._next_id: int = 1
-        self._admission_warned: set[str] = set()
 
     def add_pair(
         self,
@@ -190,31 +188,14 @@ class ArbitrageScanner:
         return None
 
     def _evaluate_pair(self, pair: ArbPair) -> None:
-        """Check one pair for arbitrage opportunity."""
-        # Phase 0 admission guard — skip pairs whose shape violates the
-        # bps/fp100 migration invariants (fractional trading or sub-cent
-        # tick). ``ONE_CENT_BPS`` is now imported from ``talos.units`` at
-        # module scope; the sentinel value is identical to
-        # ``game_manager.ONE_CENT_BPS`` (100 bps).
-        # Assumes ArbPair shape fields are immutable post-registration;
-        # early return before _sorted_cache reset is safe under that
-        # invariant. Do NOT mutate pair.fractional_trading_enabled or
-        # pair.tick_bps after add_pair without also invalidating the cache.
-        if pair.fractional_trading_enabled or pair.tick_bps < ONE_CENT_BPS:
-            if pair.event_ticker not in self._admission_warned:
-                self._admission_warned.add(pair.event_ticker)
-                reason = (
-                    "fractional_trading_enabled"
-                    if pair.fractional_trading_enabled
-                    else f"sub-cent tick ({pair.tick_bps} bps)"
-                )
-                logger.warning(
-                    "scanner_admission_skip",
-                    event_ticker=pair.event_ticker,
-                    reason=reason,
-                )
-            return
+        """Check one pair for arbitrage opportunity.
 
+        Post-migration (Task 12): fractional_trading_enabled and sub-cent-tick
+        pairs flow through unchanged. The Phase 0 admission guard that used
+        to short-circuit such pairs has been removed now that the bps/fp100
+        edge computation (``_level_price_bps`` / ``fee_adjusted_edge_bps``)
+        preserves exact sub-cent precision end-to-end.
+        """
         self._sorted_cache = None
         no_a = self._books.best_ask(pair.ticker_a, side=pair.side_a)
         no_b = self._books.best_ask(pair.ticker_b, side=pair.side_b)

@@ -1,6 +1,20 @@
-"""Tests for the centralized market-shape admission guard (Phase 0)."""
+"""Tests for the centralized market-shape admission guard.
+
+Phase 0 (historical) rejected ``fractional_trading_enabled`` and sub-cent-tick
+markets while the bps/fp100 migration was in flight. Task 12 relaxed those
+two guards — the function, :class:`MarketAdmissionError`, the 5 ingress-path
+integrations, and the F32 quarantine-restore path all remain in place for
+future shape invariants, but the Phase 0 shape classes now flow through
+admission unchanged. Tests that previously asserted ``pytest.raises`` now
+assert the function returns cleanly.
+
+CommitResult / ingress-path-wiring tests that need admission to raise keep
+working by patching ``validate_market_for_admission`` directly.
+"""
 
 from __future__ import annotations
+
+from unittest.mock import patch
 
 import pytest
 
@@ -49,42 +63,39 @@ def test_accepts_two_cent_markets():
     validate_market_for_admission(a, b)
 
 
-def test_rejects_fractional_trading_on_side_a():
+# ──────────────────────────────────────────────────────────────────
+# Task 12 — Phase 0 admission relax: fractional + sub-cent now admitted.
+# ──────────────────────────────────────────────────────────────────
+
+
+def test_admits_fractional_trading_on_side_a():
+    """Post-Task-12: fractional_trading_enabled markets flow through."""
     a = _fractional_market("KXF-26JAN01-A")
     b = _cent_market("KXA-26JAN01-B")
-    with pytest.raises(MarketAdmissionError) as exc_info:
-        validate_market_for_admission(a, b)
-    assert "fractional" in str(exc_info.value).lower()
-    assert "KXF-26JAN01-A" in str(exc_info.value)
+    validate_market_for_admission(a, b)  # must not raise
 
 
-def test_rejects_fractional_trading_on_side_b():
+def test_admits_fractional_trading_on_side_b():
     a = _cent_market("KXA-26JAN01-A")
     b = _fractional_market("KXF-26JAN01-B")
-    with pytest.raises(MarketAdmissionError) as exc_info:
-        validate_market_for_admission(a, b)
-    assert "KXF-26JAN01-B" in str(exc_info.value)
+    validate_market_for_admission(a, b)  # must not raise
 
 
-def test_rejects_sub_cent_tick_on_side_a():
+def test_admits_sub_cent_tick_on_side_a():
+    """Post-Task-12: sub-cent-tick markets flow through."""
     a = _subcent_market("KXS-26JAN01-A")
     b = _cent_market("KXA-26JAN01-B")
-    with pytest.raises(MarketAdmissionError) as exc_info:
-        validate_market_for_admission(a, b)
-    assert "sub-cent" in str(exc_info.value).lower() or "tick" in str(exc_info.value).lower()
-    assert "KXS-26JAN01-A" in str(exc_info.value)
+    validate_market_for_admission(a, b)  # must not raise
 
 
-def test_rejects_sub_cent_tick_on_side_b():
+def test_admits_sub_cent_tick_on_side_b():
     a = _cent_market("KXA-26JAN01-A")
     b = _subcent_market("KXS-26JAN01-B")
-    with pytest.raises(MarketAdmissionError) as exc_info:
-        validate_market_for_admission(a, b)
-    assert "KXS-26JAN01-B" in str(exc_info.value)
+    validate_market_for_admission(a, b)  # must not raise
 
 
-def test_rejects_fractional_even_if_sub_cent_also():
-    """Either bad property triggers rejection — we don't require both."""
+def test_admits_fractional_and_sub_cent_combined():
+    """Both Phase 0 shape classes on the same market now flow through."""
     a = Market.model_validate({
         "ticker": "KXBOTH-26JAN01-A",
         "event_ticker": "KXBOTH-26JAN01",
@@ -100,21 +111,38 @@ def test_rejects_fractional_even_if_sub_cent_also():
         ],
     })
     b = _cent_market()
-    with pytest.raises(MarketAdmissionError):
-        validate_market_for_admission(a, b)
+    validate_market_for_admission(a, b)  # must not raise
+
+
+def test_sub_cent_market_admitted_and_pipeline_preserves_exact_bps():
+    """Integration: a sub-cent market passes admission with its exact bps
+    tick preserved through the Market model — scanner can then compute edges
+    on the exact bps prices rather than cent-rounded values."""
+    a = _subcent_market("KXS-26JAN01-A")
+    b = _subcent_market("KXS-26JAN01-B")
+
+    # Admission is a no-op post-Task-12.
+    validate_market_for_admission(a, b)
+
+    # Sanity: the Market model preserved the sub-cent tick through parsing,
+    # which is the load-bearing property for scanner exact-edge computation.
+    assert a.tick_bps() == 10, f"expected sub-cent tick=10 bps, got {a.tick_bps()}"
+    assert b.tick_bps() == 10
 
 
 # ──────────────────────────────────────────────────────────────────
-# Scanner ingress
+# Scanner ingress — Phase 0 shapes now admitted.
 # ──────────────────────────────────────────────────────────────────
 
 from talos.orderbook import OrderBookManager  # noqa: E402
 from talos.scanner import ArbitrageScanner  # noqa: E402
 
 
-def test_scanner_skips_fractional_pair_and_produces_no_opportunity(caplog):
-    """Scanner rejects pairs whose stored shape violates admission invariants,
-    logs exactly one WARNING per event ticker across multiple scan ticks."""
+def test_scanner_admits_fractional_pair_and_logs_no_admission_skip(caplog):
+    """Post-Task-12: the scanner no longer short-circuits fractional pairs.
+    No ``scanner_admission_skip`` warning fires; the scan proceeds to
+    evaluate the books (empty here, so no opportunity — but no guard log
+    either)."""
     import logging
     caplog.set_level(logging.WARNING)
 
@@ -127,20 +155,23 @@ def test_scanner_skips_fractional_pair_and_produces_no_opportunity(caplog):
         fractional_trading_enabled=True,
     )
 
-    # Scan multiple times — should dedup the warning.
     scanner.scan("KXF-26JAN01-A")
-    scanner.scan("KXF-26JAN01-A")
-    scanner.scan("KXF-26JAN01-B")
 
-    assert scanner.opportunities == []
-    admission_warnings = [r for r in caplog.records if "admission" in r.message.lower()]
-    assert len(admission_warnings) == 1, (
-        f"expected exactly one admission warning (dedup), got {len(admission_warnings)}"
+    admission_warnings = [
+        r for r in caplog.records if "admission" in r.message.lower()
+    ]
+    assert admission_warnings == [], (
+        f"expected no admission skip warnings post-Task-12, got "
+        f"{[r.message for r in admission_warnings]}"
     )
 
 
-def test_scanner_skips_subcent_pair():
-    """A pair stored with tick_bps < 100 triggers the guard."""
+def test_scanner_admits_subcent_pair(caplog):
+    """Post-Task-12: a pair stored with tick_bps < 100 no longer triggers
+    a scanner admission skip."""
+    import logging
+    caplog.set_level(logging.WARNING)
+
     books = OrderBookManager()
     scanner = ArbitrageScanner(books)
     scanner.add_pair(
@@ -150,17 +181,20 @@ def test_scanner_skips_subcent_pair():
         tick_bps=10,
     )
     scanner.scan("KXS-26JAN01-A")
-    assert scanner.opportunities == []
+
+    admission_warnings = [
+        r for r in caplog.records if "admission" in r.message.lower()
+    ]
+    assert admission_warnings == []
 
 
 def test_scanner_admits_ordinary_cent_pair(caplog):
-    """A pair with default (cent, non-fractional) shape passes the guard."""
+    """Regression guard — the ordinary cent path is still admission-clean."""
     import logging
     caplog.set_level(logging.WARNING)
     books = OrderBookManager()
     scanner = ArbitrageScanner(books)
     scanner.add_pair("KXA-26JAN01", "KXA-26JAN01-A", "KXA-26JAN01-B")
-    # No opportunities (books are empty) but no admission warning either.
     scanner.scan("KXA-26JAN01-A")
     admission_warnings = [r for r in caplog.records if "admission" in r.message.lower()]
     assert admission_warnings == []
@@ -168,12 +202,25 @@ def test_scanner_admits_ordinary_cent_pair(caplog):
 
 # ──────────────────────────────────────────────────────────────────
 # Engine.add_pairs_from_selection returns CommitResult
+#
+# The CommitResult machinery is general-purpose (for any future shape
+# invariant). To exercise the rejected-path, we patch
+# ``validate_market_for_admission`` at its engine import site so the
+# guard raises on demand.
 # ──────────────────────────────────────────────────────────────────
 
+
 @pytest.mark.asyncio
-async def test_add_pairs_from_selection_returns_commit_result_with_mixed_batch(engine_fixture):
-    """Mixed admitted/rejected batch returns a CommitResult, not a bare list."""
-    from talos.game_manager import CommitResult, MarketAdmissionError
+async def test_add_pairs_from_selection_returns_commit_result_with_mixed_batch(
+    engine_fixture,
+):
+    """Mixed admitted/rejected batch returns a CommitResult, not a bare list.
+
+    Uses a patched admission guard that rejects KXF- tickers so we still
+    exercise the structural mixed-outcome path even after Task 12 relaxed
+    the Phase 0 shape checks.
+    """
+    from talos.game_manager import CommitResult
 
     good_record = {
         "event_ticker": "KXA-26JAN01",
@@ -202,7 +249,20 @@ async def test_add_pairs_from_selection_returns_commit_result_with_mixed_batch(e
         "expected_expiration_time": None,
     }
 
-    result = await engine_fixture.add_pairs_from_selection([good_record, bad_record])
+    def _raise_for_kxf(market_a: Market, market_b: Market) -> None:
+        for m in (market_a, market_b):
+            if m.ticker.startswith("KXF-"):
+                raise MarketAdmissionError(
+                    f"{m.ticker}: test-only shape invariant violation"
+                )
+
+    with patch(
+        "talos.engine.validate_market_for_admission",
+        side_effect=_raise_for_kxf,
+    ):
+        result = await engine_fixture.add_pairs_from_selection(
+            [good_record, bad_record]
+        )
 
     assert isinstance(result, CommitResult)
     assert len(result.admitted) == 1
@@ -234,9 +294,12 @@ async def test_add_pairs_from_selection_all_admitted(engine_fixture):
 
 
 @pytest.mark.asyncio
-async def test_add_pairs_from_selection_rejects_sub_cent(engine_fixture):
-    """End-to-end: a sub-cent record flows through admission and lands in rejected."""
-    from talos.game_manager import CommitResult, MarketAdmissionError
+async def test_add_pairs_from_selection_admits_sub_cent_post_task_12(
+    engine_fixture,
+):
+    """Post-Task-12: a sub-cent record flows straight through admission
+    and lands in ``admitted`` rather than ``rejected``."""
+    from talos.game_manager import CommitResult
 
     subcent_record = {
         "event_ticker": "KXS-26JAN01",
@@ -250,34 +313,35 @@ async def test_add_pairs_from_selection_rejects_sub_cent(engine_fixture):
     }
     result = await engine_fixture.add_pairs_from_selection([subcent_record])
     assert isinstance(result, CommitResult)
-    assert result.admitted == []
-    assert len(result.rejected) == 1
-    rejected_record, rejected_error = result.rejected[0]
-    assert rejected_record["event_ticker"] == "KXS-26JAN01"
-    assert isinstance(rejected_error, MarketAdmissionError)
-    assert "sub-cent" in str(rejected_error).lower() or "tick" in str(rejected_error).lower()
+    assert result.rejected == []
+    assert len(result.admitted) == 1
 
 
 # ──────────────────────────────────────────────────────────────────
-# UI ingress (manual add + market picker) admission surfacing
+# UI ingress (manual add + market picker) admission surfacing.
+#
+# Post-Task-12, the Phase 0 shape classes flow through. We still want
+# regression coverage that the ingress-path plumbing surfaces admission
+# errors correctly — we do that by patching the guard to raise.
 # ──────────────────────────────────────────────────────────────────
 
 
 @pytest.mark.asyncio
-async def test_game_manager_add_market_as_pair_raises_for_fractional():
-    """GameManager.add_market_as_pair raises MarketAdmissionError when the
-    market is fractional, BEFORE touching the scanner / feed / ArbPair ctor.
-    This is the guard at the market-picker ingress path in game_manager.py.
-    """
+async def test_game_manager_add_market_as_pair_admits_fractional_post_task_12():
+    """Post-Task-12: fractional_trading_enabled markets flow through
+    GameManager.add_market_as_pair — no admission error."""
     from unittest.mock import AsyncMock, MagicMock
 
     from talos.game_manager import GameManager
     from talos.models.market import Event
 
-    # Minimal stand-up — the guard fires before any collaborator is touched,
-    # so MagicMock stubs are sufficient.
     rest = MagicMock()
-    rest.get_series = AsyncMock()
+    # Force the fee-metadata fetch to fall back to the hard-coded defaults
+    # (quadratic_with_maker_fees / 0.0175). An AsyncMock()'s return value has
+    # .fee_type = MagicMock() which fails ArbPair Pydantic validation, and we
+    # don't care about the specific series here — the test is about
+    # admission.
+    rest.get_series = AsyncMock(side_effect=RuntimeError("unused in this test"))
     feed = MagicMock()
     feed.subscribe = AsyncMock()
     scanner = MagicMock()
@@ -298,26 +362,39 @@ async def test_game_manager_add_market_as_pair_raises_for_fractional():
         status="open",
         fractional_trading_enabled=True,
     )
-    with pytest.raises(MarketAdmissionError) as exc_info:
-        await gm.add_market_as_pair(event, fractional_market)
-    assert "KXF-26JAN01-A" in str(exc_info.value)
-    # Guard fires before scanner.add_pair is called.
-    scanner.add_pair.assert_not_called()
+    # Must not raise — the call reaches scanner.add_pair.
+    pair = await gm.add_market_as_pair(event, fractional_market)
+    assert pair is not None
+    scanner.add_pair.assert_called_once()
 
 
 @pytest.mark.asyncio
 async def test_add_market_pairs_surfaces_rejection_notification(engine_fixture):
-    """engine.add_market_pairs catches MarketAdmissionError per market and
-    surfaces a consolidated notification listing the rejected ticker(s).
-    The OK market still flows through successfully."""
-    from talos.game_manager import validate_market_for_admission
+    """Ingress-path wiring regression: when the admission guard raises
+    (for any future shape invariant), engine.add_market_pairs surfaces a
+    consolidated error toast listing the rejected ticker(s). The OK market
+    still flows through successfully.
+
+    Uses a patched guard to exercise the wiring after Task 12 relaxed the
+    Phase 0 shape checks.
+    """
     from talos.models.market import Event
     from talos.models.strategy import ArbPair
 
-    # Wire the fixture's gm.add_market_as_pair to honour the real admission
-    # guard — the fixture normally returns a MagicMock for every call.
+    def _raise_for_kxf(market_a: Market, market_b: Market) -> None:
+        for m in (market_a, market_b):
+            if m.ticker.startswith("KXF-"):
+                raise MarketAdmissionError(
+                    f"{m.ticker}: test-only shape invariant violation"
+                )
+
     async def _add_market_as_pair(event, market):
-        validate_market_for_admission(market, market)
+        # Route through the (patched) guard so the structured-rejection path
+        # exercises the same code that real ingress would.
+        from talos.game_manager import (
+            validate_market_for_admission as _guard,
+        )
+        _guard(market, market)
         return ArbPair(
             event_ticker=market.ticker,
             ticker_a=market.ticker,
@@ -357,9 +434,13 @@ async def test_add_market_pairs_surfaces_rejection_notification(engine_fixture):
         status="open",
     )
 
-    pairs = await engine_fixture.add_market_pairs(
-        event, [fractional_market, ok_market],
-    )
+    with patch(
+        "talos.game_manager.validate_market_for_admission",
+        side_effect=_raise_for_kxf,
+    ):
+        pairs = await engine_fixture.add_market_pairs(
+            event, [fractional_market, ok_market],
+        )
 
     # The OK market succeeded.
     assert len(pairs) == 1
@@ -381,12 +462,18 @@ async def test_add_market_pairs_surfaces_rejection_notification(engine_fixture):
 async def test_add_games_surfaces_admission_rejection_as_specific_toast(
     engine_fixture,
 ):
-    """engine.add_games catches MarketAdmissionError from the underlying
-    game_manager.add_game path and surfaces a 'Market rejected (admission
-    guard): ...' toast rather than the generic 'Error: ...' path."""
+    """Ingress-path wiring regression: engine.add_games catches
+    MarketAdmissionError from the underlying game_manager.add_game path and
+    surfaces a 'Market rejected (admission guard): ...' toast rather than
+    the generic 'Error: ...' path.
+
+    The guard is stubbed at the game_manager layer (add_games raises
+    directly) so this test is independent of which specific shape
+    invariant is being enforced — it only verifies the toast wiring.
+    """
     async def _raise(urls):
         raise MarketAdmissionError(
-            "KXF-26JAN01-A: fractional_trading_enabled markets ..."
+            "KXF-26JAN01-A: test-only shape invariant violation"
         )
 
     engine_fixture._game_manager.add_games = _raise
@@ -408,8 +495,6 @@ async def test_add_games_surfaces_admission_rejection_as_specific_toast(
     assert rejection_notifs, (
         f"expected 'admission guard' rejection notification, got {captured}"
     )
-    # And the notification should carry the specific reason, not a bare
-    # "Error: ..." prefix.
     assert any("Market rejected" in msg for msg, _sev, _toast in captured), (
         f"expected 'Market rejected' prefix, got {captured}"
     )

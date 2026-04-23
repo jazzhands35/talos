@@ -1,15 +1,25 @@
-"""F32 + F37: startup-restore admission for Phase-0-incompatible markets.
+"""F32 + F37: startup-restore admission for shape-incompatible markets.
 
-Persisted pairs whose market became fractional/sub-cent while Talos was
+Persisted pairs whose market becomes admission-incompatible while Talos is
 offline must restore into a quarantined exit_only state, with the
-quarantine durably persisted so it survives a subsequent crash."""
+quarantine durably persisted so it survives a subsequent crash.
+
+Phase 0 originally rejected fractional + sub-cent markets here. Task 12
+relaxed those specific checks, but the quarantine path itself is
+general-purpose — it fires for ANY :class:`MarketAdmissionError` that
+the guard may raise in the future. These tests drive the path by
+patching ``talos.engine.validate_market_for_admission`` to raise for the
+pair under test, keeping the structural coverage of the quarantine
+machinery intact independent of which shape invariant is active."""
 
 from __future__ import annotations
 
 from typing import Any
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+
+from talos.game_manager import MarketAdmissionError
 
 
 def _persisted_record(
@@ -113,10 +123,23 @@ def _prep_engine_for_setup(engine_fixture) -> Any:
     return e
 
 
+def _raise_for_kxf(market_a, market_b) -> None:
+    """Test-only admission guard that raises for ``KXF-`` prefixed markets.
+    Mirrors what the Phase 0 guard used to do for fractional markets,
+    letting these tests drive the quarantine path regardless of which
+    shape invariants the real guard currently enforces."""
+    for m in (market_a, market_b):
+        if m.ticker.startswith("KXF-"):
+            raise MarketAdmissionError(
+                f"{m.ticker}: test-only shape invariant violation"
+            )
+
+
 @pytest.mark.asyncio
-async def test_restore_quarantines_pair_when_market_is_now_fractional(engine_fixture):
-    """A persisted 'active' pair whose market is now fractional must be
-    quarantined into exit_only and the quarantine must be durably persisted."""
+async def test_restore_quarantines_pair_when_guard_raises(engine_fixture):
+    """A persisted 'active' pair whose admission guard now rejects must be
+    quarantined into exit_only, and the quarantine must be durably persisted.
+    """
     engine = _prep_engine_for_setup(engine_fixture)
 
     record = _persisted_record(
@@ -133,7 +156,11 @@ async def test_restore_quarantines_pair_when_market_is_now_fractional(engine_fix
     persist_calls: list[int] = []
     engine._persist_active_games = lambda *a, **kw: persist_calls.append(1)
 
-    await engine._setup_initial_games()
+    with patch(
+        "talos.engine.validate_market_for_admission",
+        side_effect=_raise_for_kxf,
+    ):
+        await engine._setup_initial_games()
 
     assert "KXF-26JAN01" in engine._exit_only_events, (
         "expected KXF-26JAN01 in _exit_only_events after quarantine; "

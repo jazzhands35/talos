@@ -27,10 +27,12 @@ class MarketAdmissionError(Exception):
     """Raised when a market is rejected at admission because its shape
     violates the invariants the current trading path can safely handle.
 
-    Phase 0 rejections (bps/fp100 migration gate): fractional_trading_enabled
-    markets and sub-cent-tick markets. The reasons are load-bearing for
-    fractional inventory accounting and scanner-edge accuracy — see
-    docs/superpowers/specs/2026-04-17-bps-fp100-unit-migration-design.md.
+    Phase 0 (historical, bps/fp100 migration gate): fractional_trading_enabled
+    markets and sub-cent-tick markets. Both are now fully supported as of
+    Task 12; see :func:`validate_market_for_admission` for the migration
+    history and the post-migration contract. The exception type stays in
+    place as the general-purpose admission rejection signal for any future
+    shape invariants.
     """
 
 
@@ -39,31 +41,30 @@ ONE_CENT_BPS = 100  # 1 cent = 100 basis points
 
 def validate_market_for_admission(market_a: Market, market_b: Market) -> None:
     """Raise ``MarketAdmissionError`` if either market has a shape Talos
-    cannot currently handle safely.
+    cannot currently handle safely. Enforced at EVERY ingress path (scanner,
+    manual add, market-picker, tree commit, startup restore) — not just
+    scanner. A scanner-only guard is insufficient because other paths
+    bypass it.
 
-    Called from EVERY ingress path (scanner, manual add, market-picker,
-    tree commit, startup restore). A scanner-only guard is insufficient
-    because other paths bypass it.
+    Phase 0 (historical): rejected ``fractional_trading_enabled`` markets
+    and sub-cent-tick markets until the bps/fp100 migration landed.
 
-    Phase 0 checks: fractional_trading_enabled or sub-cent-tick.
-    Phase 1+2 will relax or remove these when the bps/fp100 migration
-    makes them safe to admit.
+    Post-migration (Task 12): those shape classes are now fully supported
+    by the bps/fp100 trading path end-to-end (models dual-fields, bps-aware
+    fees, bps/fp100 ledger + v2 persistence, conditional 2/4-decimal REST
+    serialization, WS-wire bps threading into OrderBookLevel, and scanner
+    exact-bps edge computation). The function signature, the
+    ``MarketAdmissionError`` type, the 5 ingress-path integrations, and
+    the F32+F37 startup-restore quarantine path all stay — they're the
+    general-purpose admission gate for FUTURE shape invariants Talos may
+    need to enforce. No checks remain today.
+
+    See docs/superpowers/specs/2026-04-17-bps-fp100-unit-migration-design.md
+    for the full migration record.
     """
-    for m in (market_a, market_b):
-        if m.fractional_trading_enabled:
-            raise MarketAdmissionError(
-                f"{m.ticker}: fractional_trading_enabled markets are not "
-                f"supported until the bps/fp100 migration lands (Phase 1+2). "
-                f"See docs/superpowers/specs/"
-                f"2026-04-17-bps-fp100-unit-migration-design.md."
-            )
-        tick = m.tick_bps()
-        if tick < ONE_CENT_BPS:
-            raise MarketAdmissionError(
-                f"{m.ticker}: sub-cent-tick markets "
-                f"(tick={tick} bps) are not supported until "
-                f"Phase 1+2 of the bps/fp100 migration."
-            )
+    # No Phase 0 checks remain. Future shape invariants go here.
+    del market_a, market_b
+    return None
 
 
 @dataclass(slots=True)
