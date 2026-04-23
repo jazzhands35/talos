@@ -37,17 +37,8 @@ logger = structlog.get_logger()
 
 
 def _order_remaining_fp100(order: Order) -> int:
-    """Read remaining count preferring fp100, falling back to legacy contracts.
-
-    Order instances parsed from Kalshi wire (``Order._migrate_fp``) populate
-    BOTH legacy and fp100 fields. Test fixtures that construct Order directly
-    with legacy kwargs (``remaining_count=10``) leave ``remaining_count_fp100``
-    at default 0. The fallback keeps tests passing; removed by Task 13a-2
-    when the legacy field is deleted from the Order model.
-    """
-    if order.remaining_count_fp100:
-        return order.remaining_count_fp100
-    return order.remaining_count * ONE_CONTRACT_FP100
+    """Read remaining count as fp100 (post-13a-2a: direct passthrough)."""
+    return order.remaining_count_fp100
 
 
 def _order_remaining_contracts(order: Order) -> int:
@@ -55,9 +46,7 @@ def _order_remaining_contracts(order: Order) -> int:
 
     Rebalance produces whole-contract cancel/amend payloads (Kalshi's
     amend_order / create_order on this path accept whole units only), so
-    we floor fp100 → contracts. Identical to the legacy field for
-    wire-parsed orders on cent-tick markets; exact for fractional markets
-    once the wire path is flowing.
+    we floor fp100 → contracts.
     """
     return _order_remaining_fp100(order) // ONE_CONTRACT_FP100
 

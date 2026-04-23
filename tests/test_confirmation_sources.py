@@ -33,13 +33,13 @@ class _FakeOrder:
     action: str = "buy"
     side: str = "no"
     status: str = "resting"
-    fill_count: int = 0
-    remaining_count: int = 0
-    maker_fill_cost: int = 0
-    taker_fill_cost: int = 0
-    maker_fees: int = 0
-    no_price: int = 0
-    yes_price: int = 0
+    fill_count_fp100: int = 0
+    remaining_count_fp100: int = 0
+    maker_fill_cost_bps: int = 0
+    taker_fill_cost_bps: int = 0
+    maker_fees_bps: int = 0
+    no_price_bps: int = 0
+    yes_price_bps: int = 0
 
 
 # ── Fake REST client for reconcile flows -----------------------------
@@ -141,15 +141,15 @@ class TestSyncFromOrdersClearsOnlyResting:
             _FakeOrder(
                 order_id="o-a",
                 ticker="T-A",
-                fill_count=5,
-                maker_fill_cost=240,
+                fill_count_fp100=500,
+                maker_fill_cost_bps=24000,
                 status="executed",
             ),
             _FakeOrder(
                 order_id="o-b",
                 ticker="T-B",
-                fill_count=5,
-                maker_fill_cost=240,
+                fill_count_fp100=500,
+                maker_fill_cost_bps=24000,
                 status="executed",
             ),
         ]

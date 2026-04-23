@@ -34,8 +34,8 @@ def _wire_verify_cancel_mocks(rest, order_id: str = "ord-a", ticker: str = "TK-A
                 "action": "buy",
                 "side": "no",
                 "type": "limit",
-                "remaining_count": 1,
-                "fill_count": 0,
+                "remaining_count_fp": "1",
+                "fill_count_fp": "0",
             }
         )
     )
@@ -68,9 +68,9 @@ def _keep_behind_in_get_orders(
                         "action": "buy",
                         "side": "no",
                         "type": "limit",
-                        "remaining_count": remaining,
-                        "fill_count": 0,
-                        "no_price": no_price,
+                        "remaining_count_fp": str(remaining),
+                        "fill_count_fp": "0",
+                        "no_price_dollars": f"0.{no_price:02d}",
                     }
                 )
             ]
@@ -612,8 +612,8 @@ class TestExitOnlyEnforcementAsync:
                     "action": "buy",
                     "side": "no",
                     "type": "limit",
-                    "remaining_count": 15,
-                    "fill_count": 5,
+                    "remaining_count_fp": "15",
+                    "fill_count_fp": "5",
                 }
             )
         )
@@ -629,9 +629,9 @@ class TestExitOnlyEnforcementAsync:
                             "action": "buy",
                             "side": "no",
                             "type": "limit",
-                            "remaining_count": 19,
-                            "fill_count": 1,
-                            "no_price": 49,
+                            "remaining_count_fp": "19",
+                            "fill_count_fp": "1",
+                            "no_price_dollars": "0.49",
                         }
                     )
                 ]

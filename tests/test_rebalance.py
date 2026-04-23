@@ -87,10 +87,10 @@ def _make_order(
         ticker=ticker,
         action="buy",
         side="no",
-        no_price=no_price,
-        initial_count=fill_count + remaining_count,
-        remaining_count=remaining_count,
-        fill_count=fill_count,
+        no_price_bps=no_price * 100,
+        initial_count_fp100=(fill_count + remaining_count) * 100,
+        remaining_count_fp100=remaining_count * 100,
+        fill_count_fp100=fill_count * 100,
         status=status,
     )
 

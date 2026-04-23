@@ -322,11 +322,11 @@ class TestOrderEndpoints:
                 "action": "buy",
                 "side": "yes",
                 "type": "limit",
-                "yes_price": 65,
-                "no_price": 35,
-                "initial_count": 10,
-                "remaining_count": 10,
-                "fill_count": 0,
+                "yes_price_dollars": "0.65",
+                "no_price_dollars": "0.35",
+                "initial_count_fp": "10",
+                "remaining_count_fp": "10",
+                "fill_count_fp": "0",
                 "status": "resting",
                 "created_time": "2026-03-03T12:00:00Z",
             }
@@ -357,10 +357,10 @@ class TestOrderEndpoints:
                 "action": "buy",
                 "side": "no",
                 "type": "limit",
-                "no_price": 40,
-                "initial_count": 10,
-                "remaining_count": 0,
-                "fill_count": 10,
+                "no_price_dollars": "0.40",
+                "initial_count_fp": "10",
+                "remaining_count_fp": "0",
+                "fill_count_fp": "10",
                 "status": "executed",
             }
         }
@@ -385,11 +385,11 @@ class TestOrderEndpoints:
                 "action": "buy",
                 "side": "yes",
                 "type": "limit",
-                "yes_price": 65,
-                "no_price": 35,
-                "initial_count": 10,
-                "remaining_count": 0,
-                "fill_count": 0,
+                "yes_price_dollars": "0.65",
+                "no_price_dollars": "0.35",
+                "initial_count_fp": "10",
+                "remaining_count_fp": "0",
+                "fill_count_fp": "0",
                 "status": "canceled",
                 "created_time": "2026-03-03T12:00:00Z",
             }
@@ -409,11 +409,11 @@ class TestOrderEndpoints:
                     "action": "buy",
                     "side": "yes",
                     "type": "limit",
-                    "yes_price": 65,
-                    "no_price": 35,
-                    "initial_count": 10,
-                    "remaining_count": 10,
-                    "fill_count": 0,
+                    "yes_price_dollars": "0.65",
+                    "no_price_dollars": "0.35",
+                    "initial_count_fp": "10",
+                    "remaining_count_fp": "10",
+                    "fill_count_fp": "0",
                     "status": "resting",
                     "created_time": "2026-03-03T12:00:00Z",
                 }
@@ -444,11 +444,11 @@ class TestOrderEndpoints:
                 "action": "buy",
                 "side": "no",
                 "type": "limit",
-                "yes_price": 30,
-                "no_price": 70,
-                "initial_count": 10,
-                "remaining_count": 10,
-                "fill_count": 0,
+                "yes_price_dollars": "0.30",
+                "no_price_dollars": "0.70",
+                "initial_count_fp": "10",
+                "remaining_count_fp": "10",
+                "fill_count_fp": "0",
                 "status": "resting",
                 "created_time": "2026-03-03T12:00:00Z",
             },
@@ -458,11 +458,11 @@ class TestOrderEndpoints:
                 "action": "buy",
                 "side": "no",
                 "type": "limit",
-                "yes_price": 25,
-                "no_price": 75,
-                "initial_count": 10,
-                "remaining_count": 10,
-                "fill_count": 0,
+                "yes_price_dollars": "0.25",
+                "no_price_dollars": "0.75",
+                "initial_count_fp": "10",
+                "remaining_count_fp": "10",
+                "fill_count_fp": "0",
                 "status": "resting",
                 "created_time": "2026-03-03T12:00:00Z",
             },
@@ -474,9 +474,9 @@ class TestOrderEndpoints:
             "ord-123", ticker="KXBTC-26MAR-T50000", no_price=75, count=10
         )
         assert old_order.order_id == "ord-123"
-        assert old_order.no_price == 70
+        assert old_order.no_price_bps == 7000
         assert amended_order.order_id == "ord-123"
-        assert amended_order.no_price == 75
+        assert amended_order.no_price_bps == 7500
         call_kwargs = client._http.request.call_args
         body = call_kwargs.kwargs["json"]
         assert body["ticker"] == "KXBTC-26MAR-T50000"
@@ -494,11 +494,11 @@ class TestOrderEndpoints:
                 "action": "buy",
                 "side": "no",
                 "type": "limit",
-                "yes_price": 35,
-                "no_price": 65,
-                "initial_count": 10,
-                "remaining_count": 10,
-                "fill_count": 0,
+                "yes_price_dollars": "0.35",
+                "no_price_dollars": "0.65",
+                "initial_count_fp": "10",
+                "remaining_count_fp": "10",
+                "fill_count_fp": "0",
                 "status": "resting",
                 "created_time": "2026-03-03T12:00:00Z",
             },
@@ -508,11 +508,11 @@ class TestOrderEndpoints:
                 "action": "buy",
                 "side": "no",
                 "type": "limit",
-                "yes_price": 35,
-                "no_price": 65,
-                "initial_count": 10,
-                "remaining_count": 10,
-                "fill_count": 0,
+                "yes_price_dollars": "0.35",
+                "no_price_dollars": "0.65",
+                "initial_count_fp": "10",
+                "remaining_count_fp": "10",
+                "fill_count_fp": "0",
                 "status": "resting",
                 "created_time": "2026-03-03T12:00:00Z",
             },
@@ -540,11 +540,11 @@ class TestOrderEndpoints:
                 "action": "buy",
                 "side": "yes",
                 "type": "limit",
-                "yes_price": 50,
-                "no_price": 50,
-                "initial_count": 10,
-                "remaining_count": 10,
-                "fill_count": 0,
+                "yes_price_dollars": "0.50",
+                "no_price_dollars": "0.50",
+                "initial_count_fp": "10",
+                "remaining_count_fp": "10",
+                "fill_count_fp": "0",
                 "status": "resting",
                 "created_time": "2026-03-03T12:00:00Z",
             },
@@ -554,11 +554,11 @@ class TestOrderEndpoints:
                 "action": "buy",
                 "side": "yes",
                 "type": "limit",
-                "yes_price": 55,
-                "no_price": 45,
-                "initial_count": 10,
-                "remaining_count": 10,
-                "fill_count": 0,
+                "yes_price_dollars": "0.55",
+                "no_price_dollars": "0.45",
+                "initial_count_fp": "10",
+                "remaining_count_fp": "10",
+                "fill_count_fp": "0",
                 "status": "resting",
                 "created_time": "2026-03-03T12:00:00Z",
             },
@@ -569,8 +569,8 @@ class TestOrderEndpoints:
         old_order, amended_order = await client.amend_order(
             "ord-123", ticker="KXBTC-26MAR-T50000", side="yes", yes_price=55
         )
-        assert old_order.yes_price == 50
-        assert amended_order.yes_price == 55
+        assert old_order.yes_price_bps == 5000
+        assert amended_order.yes_price_bps == 5500
         call_kwargs = client._http.request.call_args
         body = call_kwargs.kwargs["json"]
         assert body["yes_price_dollars"] == "0.55"
@@ -584,11 +584,11 @@ class TestOrderEndpoints:
                 "action": "buy",
                 "side": "yes",
                 "type": "limit",
-                "yes_price": 65,
-                "no_price": 35,
-                "initial_count": 5,
-                "remaining_count": 3,
-                "fill_count": 2,
+                "yes_price_dollars": "0.65",
+                "no_price_dollars": "0.35",
+                "initial_count_fp": "5",
+                "remaining_count_fp": "3",
+                "fill_count_fp": "2",
                 "status": "resting",
                 "created_time": "2026-03-03T12:00:00Z",
             }
@@ -598,7 +598,7 @@ class TestOrderEndpoints:
 
         order = await client.get_order("ord-456")
         assert order.order_id == "ord-456"
-        assert order.fill_count == 2
+        assert order.fill_count_fp100 == 200
 
     async def test_batch_create_orders(self, client: KalshiRESTClient) -> None:
         mock_data = {
@@ -727,8 +727,8 @@ class TestPortfolioEndpoints:
                     "order_id": "ord-1",
                     "ticker": "KXBTC-26MAR-T50000",
                     "side": "yes",
-                    "price": 65,
-                    "count": 5,
+                    "yes_price_dollars": "0.65",
+                    "count_fp": "5",
                     "created_time": "2026-03-03T12:01:00Z",
                 }
             ],
@@ -739,7 +739,7 @@ class TestPortfolioEndpoints:
 
         fills = await client.get_fills()
         assert len(fills) == 1
-        assert fills[0].count == 5
+        assert fills[0].count_fp100 == 500
 
 
 class TestGetSettlements:
@@ -823,7 +823,7 @@ class TestDecreaseOrder:
         client._http.request = AsyncMock(return_value=_mock_response(200, mock_data))
 
         order = await client.decrease_order("ord-1", reduce_to=5)
-        assert order.remaining_count == 5
+        assert order.remaining_count_fp100 == 500
 
         _, kwargs = client._http.request.call_args
         assert kwargs["json"]["reduce_to_fp"] == "5.00"
@@ -843,7 +843,7 @@ class TestDecreaseOrder:
         client._http.request = AsyncMock(return_value=_mock_response(200, mock_data))
 
         order = await client.decrease_order("ord-1", reduce_by=3)
-        assert order.remaining_count == 7
+        assert order.remaining_count_fp100 == 700
 
         _, kwargs = client._http.request.call_args
         assert kwargs["json"]["reduce_by_fp"] == "3.00"

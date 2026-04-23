@@ -152,12 +152,12 @@ class DripApp(App):
                 continue
             if order.ticker == self._config.ticker_a:
                 if order.status == "resting":
-                    resting_a.append((order.order_id, order.no_price))
-                filled_a += order.fill_count
+                    resting_a.append((order.order_id, order.no_price_bps // 100))
+                filled_a += order.fill_count_fp100 // 100
             elif order.ticker == self._config.ticker_b:
                 if order.status == "resting":
-                    resting_b.append((order.order_id, order.no_price))
-                filled_b += order.fill_count
+                    resting_b.append((order.order_id, order.no_price_bps // 100))
+                filled_b += order.fill_count_fp100 // 100
 
         # Log pending state that reconcile will discard
         stale_places = len(self._runtime.side_a.pending_placements) + len(

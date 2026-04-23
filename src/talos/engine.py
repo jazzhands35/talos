@@ -97,20 +97,15 @@ def _merge_queue(existing: int | None, incoming: int) -> int:
     return min(existing, incoming)
 
 
-# ── bps/fp100 fallback helpers (13a-1b Group C) ───────────────────
-# Order instances parsed from the Kalshi wire (``Order._migrate_fp``) populate
-# BOTH legacy and ``_bps`` / ``_fp100`` fields. Tests that construct Order
-# directly with legacy kwargs leave the new fields at default 0. These helpers
-# prefer the exact-precision field and fall back to the legacy one. They are
-# deleted in Task 13a-2 when legacy fields + fixtures are cleaned up, mirroring
-# aae3eb6 / 2e79a2f / 8a237d6.
+# ── bps/fp100 helpers ─────────────────────────────────────────────
+# Post 13a-2a: Order legacy fields deleted; these helpers now pass through
+# to the ``_bps`` / ``_fp100`` fields directly. Retained as thin adapters
+# until 13a-2e deletes them outright.
 
 
 def _order_remaining_fp100(order: Order) -> int:
-    """Remaining count preferring fp100, falling back to legacy contracts."""
-    if order.remaining_count_fp100:
-        return order.remaining_count_fp100
-    return order.remaining_count * ONE_CONTRACT_FP100
+    """Remaining count in fp100 units."""
+    return order.remaining_count_fp100
 
 
 def _order_remaining_contracts(order: Order) -> int:
@@ -119,10 +114,8 @@ def _order_remaining_contracts(order: Order) -> int:
 
 
 def _order_fill_count_fp100(order: Order) -> int:
-    """Fill count preferring fp100, falling back to legacy contracts."""
-    if order.fill_count_fp100:
-        return order.fill_count_fp100
-    return order.fill_count * ONE_CONTRACT_FP100
+    """Fill count in fp100 units."""
+    return order.fill_count_fp100
 
 
 def _order_fill_count_contracts(order: Order) -> int:
@@ -134,19 +127,15 @@ def _order_price_bps(order: Order) -> int:
     """Per-contract price in bps, respecting the order's side.
 
     For ``side == "no"`` returns ``no_price_bps``; otherwise ``yes_price_bps``.
-    Falls back to ``cents_to_bps`` of the legacy field when the bps sibling
-    is default (fixture-constructed Order).
     """
     if order.side == "no":
-        return order.no_price_bps if order.no_price_bps else cents_to_bps(order.no_price)
-    return order.yes_price_bps if order.yes_price_bps else cents_to_bps(order.yes_price)
+        return order.no_price_bps
+    return order.yes_price_bps
 
 
 def _order_maker_fees_bps(order: Order) -> int:
-    """Maker fees preferring bps, falling back to legacy cents."""
-    if order.maker_fees_bps:
-        return order.maker_fees_bps
-    return cents_to_bps(order.maker_fees)
+    """Maker fees in bps."""
+    return order.maker_fees_bps
 
 
 class TradingEngine:
@@ -1502,11 +1491,7 @@ class TradingEngine:
                     "side": o.side,
                     "price": bps_to_cents_round(_order_price_bps(o)),
                     "filled": _order_fill_count_contracts(o),
-                    "total": (
-                        o.initial_count_fp100 // ONE_CONTRACT_FP100
-                        if o.initial_count_fp100
-                        else o.initial_count
-                    ),
+                    "total": o.initial_count_fp100 // ONE_CONTRACT_FP100,
                     "remaining": _order_remaining_contracts(o),
                     "status": o.status,
                     "time": (o.created_time[11:16] if len(o.created_time) > 16 else o.created_time),
@@ -1639,15 +1624,8 @@ class TradingEngine:
                     else msg.remaining_count * ONE_CONTRACT_FP100
                 )
 
-                # Monotonic update — WS can never decrease fills. Keep both
-                # legacy and bps/fp100 fields in sync so downstream consumers
-                # on either side of the migration see a coherent Order.
-                order.fill_count = max(order.fill_count, msg.fill_count)
-                order.remaining_count = msg.remaining_count
+                # Monotonic update — WS can never decrease fills.
                 order.status = msg.status
-                order.maker_fill_cost = max(order.maker_fill_cost, msg.maker_fill_cost)
-                order.taker_fill_cost = max(order.taker_fill_cost, msg.taker_fill_cost)
-                order.maker_fees = max(order.maker_fees, msg.maker_fees)
                 order.fill_count_fp100 = max(
                     _order_fill_count_fp100(order), msg_fill_fp100
                 )
@@ -1774,14 +1752,6 @@ class TradingEngine:
                 action="buy",
                 side=msg.side,
                 status=msg.status,
-                no_price=msg.no_price,
-                yes_price=msg.yes_price,
-                fill_count=msg.fill_count,
-                remaining_count=msg.remaining_count,
-                initial_count=msg.fill_count + msg.remaining_count,
-                maker_fill_cost=msg.maker_fill_cost,
-                taker_fill_cost=msg.taker_fill_cost,
-                maker_fees=msg.maker_fees,
                 no_price_bps=msg.no_price_bps or cents_to_bps(msg.no_price),
                 yes_price_bps=msg.yes_price_bps or cents_to_bps(msg.yes_price),
                 fill_count_fp100=new_fill_fp100,
@@ -3253,11 +3223,7 @@ class TradingEngine:
                         side=order.side,
                         status=order.status,
                         price=bps_to_cents_round(price_bps),
-                        initial_count=(
-                            order.initial_count_fp100 // ONE_CONTRACT_FP100
-                            if order.initial_count_fp100
-                            else order.initial_count
-                        ),
+                        initial_count=order.initial_count_fp100 // ONE_CONTRACT_FP100,
                         fill_count=_order_fill_count_contracts(order),
                         remaining_count=_order_remaining_contracts(order),
                         source="auto_accept" if self._auto_config.enabled else "manual",

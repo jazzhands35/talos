@@ -1029,24 +1029,26 @@ class PositionLedger:
 
             # Count fills from ALL orders including cancelled — fills are real
             # regardless of whether the order was later cancelled or amended
-            if order.fill_count > 0:
-                kalshi_filled_fp100[side] += order.fill_count * ONE_CONTRACT_FP100
+            if order.fill_count_fp100 > 0:
+                kalshi_filled_fp100[side] += order.fill_count_fp100
                 kalshi_fill_cost_bps[side] += (
-                    (order.maker_fill_cost + order.taker_fill_cost) * ONE_CENT_BPS
+                    order.maker_fill_cost_bps + order.taker_fill_cost_bps
                 )
-                kalshi_fees_bps[side] += order.maker_fees * ONE_CENT_BPS
+                kalshi_fees_bps[side] += order.maker_fees_bps
             # Only track resting from active orders — skip recently cancelled
             # IDs that Kalshi's GET may still return due to eventual consistency
-            if order.remaining_count > 0 and order.status in ("resting", "executed"):
+            if order.remaining_count_fp100 > 0 and order.status in ("resting", "executed"):
                 if order.order_id in self._recently_cancelled:
                     continue
                 # Use correct price field based on order side
-                resting_price_cents = order.no_price if order.side == "no" else order.yes_price
+                resting_price_bps = (
+                    order.no_price_bps if order.side == "no" else order.yes_price_bps
+                )
                 kalshi_resting[side].append(
                     (
                         order.order_id,
-                        order.remaining_count * ONE_CONTRACT_FP100,
-                        resting_price_cents * ONE_CENT_BPS,
+                        order.remaining_count_fp100,
+                        resting_price_bps,
                     )
                 )
 
@@ -1131,7 +1133,7 @@ class PositionLedger:
             for order in orders:
                 if (
                     order.order_id in self._recently_cancelled
-                    and order.remaining_count > 0
+                    and order.remaining_count_fp100 > 0
                     and order.status in ("resting", "executed")
                 ):
                     still_stale.add(order.order_id)

@@ -365,8 +365,8 @@ class TestRichTextCells:
             ticker="GAME-STAN",
             side="no",
             action="buy",
-            no_price=38,
-            remaining_count=5,
+            no_price_bps=3800,
+            remaining_count_fp100=500,
             status="resting",
         )
         pair = ArbPair(event_ticker="EVT-STANMIA", ticker_a="GAME-STAN", ticker_b="GAME-MIA")

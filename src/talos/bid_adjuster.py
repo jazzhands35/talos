@@ -630,37 +630,20 @@ class BidAdjuster:
                 self.clear_proposal(proposal.event_ticker, adj_side)
                 return
             raise
-        # Exact-precision fp100 counts; fall back to legacy contract counts for
-        # fixtures that don't populate the _fp100 fields. The REST amend accepts
-        # whole-contract counts only (Talos never submits fractional contracts),
-        # so demote via integer-floor on the fp100 total.
-        fresh_fill_fp100 = (
-            fresh_order.fill_count_fp100
-            if fresh_order.fill_count_fp100
-            else fresh_order.fill_count * ONE_CONTRACT_FP100
-        )
-        fresh_remaining_fp100 = (
-            fresh_order.remaining_count_fp100
-            if fresh_order.remaining_count_fp100
-            else fresh_order.remaining_count * ONE_CONTRACT_FP100
-        )
+        # Exact-precision fp100 counts. REST amend accepts whole-contract
+        # counts only (Talos never submits fractional contracts), so demote
+        # via integer-floor on the fp100 total.
+        fresh_fill_fp100 = fresh_order.fill_count_fp100
+        fresh_remaining_fp100 = fresh_order.remaining_count_fp100
         total_count_fp100 = fresh_fill_fp100 + fresh_remaining_fp100
         total_count = total_count_fp100 // ONE_CONTRACT_FP100
 
         # Skip if the order is already at the target price (avoids AMEND_ORDER_NO_OP).
         # Compare in bps: proposal.new_price is cents-valued, promote to bps.
         if pair_side == "no":
-            fresh_price_bps = (
-                fresh_order.no_price_bps
-                if fresh_order.no_price_bps
-                else cents_to_bps(fresh_order.no_price)
-            )
+            fresh_price_bps = fresh_order.no_price_bps
         else:
-            fresh_price_bps = (
-                fresh_order.yes_price_bps
-                if fresh_order.yes_price_bps
-                else cents_to_bps(fresh_order.yes_price)
-            )
+            fresh_price_bps = fresh_order.yes_price_bps
         if fresh_price_bps == cents_to_bps(proposal.new_price):
             logger.info(
                 "adjustment_already_at_target",
@@ -730,36 +713,14 @@ class BidAdjuster:
         # Update fills from amend response (handles fills that arrived during approval).
         # Compare against fresh_order (same order, pre-amend) — NOT the ledger
         # aggregate, which includes fills from other orders on this side.
-        # Exact-precision fp100/bps reads with legacy fallback for fixtures.
-        old_fill_fp100 = (
-            old_order.fill_count_fp100
-            if old_order.fill_count_fp100
-            else old_order.fill_count * ONE_CONTRACT_FP100
-        )
+        old_fill_fp100 = old_order.fill_count_fp100
         fill_delta_fp100 = old_fill_fp100 - fresh_fill_fp100
         if fill_delta_fp100 > 0:
-            if pair_side == "no":
-                old_price_bps = (
-                    old_order.no_price_bps
-                    if old_order.no_price_bps
-                    else cents_to_bps(old_order.no_price)
-                )
-            else:
-                old_price_bps = (
-                    old_order.yes_price_bps
-                    if old_order.yes_price_bps
-                    else cents_to_bps(old_order.yes_price)
-                )
-            old_maker_fees_bps = (
-                old_order.maker_fees_bps
-                if old_order.maker_fees_bps
-                else cents_to_bps(old_order.maker_fees)
+            old_price_bps = (
+                old_order.no_price_bps if pair_side == "no" else old_order.yes_price_bps
             )
-            fresh_maker_fees_bps = (
-                fresh_order.maker_fees_bps
-                if fresh_order.maker_fees_bps
-                else cents_to_bps(fresh_order.maker_fees)
-            )
+            old_maker_fees_bps = old_order.maker_fees_bps
+            fresh_maker_fees_bps = fresh_order.maker_fees_bps
             fee_delta_bps = old_maker_fees_bps - fresh_maker_fees_bps
             ledger.record_fill_bps(
                 adj_side,
@@ -770,22 +731,10 @@ class BidAdjuster:
 
         # Update ledger from amend response — exact-precision path.
         if pair_side == "no":
-            amended_price_bps = (
-                amended_order.no_price_bps
-                if amended_order.no_price_bps
-                else cents_to_bps(amended_order.no_price)
-            )
+            amended_price_bps = amended_order.no_price_bps
         else:
-            amended_price_bps = (
-                amended_order.yes_price_bps
-                if amended_order.yes_price_bps
-                else cents_to_bps(amended_order.yes_price)
-            )
-        amended_remaining_fp100 = (
-            amended_order.remaining_count_fp100
-            if amended_order.remaining_count_fp100
-            else amended_order.remaining_count * ONE_CONTRACT_FP100
-        )
+            amended_price_bps = amended_order.yes_price_bps
+        amended_remaining_fp100 = amended_order.remaining_count_fp100
         ledger.record_resting_bps(
             adj_side,
             order_id=amended_order.order_id,

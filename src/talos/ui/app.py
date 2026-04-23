@@ -333,8 +333,8 @@ class TalosApp(App):
         resting_orders = [
             {
                 "ticker": o.ticker,
-                "no_price": o.no_price,
-                "remaining": o.remaining_count,
+                "no_price": o.no_price_bps // 100,
+                "remaining": o.remaining_count_fp100 // 100,
                 "side": o.side,
                 "status": o.status,
             }

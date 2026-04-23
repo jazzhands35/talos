@@ -129,10 +129,10 @@ def _make_order(
         ticker=ticker,
         action="buy",
         side="no",
-        no_price=no_price,
-        initial_count=fill_count + remaining_count,
-        remaining_count=remaining_count,
-        fill_count=fill_count,
+        no_price_bps=no_price * 100,
+        initial_count_fp100=(fill_count + remaining_count) * 100,
+        remaining_count_fp100=remaining_count * 100,
+        fill_count_fp100=fill_count * 100,
         status=status,
     )
 
@@ -749,8 +749,8 @@ class TestProposalQueue:
                     "action": "buy",
                     "side": "no",
                     "type": "limit",
-                    "remaining_count": 10,
-                    "fill_count": 0,
+                    "remaining_count_fp": "10",
+                    "fill_count_fp": "0",
                 }
             )
 
@@ -771,9 +771,9 @@ class TestProposalQueue:
                             "action": "buy",
                             "side": "no",
                             "type": "limit",
-                            "remaining_count": 10,
-                            "fill_count": 0,
-                            "no_price": 48,
+                            "remaining_count_fp": "10",
+                            "fill_count_fp": "0",
+                            "no_price_dollars": "0.48",
                         }
                     )
                 ]
@@ -787,9 +787,9 @@ class TestProposalQueue:
                             "action": "buy",
                             "side": "no",
                             "type": "limit",
-                            "remaining_count": 10,
-                            "fill_count": 0,
-                            "no_price": 47,
+                            "remaining_count_fp": "10",
+                            "fill_count_fp": "0",
+                            "no_price_dollars": "0.47",
                         }
                     )
                 ]
@@ -1019,8 +1019,8 @@ class TestCheckImbalances:
                     "action": "buy",
                     "side": "no",
                     "type": "limit",
-                    "remaining_count": 10,
-                    "fill_count": 40,
+                    "remaining_count_fp": "10",
+                    "fill_count_fp": "40",
                 }
             )
         )
@@ -1086,8 +1086,8 @@ class TestCheckImbalances:
                     "action": "buy",
                     "side": "no",
                     "type": "limit",
-                    "remaining_count": 10,
-                    "fill_count": 40,
+                    "remaining_count_fp": "10",
+                    "fill_count_fp": "40",
                 }
             )
         )
@@ -1133,8 +1133,8 @@ class TestComputeEventStatus:
             ticker="TK-A",
             side="no",
             action="buy",
-            no_price=45,
-            remaining_count=10,
+            no_price_bps=4500,
+            remaining_count_fp100=1000,
             status="resting",
         )
         tracker.update_orders([order_a], [pair])
@@ -1171,8 +1171,8 @@ class TestComputeEventStatus:
             ticker="TK-A",
             side="no",
             action="buy",
-            no_price=45,
-            remaining_count=10,
+            no_price_bps=4500,
+            remaining_count_fp100=1000,
             status="resting",
         )
         order_b = Order(
@@ -1180,8 +1180,8 @@ class TestComputeEventStatus:
             ticker="TK-B",
             side="no",
             action="buy",
-            no_price=48,
-            remaining_count=10,
+            no_price_bps=4800,
+            remaining_count_fp100=1000,
             status="resting",
         )
         tracker.update_orders([order_a, order_b], [pair])
@@ -1222,8 +1222,8 @@ class TestComputeEventStatus:
             ticker="TK-A",
             side="no",
             action="buy",
-            no_price=45,
-            remaining_count=10,
+            no_price_bps=4500,
+            remaining_count_fp100=1000,
             status="resting",
         )
         order_b = Order(
@@ -1231,8 +1231,8 @@ class TestComputeEventStatus:
             ticker="TK-B",
             side="no",
             action="buy",
-            no_price=48,
-            remaining_count=10,
+            no_price_bps=4800,
+            remaining_count_fp100=1000,
             status="resting",
         )
         tracker.update_orders([order_a, order_b], [pair])
@@ -1446,8 +1446,8 @@ class TestOnOrderUpdate:
             no_price=45,
         )
         engine._on_order_update(msg)
-        assert order.fill_count == 8
-        assert order.remaining_count == 2
+        assert order.fill_count_fp100 == 800
+        assert order.remaining_count_fp100 == 200
 
     def test_does_not_decrease_fill_count(self):
         engine, _ = _engine_with_pair()
@@ -1464,7 +1464,7 @@ class TestOnOrderUpdate:
             no_price=45,
         )
         engine._on_order_update(msg)
-        assert order.fill_count == 10
+        assert order.fill_count_fp100 == 1000
 
     def test_notifies_on_new_fills(self):
         engine, _ = _engine_with_pair()
@@ -1804,11 +1804,11 @@ class TestReconcileWithKalshi:
                 ticker="MKT-1",
                 action="buy",
                 side="yes",
-                no_price=0,
-                yes_price=48,
-                initial_count=2,
-                remaining_count=0,
-                fill_count=2,
+                no_price_bps=0,
+                yes_price_bps=4800,
+                initial_count_fp100=200,
+                remaining_count_fp100=0,
+                fill_count_fp100=200,
                 status="executed",
             ),
         ]

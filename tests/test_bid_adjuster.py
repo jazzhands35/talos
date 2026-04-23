@@ -121,11 +121,11 @@ def _make_order(order_id: str, price: int, fill_count: int, remaining_count: int
         ticker="TK-B",
         side="no",
         action="buy",
-        no_price=price,
+        no_price_bps=price * 100,
         status="resting",
-        remaining_count=remaining_count,
-        fill_count=fill_count,
-        initial_count=fill_count + remaining_count,
+        remaining_count_fp100=remaining_count * 100,
+        fill_count_fp100=fill_count * 100,
+        initial_count_fp100=(fill_count + remaining_count) * 100,
     )
 
 
@@ -260,8 +260,8 @@ class TestAsyncExecution:
         fresh_order = _make_order("ord-b", price=47, fill_count=15, remaining_count=5)
         # During approval, 2 more fills arrive on this order
         old_order = _make_order("ord-b", price=47, fill_count=17, remaining_count=3)
-        old_order.maker_fees = 10  # fees accrued on the 2 new fills
-        fresh_order.maker_fees = 4  # fees before approval
+        old_order.maker_fees_bps = 1000  # fees accrued on the 2 new fills
+        fresh_order.maker_fees_bps = 400  # fees before approval
         amended_order = _make_order("ord-b", price=48, fill_count=17, remaining_count=3)
 
         rest_client = AsyncMock()

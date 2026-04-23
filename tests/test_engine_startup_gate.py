@@ -102,8 +102,8 @@ def _mk_order(
             "action": "buy",
             "side": "no",
             "type": "limit",
-            "remaining_count": remaining_count,
-            "fill_count": 0,
+            "remaining_count_fp100": remaining_count * 100,
+            "fill_count_fp100": 0,
         }
     )
 
