@@ -470,8 +470,8 @@ class TestComputeDisplayPositions:
                 Trade(
                     trade_id="t1",
                     ticker="TK-A",
-                    count=100,
-                    price=45,
+                    count_fp100=10_000,
+                    price_bps=4500,
                     side="no",
                     created_time=recent_ts,
                 ),

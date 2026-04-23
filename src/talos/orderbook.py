@@ -22,27 +22,24 @@ def _parse_levels_sorted(
     raw: list[list[int]],
     raw_bps_fp100: list[list[int]] | None = None,
 ) -> list[OrderBookLevel]:
-    """Parse raw [[price, qty], ...] into OrderBookLevel list, sorted descending by price.
+    """Parse raw [[price, qty], ...] into OrderBookLevel list, sorted descending by price_bps.
 
     ``raw_bps_fp100``, if provided with matching length, is a parallel list of
     ``[price_bps, quantity_fp100]`` pairs populated from the WS payload's
     ``_dollars_fp`` arrays via ``OrderBookSnapshot._migrate_fp``. When present,
-    each ``OrderBookLevel`` carries BOTH the legacy cents/contracts fields and
-    the exact bps/fp100 siblings — scanner reads the bps siblings directly
-    for sub-cent correctness. When absent (e.g. legacy fixtures), the bps
-    siblings stay at their default 0 and the scanner's ``_level_price_bps``
-    fallback derives them from ``cents_to_bps(level.price)`` — lossy on
-    sub-cent prices, but those markets are blocked by Phase 0 admission
-    until Task 12 relaxes the guards.
+    those exact values are used. When absent (legacy integer-cents wire),
+    promote cents → bps by ×100 and whole-contracts → fp100 by ×100.
     """
     if raw_bps_fp100 is not None and len(raw_bps_fp100) == len(raw):
         levels = [
-            OrderBookLevel(price=p, quantity=q, price_bps=pb, quantity_fp100=qf)
-            for (p, q), (pb, qf) in zip(raw, raw_bps_fp100, strict=True)
+            OrderBookLevel(price_bps=pb, quantity_fp100=qf)
+            for (pb, qf) in raw_bps_fp100
         ]
     else:
-        levels = [OrderBookLevel(price=p, quantity=q) for p, q in raw]
-    return sorted(levels, key=lambda lvl: lvl.price, reverse=True)
+        levels = [
+            OrderBookLevel(price_bps=p * 100, quantity_fp100=q * 100) for p, q in raw
+        ]
+    return sorted(levels, key=lambda lvl: lvl.price_bps, reverse=True)
 
 
 class LocalOrderBook(BaseModel):
@@ -131,34 +128,34 @@ class OrderBookManager:
         # Select side
         side_levels = book.yes if delta.side == "yes" else book.no
 
+        # Integer-wire delta has price_bps==0 / delta_fp100==0; promote ×100.
+        delta_price_bps = delta.price_bps if delta.price_bps else delta.price * 100
+        delta_qty_fp100 = delta.delta_fp100 if delta.delta_fp100 else delta.delta * 100
+
         # Find existing level at this price
         idx = next(
-            (i for i, lvl in enumerate(side_levels) if lvl.price == delta.price),
+            (i for i, lvl in enumerate(side_levels) if lvl.price_bps == delta_price_bps),
             None,
         )
 
         if idx is not None:
-            # Accumulate delta into existing level (both legacy + bps/fp100 siblings).
-            side_levels[idx].quantity += delta.delta
-            side_levels[idx].quantity_fp100 += delta.delta_fp100
-            if side_levels[idx].quantity <= 0:
+            side_levels[idx].quantity_fp100 += delta_qty_fp100
+            if side_levels[idx].quantity_fp100 <= 0:
                 side_levels.pop(idx)
-        elif delta.delta > 0:
+        elif delta_qty_fp100 > 0:
             # Insert new level, maintain descending sort via bisect.
             new_level = OrderBookLevel(
-                price=delta.price,
-                quantity=delta.delta,
-                price_bps=delta.price_bps,
-                quantity_fp100=delta.delta_fp100,
+                price_bps=delta_price_bps,
+                quantity_fp100=delta_qty_fp100,
             )
-            bisect.insort(side_levels, new_level, key=lambda lvl: -lvl.price)
+            bisect.insort(side_levels, new_level, key=lambda lvl: -lvl.price_bps)
 
         logger.debug(
             "orderbook_delta_applied",
             ticker=ticker,
             side=delta.side,
-            price=delta.price,
-            delta=delta.delta,
+            price_bps=delta_price_bps,
+            delta_fp100=delta_qty_fp100,
         )
 
     def best_bid(self, ticker: str) -> OrderBookLevel | None:

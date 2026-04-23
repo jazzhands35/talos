@@ -15,17 +15,8 @@ from talos.units import ONE_CONTRACT_FP100
 
 
 def _trade_count_fp100(trade: Trade) -> int:
-    """Read trade count preferring fp100, falling back to legacy contracts.
-
-    Trade instances parsed from Kalshi wire populate BOTH ``count`` and
-    ``count_fp100`` via the validator. Test fixtures that construct Trade
-    directly with legacy ``count=`` kwarg leave ``count_fp100`` at default 0.
-    The fallback keeps the legacy-kwarg fixtures working; removed in
-    Task 13a-2 when the legacy ``count`` field is deleted.
-    """
-    if trade.count_fp100:
-        return trade.count_fp100
-    return trade.count * ONE_CONTRACT_FP100
+    """Read trade count in fp100 (post-13a-2b: direct passthrough)."""
+    return trade.count_fp100
 
 
 def _parse_iso(ts: str) -> float:

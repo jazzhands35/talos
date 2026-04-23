@@ -17,7 +17,7 @@ from talos.fees import max_profitable_price
 from talos.models.order import Order
 from talos.models.proposal import Proposal, ProposalKey, ProposedRebalance
 from talos.position_ledger import PositionLedger, Side
-from talos.units import ONE_CONTRACT_FP100, bps_to_cents_round, cents_to_bps
+from talos.units import ONE_CONTRACT_FP100, bps_to_cents_round
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
@@ -655,17 +655,9 @@ async def execute_rebalance(
                 fresh_level = feed.book_manager.best_ask(
                     rebalance.catchup_ticker, side=catchup_side_str
                 )
-                if fresh_level is not None:
-                    # Prefer exact-precision price_bps; fall back to legacy
-                    # cents for fixtures that only populate the legacy field.
-                    fresh_bps = (
-                        fresh_level.price_bps
-                        if fresh_level.price_bps
-                        else cents_to_bps(fresh_level.price)
-                    )
-                    if fresh_bps > 0:
-                        fresh_price = bps_to_cents_round(fresh_bps)
-                        catchup_price = min(catchup_price, fresh_price)
+                if fresh_level is not None and fresh_level.price_bps > 0:
+                    fresh_price = bps_to_cents_round(fresh_level.price_bps)
+                    catchup_price = min(catchup_price, fresh_price)
             except Exception:
                 pass  # Fall back to proposal price
 

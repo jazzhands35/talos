@@ -8,28 +8,22 @@ from typing import Any
 from pydantic import BaseModel, model_validator
 
 from talos.models._converters import dollars_to_bps as _dollars_to_bps
-from talos.models._converters import dollars_to_cents as _dollars_to_cents
 from talos.models._converters import fp_to_fp100 as _fp_to_fp100
-from talos.models._converters import fp_to_int as _fp_to_int
 
 
 class OrderBookLevel(BaseModel):
     """A single price level in the orderbook.
 
-    Dual-unit migration (bps/fp100): legacy integer-cents ``price`` and
-    integer-contracts ``quantity`` are shipped alongside exact-precision
-    siblings ``price_bps`` and ``quantity_fp100``. Wire-parsed levels
-    (via :meth:`OrderBook._coerce_levels`) populate both; direct
-    construction leaves the new fields at 0 until callers migrate in
-    subsequent tasks. Legacy fields are deleted in Task 13 of
-    ``docs/superpowers/specs/2026-04-17-bps-fp100-unit-migration-design.md``.
+    Uses bps (basis points) and fp100 (1/100 of a contract) for exact
+    precision. Wire-parsed levels populate ``price_bps`` / ``quantity_fp100``
+    via :meth:`OrderBook._coerce_levels`.
+
+    Task 13a-2b (2026-04-23): legacy integer-cents ``price`` and
+    integer-contracts ``quantity`` fields removed.
     """
 
-    price: int
-    quantity: int
-    # New bps / fp100 fields (exact precision — preferred).
-    price_bps: int = 0
-    quantity_fp100: int = 0
+    price_bps: int
+    quantity_fp100: int
 
 
 class PriceRange(BaseModel, extra="ignore"):
@@ -48,18 +42,13 @@ class PriceRange(BaseModel, extra="ignore"):
 class Market(BaseModel):
     """A Kalshi market (contract).
 
-    Dual-unit migration (bps/fp100): each money/count field has both a
-    legacy integer-cents / integer-contracts attribute (``yes_bid``,
-    ``volume``, ...) and a new exact-precision bps / fp100 sibling
-    (``yes_bid_bps``, ``volume_fp100``, ...). Both populate from the
-    same ``_dollars`` / ``_fp`` wire payload. Downstream callers migrate
-    from the legacy names to the ``_bps`` / ``_fp100`` names
-    incrementally; the legacy fields are deleted in Task 13 of
-    ``docs/superpowers/specs/2026-04-17-bps-fp100-unit-migration-design.md``
-    once all callers have migrated.
+    Money/count fields use bps and fp100 for exact precision. The validator
+    converts ``_dollars`` / ``_fp`` wire strings into the ``_bps`` /
+    ``_fp100`` fields via the Decimal parsers in :mod:`talos.units`.
 
-    Post March 12, 2026: integer cents fields removed from API responses.
-    The validator converts _dollars/_fp string fields to int cents/int counts.
+    Task 13a-2b (2026-04-23): legacy integer-cents / integer-contracts
+    fields (``yes_bid``, ``no_ask``, ``volume``, ``last_price``, ...)
+    removed.
 
     Phase 0 additions (2026-04-21): ``fractional_trading_enabled``,
     ``price_level_structure``, and ``price_ranges`` are shape metadata used
@@ -72,16 +61,6 @@ class Market(BaseModel):
     event_ticker: str
     title: str
     status: str
-    # Legacy integer-cents / integer-contract fields (lossy for sub-cent
-    # / fractional markets — deprecated, removed in Task 13).
-    yes_bid: int | None = None
-    yes_ask: int | None = None
-    no_bid: int | None = None
-    no_ask: int | None = None
-    volume: int | None = None
-    volume_24h: int | None = None
-    open_interest: int | None = None
-    last_price: int | None = None
     settlement_ts: str | None = None
     close_time: str | None = None
     open_time: str | None = None
@@ -92,7 +71,7 @@ class Market(BaseModel):
     fractional_trading_enabled: bool = False
     price_level_structure: str = ""
     price_ranges: list[PriceRange] = []
-    # New bps / fp100 fields (exact precision — preferred).
+    # bps / fp100 fields (exact precision).
     yes_bid_bps: int | None = None
     yes_ask_bps: int | None = None
     no_bid_bps: int | None = None
@@ -129,25 +108,23 @@ class Market(BaseModel):
     def _migrate_fp(cls, data: Any) -> Any:
         if not isinstance(data, dict):
             return data
-        # Dollars → cents (legacy, lossy) + bps (new, exact).
-        for legacy, new_bps, wire in [
-            ("yes_bid", "yes_bid_bps", "yes_bid_dollars"),
-            ("yes_ask", "yes_ask_bps", "yes_ask_dollars"),
-            ("no_bid", "no_bid_bps", "no_bid_dollars"),
-            ("no_ask", "no_ask_bps", "no_ask_dollars"),
-            ("last_price", "last_price_bps", "last_price_dollars"),
+        # Dollars → bps (exact).
+        for new_bps, wire in [
+            ("yes_bid_bps", "yes_bid_dollars"),
+            ("yes_ask_bps", "yes_ask_dollars"),
+            ("no_bid_bps", "no_bid_dollars"),
+            ("no_ask_bps", "no_ask_dollars"),
+            ("last_price_bps", "last_price_dollars"),
         ]:
             if wire in data and data[wire] is not None:
-                data[legacy] = _dollars_to_cents(data[wire])
                 data[new_bps] = _dollars_to_bps(data[wire])
-        # FP → int (legacy, floor) + fp100 (new, exact).
-        for legacy, new_fp100, wire in [
-            ("volume", "volume_fp100", "volume_fp"),
-            ("volume_24h", "volume_24h_fp100", "volume_24h_fp"),
-            ("open_interest", "open_interest_fp100", "open_interest_fp"),
+        # FP → fp100 (exact).
+        for new_fp100, wire in [
+            ("volume_fp100", "volume_fp"),
+            ("volume_24h_fp100", "volume_24h_fp"),
+            ("open_interest_fp100", "open_interest_fp"),
         ]:
             if wire in data and data[wire] is not None:
-                data[legacy] = _fp_to_int(data[wire])
                 data[new_fp100] = _fp_to_fp100(data[wire])
         return data
 
@@ -202,7 +179,11 @@ class OrderBook(BaseModel):
 
     @classmethod
     def _parse_levels(cls, raw: list[list[int]]) -> list[OrderBookLevel]:
-        return [OrderBookLevel(price=pair[0], quantity=pair[1]) for pair in raw]
+        # Integer wire: promote cents → bps, whole-contracts → fp100.
+        return [
+            OrderBookLevel(price_bps=pair[0] * 100, quantity_fp100=pair[1] * 100)
+            for pair in raw
+        ]
 
     @model_validator(mode="before")
     @classmethod
@@ -230,22 +211,17 @@ class OrderBook(BaseModel):
                     coerced = []
                     for pair in levels:
                         # New format: ["0.52", "10.00"] (dollars str, fp str)
-                        # Old format: [52, 10] (cents int, qty int)
+                        # Old format: [52, 10] (cents int, qty int) — promote ×100
                         p, q = pair[0], pair[1]
-                        # Dual-populate: legacy cents/int alongside exact bps/fp100.
-                        # Integer wire (pre-migration) has no _bps/_fp100 promotion —
-                        # new fields stay at the OrderBookLevel default of 0.
                         level: dict[str, int] = {}
                         if isinstance(p, str):
-                            level["price"] = _dollars_to_cents(p)
                             level["price_bps"] = _dollars_to_bps(p)
                         else:
-                            level["price"] = p
+                            level["price_bps"] = p * 100
                         if isinstance(q, str):
-                            level["quantity"] = _fp_to_int(q)
                             level["quantity_fp100"] = _fp_to_fp100(q)
                         else:
-                            level["quantity"] = q
+                            level["quantity_fp100"] = q * 100
                         coerced.append(level)
                     data[side] = coerced
         return data
@@ -255,31 +231,21 @@ class Trade(BaseModel):
     """A single trade execution.
 
     The Kalshi API returns ``taker_side`` (not ``side``) and ``price`` as a
-    dollar float (not cents int).  The validator normalizes both so downstream
-    code always sees ``side`` as a string and ``price`` as cents.
+    dollar float (not cents int). The validator normalizes ``side`` and
+    converts the float price into ``price_bps`` via ``int(round(p *
+    10_000))`` (not the fail-closed Decimal parser — IEEE-754 artifacts
+    such as ``0.53 * 10_000 = 5299.9999...`` would otherwise trip sub-bps
+    precision checks and raise).
 
-    Dual-unit migration (bps/fp100): each money/count field has a
-    ``_bps`` / ``_fp100`` sibling alongside the legacy cents/int field.
-    The float-price path populates ``price_bps`` via ``int(round(p *
-    10_000))`` rather than the fail-closed Decimal parser, because
-    IEEE-754 representation of dollar floats (e.g. ``0.53 * 10_000 =
-    5299.9999...``) would otherwise trip sub-bps precision checks and
-    raise. Whole-cent and sub-cent values both round correctly through
-    this path. Legacy fields are deleted in Task 13 of
-    ``docs/superpowers/specs/2026-04-17-bps-fp100-unit-migration-design.md``.
-
-    Post March 12: _dollars/_fp fields replace integer fields.
+    Task 13a-2b (2026-04-23): legacy integer cents / integer-contract
+    fields (``price``, ``count``, ``yes_price``, ``no_price``) removed.
     """
 
     ticker: str
     trade_id: str
-    price: int
-    count: int
     side: str
     created_time: str
-    yes_price: int | None = None
-    no_price: int | None = None
-    # New bps / fp100 fields (exact precision — preferred).
+    # bps / fp100 fields (exact precision).
     price_bps: int = 0
     yes_price_bps: int | None = None
     no_price_bps: int | None = None
@@ -292,19 +258,17 @@ class Trade(BaseModel):
             # API returns taker_side, normalize to side
             if "taker_side" in data and "side" not in data:
                 data["side"] = data["taker_side"]
-            # Dollars → cents (legacy) + bps (new, exact).
-            for legacy, new_bps, wire in [
-                ("yes_price", "yes_price_bps", "yes_price_dollars"),
-                ("no_price", "no_price_bps", "no_price_dollars"),
+            # Dollars → bps (exact).
+            for new_bps, wire in [
+                ("yes_price_bps", "yes_price_dollars"),
+                ("no_price_bps", "no_price_dollars"),
             ]:
                 if wire in data and data[wire] is not None:
-                    data[legacy] = _dollars_to_cents(data[wire])
                     data[new_bps] = _dollars_to_bps(data[wire])
-            # Count fp → int (legacy, floor) + fp100 (new, exact).
+            # Count fp → fp100 (exact).
             if "count_fp" in data and data["count_fp"] is not None:
-                data["count"] = _fp_to_int(data["count_fp"])
                 data["count_fp100"] = _fp_to_fp100(data["count_fp"])
-            # API returns price as float (dollars), normalize to cents + bps.
+            # API returns price as float (dollars), normalize to bps.
             # NOTE: float path uses int(round(p * 10_000)) — NOT the Decimal
             # parser — because IEEE-754 artifacts (e.g. 0.53 * 10_000 =
             # 5299.9999...) would otherwise trip the fail-closed sub-bps
@@ -312,12 +276,14 @@ class Trade(BaseModel):
             if "price" in data:
                 p = data["price"]
                 if isinstance(p, float) and p <= 1.0:
-                    data["price"] = round(p * 100)
                     data["price_bps"] = int(round(p * 10_000))
-            # If price missing but yes_price present, derive it (both legacy
-            # and bps, after the _dollars wire promotion above).
-            if "price" not in data and "yes_price" in data:
-                data["price"] = data["yes_price"]
-                if "yes_price_bps" in data:
-                    data["price_bps"] = data["yes_price_bps"]
+                elif isinstance(p, int):
+                    # Integer cents wire — legacy path, promote to bps.
+                    data["price_bps"] = p * 100
+                # Remove the legacy-only 'price' key from the dict; Pydantic
+                # would otherwise try to apply it to a non-existent field.
+                del data["price"]
+            # If price missing but yes_price derivation is needed for the bps.
+            if "price_bps" not in data and "yes_price_bps" in data:
+                data["price_bps"] = data["yes_price_bps"]
         return data

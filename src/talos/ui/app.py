@@ -859,12 +859,36 @@ class TalosApp(App):
                     "league": league,
                     "title": ev.title,
                     "sub_title": ev.sub_title,
-                    "volume_a": active_mkts[0].volume_24h or 0 if len(active_mkts) > 0 else 0,
-                    "volume_b": active_mkts[1].volume_24h or 0 if len(active_mkts) > 1 else 0,
-                    "no_bid_a": active_mkts[0].no_bid or 0 if len(active_mkts) > 0 else 0,
-                    "no_ask_a": active_mkts[0].no_ask or 0 if len(active_mkts) > 0 else 0,
-                    "no_bid_b": active_mkts[1].no_bid or 0 if len(active_mkts) > 1 else 0,
-                    "no_ask_b": active_mkts[1].no_ask or 0 if len(active_mkts) > 1 else 0,
+                    "volume_a": (
+                        (active_mkts[0].volume_24h_fp100 or 0) // 100
+                        if len(active_mkts) > 0
+                        else 0
+                    ),
+                    "volume_b": (
+                        (active_mkts[1].volume_24h_fp100 or 0) // 100
+                        if len(active_mkts) > 1
+                        else 0
+                    ),
+                    "no_bid_a": (
+                        (active_mkts[0].no_bid_bps or 0) // 100
+                        if len(active_mkts) > 0
+                        else 0
+                    ),
+                    "no_ask_a": (
+                        (active_mkts[0].no_ask_bps or 0) // 100
+                        if len(active_mkts) > 0
+                        else 0
+                    ),
+                    "no_bid_b": (
+                        (active_mkts[1].no_bid_bps or 0) // 100
+                        if len(active_mkts) > 1
+                        else 0
+                    ),
+                    "no_ask_b": (
+                        (active_mkts[1].no_ask_bps or 0) // 100
+                        if len(active_mkts) > 1
+                        else 0
+                    ),
                     "edge": 0.0,
                     "selected": 1 if ev.event_ticker in selected_tickers else 0,
                 }

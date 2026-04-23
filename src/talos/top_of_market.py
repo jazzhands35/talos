@@ -9,7 +9,7 @@ import structlog
 from talos.models.order import ACTIVE_STATUSES, Order
 from talos.models.strategy import ArbPair
 from talos.orderbook import OrderBookManager
-from talos.units import bps_to_cents_round, cents_to_bps
+from talos.units import bps_to_cents_round
 
 logger = structlog.get_logger()
 
@@ -89,10 +89,7 @@ class TopOfMarketTracker:
         if best is None:
             return
 
-        best_price_bps = (
-            best.price_bps if best.price_bps else cents_to_bps(best.price)
-        )
-        best_price_cents = bps_to_cents_round(best_price_bps)
+        best_price_cents = bps_to_cents_round(best.price_bps)
         now_at_top = best_price_cents <= resting_price
         was_at_top = self._at_top.get(key)
 
@@ -140,5 +137,4 @@ class TopOfMarketTracker:
         best = self._books.best_ask(ticker, side=side)
         if best is None:
             return None
-        best_bps = best.price_bps if best.price_bps else cents_to_bps(best.price)
-        return bps_to_cents_round(best_bps)
+        return bps_to_cents_round(best.price_bps)

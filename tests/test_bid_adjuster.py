@@ -23,7 +23,7 @@ class FakeBookManager(OrderBookManager):
         price = self._prices.get(ticker)
         if price is None:
             return None
-        return OrderBookLevel(price=price, quantity=100)
+        return OrderBookLevel(price_bps=price * 100, quantity_fp100=10_000)
 
 
 class TestDecisionLogic:

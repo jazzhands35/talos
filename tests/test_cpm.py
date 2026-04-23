@@ -12,8 +12,8 @@ def _trade(trade_id: str, count: int, ts: str = "2026-03-06T12:00:00Z") -> Trade
     return Trade(
         ticker="MKT-A",
         trade_id=trade_id,
-        price=50,
-        count=count,
+        price_bps=5000,
+        count_fp100=count * 100,
         side="no",
         created_time=ts,
     )

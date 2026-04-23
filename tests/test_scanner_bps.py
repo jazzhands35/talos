@@ -76,8 +76,6 @@ def _install_subcent_book(
     assert book is not None
     book.no = [
         OrderBookLevel(
-            price=price,
-            quantity=quantity,
             price_bps=price_bps,
             quantity_fp100=quantity_fp100,
         )

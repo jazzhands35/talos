@@ -91,7 +91,7 @@ def _make_engine(
     book_mgr_mock = MagicMock(spec=OrderBookManager)
     if best_ask_price is not None:
         book_mgr_mock.best_ask.return_value = OrderBookLevel(
-            price=best_ask_price, quantity=100
+            price_bps=best_ask_price * 100, quantity_fp100=10_000
         )
     else:
         book_mgr_mock.best_ask.return_value = None

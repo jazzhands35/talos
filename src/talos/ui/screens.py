@@ -450,9 +450,13 @@ class ScanScreen(ModalScreen[list[str] | None]):
 
             # Volume — use active markets only
             active_mkts = [m for m in ev.markets if m.status == "active"]
-            vol_a = _fmt_vol_compact(active_mkts[0].volume_24h or 0) if active_mkts else "—"
+            vol_a = (
+                _fmt_vol_compact((active_mkts[0].volume_24h_fp100 or 0) // 100)
+                if active_mkts
+                else "—"
+            )
             vol_b = (
-                _fmt_vol_compact(active_mkts[1].volume_24h or 0)
+                _fmt_vol_compact((active_mkts[1].volume_24h_fp100 or 0) // 100)
                 if len(active_mkts) > 1
                 else "—"
             )
@@ -979,14 +983,14 @@ class MarketPickerScreen(ModalScreen[list[Market]]):
         # Sort by 24h volume descending (most liquid first)
         sorted_markets = sorted(
             self._markets,
-            key=lambda m: m.volume_24h or 0,
+            key=lambda m: (m.volume_24h_fp100 or 0) // 100,
             reverse=True,
         )
 
         self._row_tickers = []
         for market in sorted_markets:
             self._row_tickers.append(market.ticker)
-            vol_str = _fmt_vol_compact(market.volume_24h or 0)
+            vol_str = _fmt_vol_compact((market.volume_24h_fp100 or 0) // 100)
             table.add_row(
                 "",  # ✓ column
                 market.title or market.ticker,

@@ -736,7 +736,7 @@ class TestSeriesTicker:
                     event_ticker="KXHURCTOTMAJ-26DEC01",
                     title="Above 4",
                     status="active",
-                    volume_24h=479,  # matches Kalshi UI screenshot from bug report
+                    volume_24h_fp100=47_900,  # matches Kalshi UI screenshot (479 contracts)
                 ),
             ]
         )
@@ -765,7 +765,7 @@ def _make_nonsports_event(
             title=f"Market {i}",
             status=status,
             close_time=close_time,
-            volume_24h=volume_24h,
+            volume_24h_fp100=volume_24h * 100,
         )
         for i in range(market_count)
     ]

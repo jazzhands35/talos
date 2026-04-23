@@ -491,7 +491,7 @@ class GameManager:
 
         # Store 24h volume per active market ticker
         for m in active_markets:
-            self._volumes_24h[m.ticker] = m.volume_24h or 0
+            self._volumes_24h[m.ticker] = (m.volume_24h_fp100 or 0) // 100
 
         # Build short display label from sub_title
         label = event.sub_title or event.title
@@ -577,7 +577,7 @@ class GameManager:
 
         # Store metadata
         self._subtitles[market.ticker] = event.sub_title
-        self._volumes_24h[market.ticker] = market.volume_24h or 0
+        self._volumes_24h[market.ticker] = (market.volume_24h_fp100 or 0) // 100
 
         # Build YES/NO labels from market title
         short = (market.title or "").removeprefix("Will ").removesuffix("?").strip()
@@ -709,7 +709,7 @@ class GameManager:
                     for market in e.markets:
                         if market.status != "active":
                             continue
-                        if (market.volume_24h or 0) == 0:
+                        if (market.volume_24h_fp100 or 0) == 0:
                             continue
                         if self._nonsports_max_days and not _market_closes_within(market, self._nonsports_max_days):
                             continue
@@ -837,8 +837,8 @@ class GameManager:
         results = await asyncio.gather(*(_fetch(s) for s in ordered))
         for batch in results:
             for m in batch:
-                if m.volume_24h is not None:
-                    self._volumes_24h[m.ticker] = m.volume_24h
+                if m.volume_24h_fp100 is not None:
+                    self._volumes_24h[m.ticker] = m.volume_24h_fp100 // 100
 
     async def scan_events(self, scan_mode: str = "sports") -> list[Event]:
         """Discover all open arb-eligible events not already monitored."""
@@ -877,7 +877,7 @@ class GameManager:
                     active_mkts = [m for m in event.markets if m.status == "active"]
                     if len(active_mkts) != 2:
                         continue
-                    if all((m.volume_24h or 0) == 0 for m in active_mkts):
+                    if all(((m.volume_24h_fp100 or 0) // 100) == 0 for m in active_mkts):
                         continue
                     sports_events.append(event)
 

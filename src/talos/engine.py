@@ -2978,7 +2978,10 @@ class TradingEngine:
             # Safety gate #2: no spread crossing
             kalshi_side = pair.side_a if behind_side == Side.A else pair.side_b
             ask_level = self._feed.book_manager.best_ask(ticker, side=kalshi_side)
-            if ask_level is not None and improved_price >= ask_level.price:
+            if (
+                ask_level is not None
+                and improved_price >= ask_level.price_bps // 100
+            ):
                 continue
 
             # Build proposal
@@ -4362,7 +4365,10 @@ class TradingEngine:
 
         # Re-check: no spread crossing
         ask_level = self._feed.book_manager.best_ask(qi.ticker, side=qi.kalshi_side)
-        if ask_level is not None and qi.improved_price >= ask_level.price:
+        if (
+            ask_level is not None
+            and qi.improved_price >= ask_level.price_bps // 100
+        ):
             self._notify(
                 f"Queue improve BLOCKED: {name} {qi.improved_price}c would cross spread",
                 "warning",

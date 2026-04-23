@@ -58,10 +58,10 @@ class TestApplySnapshot:
         manager.apply_snapshot("MKT-1", snapshot)
         book = manager.get_book("MKT-1")
         assert book is not None
-        assert book.yes[0].price == 65
-        assert book.yes[1].price == 60
-        assert book.no[0].price == 40
-        assert book.no[1].price == 35
+        assert book.yes[0].price_bps == 6500
+        assert book.yes[1].price_bps == 6000
+        assert book.no[0].price_bps == 4000
+        assert book.no[1].price_bps == 3500
 
     def test_snapshot_replaces_existing_book(self, manager: OrderBookManager) -> None:
         snap1 = OrderBookSnapshot(
@@ -81,7 +81,7 @@ class TestApplySnapshot:
         book = manager.get_book("MKT-1")
         assert book is not None
         assert len(book.yes) == 1
-        assert book.yes[0].price == 70
+        assert book.yes[0].price_bps == 7000
 
     def test_snapshot_sets_last_update(self, manager: OrderBookManager) -> None:
         snapshot = OrderBookSnapshot(
@@ -129,8 +129,8 @@ class TestApplyDelta:
         manager.apply_delta("MKT-1", d, seq=1)
         book = manager.get_book("MKT-1")
         assert book is not None
-        level = next(lvl for lvl in book.yes if lvl.price == 65)
-        assert level.quantity == 150
+        level = next(lvl for lvl in book.yes if lvl.price_bps == 6500)
+        assert level.quantity_fp100 == 15_000
 
     def test_insert_new_level(self, manager: OrderBookManager) -> None:
         d = self._make_delta(price=62, delta=50, side="yes")
@@ -138,7 +138,7 @@ class TestApplyDelta:
         book = manager.get_book("MKT-1")
         assert book is not None
         assert len(book.yes) == 3
-        assert [lvl.price for lvl in book.yes] == [65, 62, 60]
+        assert [lvl.price_bps for lvl in book.yes] == [6500, 6200, 6000]
 
     def test_removes_level_when_qty_hits_zero(self, manager: OrderBookManager) -> None:
         # YES@60 starts at qty=200, delta -200 → removed
@@ -147,7 +147,7 @@ class TestApplyDelta:
         book = manager.get_book("MKT-1")
         assert book is not None
         assert len(book.yes) == 1
-        assert book.yes[0].price == 65
+        assert book.yes[0].price_bps == 6500
 
     def test_removes_level_when_qty_goes_negative(self, manager: OrderBookManager) -> None:
         # YES@60 starts at qty=200, delta -300 → removed (not stored as -100)
@@ -163,7 +163,7 @@ class TestApplyDelta:
         manager.apply_delta("MKT-1", d, seq=1)
         book = manager.get_book("MKT-1")
         assert book is not None
-        assert book.no[0].quantity == 250
+        assert book.no[0].quantity_fp100 == 25_000
 
     def test_delta_updates_last_update(self, manager: OrderBookManager) -> None:
         before = time.time()
@@ -206,8 +206,8 @@ class TestQueryMethods:
     def test_best_bid(self, manager: OrderBookManager) -> None:
         bid = manager.best_bid("MKT-1")
         assert bid is not None
-        assert bid.price == 65
-        assert bid.quantity == 100
+        assert bid.price_bps == 6500
+        assert bid.quantity_fp100 == 10_000
 
     def test_best_bid_unknown_ticker(self, manager: OrderBookManager) -> None:
         assert manager.best_bid("NOPE") is None
@@ -225,8 +225,8 @@ class TestQueryMethods:
     def test_best_ask(self, manager: OrderBookManager) -> None:
         ask = manager.best_ask("MKT-1")
         assert ask is not None
-        assert ask.price == 40
-        assert ask.quantity == 50
+        assert ask.price_bps == 4000
+        assert ask.quantity_fp100 == 5000
 
     def test_best_ask_unknown_ticker(self, manager: OrderBookManager) -> None:
         assert manager.best_ask("NOPE") is None
@@ -299,8 +299,8 @@ class TestDeltaBuffering:
         book = mgr.get_book("MKT-1")
         assert book is not None
         # 100 from snapshot + 50 from buffered delta
-        assert book.yes[0].price == 65
-        assert book.yes[0].quantity == 150
+        assert book.yes[0].price_bps == 6500
+        assert book.yes[0].quantity_fp100 == 15_000
 
     def test_multiple_buffered_deltas_applied_in_order(self) -> None:
         """Multiple buffered deltas are replayed in arrival order."""
@@ -322,11 +322,11 @@ class TestDeltaBuffering:
         book = mgr.get_book("MKT-1")
         assert book is not None
         # 65: 100 + 50 - 20 = 130
-        level_65 = next(lvl for lvl in book.yes if lvl.price == 65)
-        assert level_65.quantity == 130
+        level_65 = next(lvl for lvl in book.yes if lvl.price_bps == 6500)
+        assert level_65.quantity_fp100 == 13_000
         # 60: new level from delta = 30
-        level_60 = next(lvl for lvl in book.yes if lvl.price == 60)
-        assert level_60.quantity == 30
+        level_60 = next(lvl for lvl in book.yes if lvl.price_bps == 6000)
+        assert level_60.quantity_fp100 == 3000
 
     def test_buffer_cleared_after_snapshot(self) -> None:
         """Pending buffer is cleared once snapshot is applied."""
@@ -371,7 +371,7 @@ class TestDeltaBuffering:
         mgr.apply_snapshot("MKT-1", snap1)
         book1 = mgr.get_book("MKT-1")
         assert book1 is not None
-        assert book1.yes[0].quantity == 150
+        assert book1.yes[0].quantity_fp100 == 15_000
         # MKT-2 still buffered
         assert mgr.get_book("MKT-2") is None
         assert "MKT-2" in mgr._pending_deltas
@@ -388,7 +388,7 @@ class TestDeltaBuffering:
         mgr.apply_snapshot("MKT-1", snapshot)
         book = mgr.get_book("MKT-1")
         assert book is not None
-        assert book.yes[0].quantity == 100
+        assert book.yes[0].quantity_fp100 == 10_000
 
 
 class TestBestAskSide:
@@ -401,7 +401,7 @@ class TestBestAskSide:
         ))
         result = mgr.best_ask("MKT")
         assert result is not None
-        assert result.price == 45
+        assert result.price_bps == 4500
 
     def test_best_ask_yes_side(self) -> None:
         """side='yes' returns top of YES book."""
@@ -412,7 +412,7 @@ class TestBestAskSide:
         ))
         result = mgr.best_ask("MKT", side="yes")
         assert result is not None
-        assert result.price == 60
+        assert result.price_bps == 6000
 
     def test_best_ask_yes_side_empty(self) -> None:
         """side='yes' returns None when YES book is empty."""
@@ -432,7 +432,7 @@ class TestBestAskSide:
         ))
         result = mgr.best_ask("MKT", side="no")
         assert result is not None
-        assert result.price == 45
+        assert result.price_bps == 4500
 
 
 class TestStaleTickers:

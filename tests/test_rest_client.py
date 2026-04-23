@@ -165,8 +165,8 @@ class TestMarketEndpoints:
                 "event_ticker": "KXBTC-26MAR",
                 "title": "BTC above 50000?",
                 "status": "open",
-                "yes_bid": 65,
-                "yes_ask": 67,
+                "yes_bid_dollars": "0.65",
+                "yes_ask_dollars": "0.67",
             }
         }
         client._http = AsyncMock(spec=httpx.AsyncClient)
@@ -174,7 +174,7 @@ class TestMarketEndpoints:
 
         market = await client.get_market("KXBTC-26MAR-T50000")
         assert market.ticker == "KXBTC-26MAR-T50000"
-        assert market.yes_bid == 65
+        assert market.yes_bid_bps == 6500
 
     async def test_get_events(self, client: KalshiRESTClient) -> None:
         mock_data = {
@@ -258,7 +258,7 @@ class TestMarketEndpoints:
 
         trades = await client.get_trades("KXBTC-26MAR-T50000")
         assert len(trades) == 1
-        assert trades[0].price == 65
+        assert trades[0].price_bps == 6500
 
     async def test_get_series(self, client: KalshiRESTClient) -> None:
         mock_data = {

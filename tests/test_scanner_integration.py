@@ -17,7 +17,7 @@ def _make_market(ticker: str, *, status: str = "open") -> Market:
         event_ticker="EVT-1",
         title=f"Market {ticker}",
         status=status,
-        volume_24h=100,
+        volume_24h_fp100=10_000,
     )
 
 

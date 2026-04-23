@@ -13,40 +13,20 @@ from talos.orderbook import OrderBookManager
 from talos.units import (
     ONE_DOLLAR_BPS,
     bps_to_cents_round,
-    cents_to_bps,
     complement_bps,
-    contracts_to_fp100,
 )
 
 logger = structlog.get_logger()
 
 
 def _level_price_bps(level: OrderBookLevel) -> int:
-    """Exact bps price for a level, tolerating the legacy WS path.
-
-    Direct ``OrderBookLevel(price=..., quantity=...)`` construction (used
-    by ``orderbook.py`` when parsing integer-cents WS snapshots/deltas)
-    leaves ``price_bps`` at its default of 0. When that happens, fall
-    back to ``cents_to_bps(level.price)`` so whole-cent markets retain
-    correct behavior. Sub-cent markets must populate ``price_bps``
-    directly at the wire boundary (via Market/_dollars parsing) — the
-    fallback is lossy by construction.
-    """
-    return level.price_bps if level.price_bps else cents_to_bps(level.price)
+    """Exact bps price for a level (post-13a-2b: direct passthrough)."""
+    return level.price_bps
 
 
 def _level_quantity_fp100(level: OrderBookLevel) -> int:
-    """Exact fp100 quantity for a level, tolerating the legacy WS path.
-
-    Mirrors :func:`_level_price_bps` — falls back to
-    ``contracts_to_fp100(level.quantity)`` when ``quantity_fp100`` is 0
-    (the default for levels built by the whole-contract WS path).
-    """
-    return (
-        level.quantity_fp100
-        if level.quantity_fp100
-        else contracts_to_fp100(level.quantity)
-    )
+    """Exact fp100 quantity for a level (post-13a-2b: direct passthrough)."""
+    return level.quantity_fp100
 
 
 class ArbitrageScanner:
@@ -158,12 +138,13 @@ class ArbitrageScanner:
         """Derive implied price from the opposite side of the book.
 
         When the NO side is empty but YES bids exist, the implied NO ask
-        is ``100 - best_yes_bid``.  Similarly for the reverse.
+        is ``100 - best_yes_bid``.  Similarly for the reverse. Returns
+        (price_cents, quantity_contracts) derived from the bps/fp100 fields.
         """
         opposite = "yes" if side == "no" else "no"
         level = self._books.best_ask(ticker, side=opposite)
         if level:
-            return 100 - level.price, level.quantity
+            return 100 - level.price_bps // 100, level.quantity_fp100 // 100
         return None
 
     def _derive_price_bps(
@@ -172,11 +153,6 @@ class ArbitrageScanner:
         """Bps/fp100 sibling of :meth:`_derive_price`.
 
         Implied NO-ask in bps is ``ONE_DOLLAR_BPS - best_yes_bid_bps``.
-        Falls back to ``cents_to_bps(level.price)`` and
-        ``contracts_to_fp100(level.quantity)`` when the OrderBookLevel was
-        constructed from the legacy integer-cents WS path (``price_bps`` /
-        ``quantity_fp100`` default to 0 in that case — see
-        ``src/talos/orderbook.py::_parse_levels_sorted``).
         """
         opposite = "yes" if side == "no" else "no"
         level = self._books.best_ask(ticker, side=opposite)
@@ -206,8 +182,16 @@ class ArbitrageScanner:
             existing = self._all_snapshots.get(pair.event_ticker)
             if existing is not None:
                 update: dict[str, object] = {"timestamp": datetime.now(UTC).isoformat()}
-                pa, qa = (no_a.price, no_a.quantity) if no_a else (None, 0)
-                pb, qb = (no_b.price, no_b.quantity) if no_b else (None, 0)
+                pa, qa = (
+                    (no_a.price_bps // 100, no_a.quantity_fp100 // 100)
+                    if no_a
+                    else (None, 0)
+                )
+                pb, qb = (
+                    (no_b.price_bps // 100, no_b.quantity_fp100 // 100)
+                    if no_b
+                    else (None, 0)
+                )
                 # Parallel bps / fp100 extraction — see _level_price_bps.
                 pa_bps: int | None = (
                     _level_price_bps(no_a) if no_a else None
@@ -295,20 +279,24 @@ class ArbitrageScanner:
         raw_edge = bps_to_cents_round(raw_edge_bps)
         fee_edge_bps = fee_adjusted_edge_bps(pa_bps, pb_bps, rate=pair.fee_rate)
         # Preserve the historical float-cents semantics of ``fee_edge``:
-        # pass the legacy integer-cent prices through the legacy formula so
+        # pass the cent-rounded prices through the legacy formula so
         # whole-cent tests continue to see the exact same fractional value.
-        fee_edge = fee_adjusted_edge(no_a.price, no_b.price, rate=pair.fee_rate)
-        tradeable_qty = min(no_a.quantity, no_b.quantity)
+        no_a_cents = pa_bps // 100
+        no_b_cents = pb_bps // 100
+        no_a_qty = qa_fp100 // 100
+        no_b_qty = qb_fp100 // 100
+        fee_edge = fee_adjusted_edge(no_a_cents, no_b_cents, rate=pair.fee_rate)
+        tradeable_qty = min(no_a_qty, no_b_qty)
         tradeable_qty_fp100 = min(qa_fp100, qb_fp100)
 
         opp = Opportunity(
             event_ticker=pair.event_ticker,
             ticker_a=pair.ticker_a,
             ticker_b=pair.ticker_b,
-            no_a=no_a.price,
-            no_b=no_b.price,
-            qty_a=no_a.quantity,
-            qty_b=no_b.quantity,
+            no_a=no_a_cents,
+            no_b=no_b_cents,
+            qty_a=no_a_qty,
+            qty_b=no_b_qty,
             raw_edge=raw_edge,
             fee_edge=fee_edge,
             tradeable_qty=tradeable_qty,

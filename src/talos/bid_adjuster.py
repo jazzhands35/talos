@@ -241,14 +241,7 @@ class BidAdjuster:
         book_top_price = None
         best_probe = self._books.best_ask(ticker, side=pair_side)
         if best_probe is not None:
-            # Prefer exact-precision price_bps; fall back to legacy cents for
-            # fixtures that only populate the legacy field.
-            probe_bps = (
-                best_probe.price_bps
-                if best_probe.price_bps
-                else cents_to_bps(best_probe.price)
-            )
-            book_top_price = bps_to_cents_round(probe_bps)
+            book_top_price = bps_to_cents_round(best_probe.price_bps)
         cur_resting_price = ledger.resting_price(adj_side)
         cur_resting_count = ledger.resting_count(adj_side)
 
@@ -320,9 +313,7 @@ class BidAdjuster:
         # Internal profitability math runs in bps; the proposal's new_price is
         # the whole-cent value Talos will submit to Kalshi (output boundary —
         # Kalshi accepts whole-cent prices only for amend/place).
-        new_price_bps = (
-            best.price_bps if best.price_bps else cents_to_bps(best.price)
-        )
+        new_price_bps = best.price_bps
         new_price = bps_to_cents_round(new_price_bps)
 
         # If new price equals current resting price, no action needed
@@ -372,11 +363,7 @@ class BidAdjuster:
             other_pair_side = pair.side_a if other_side is Side.A else pair.side_b
             other_best = self._books.best_ask(other_ticker, side=other_pair_side)
             if other_best is not None:
-                other_price_bps = (
-                    other_best.price_bps
-                    if other_best.price_bps
-                    else cents_to_bps(other_best.price)
-                )
+                other_price_bps = other_best.price_bps
             else:
                 other_price_bps = ledger.resting_price_bps(other_side)
             other_effective_bps = fee_adjusted_cost_bps(other_price_bps, rate=rate)
