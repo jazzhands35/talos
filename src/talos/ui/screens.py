@@ -20,6 +20,47 @@ from talos.models.portfolio import Settlement
 from talos.models.position import EventPositionSummary
 from talos.models.strategy import BidConfirmation, Opportunity
 from talos.ui.theme import GREEN, RED, SURFACE2, YELLOW
+from talos.units import (
+    ONE_DOLLAR_BPS,
+    bps_to_cents_round,
+    cents_to_bps,
+    contracts_to_fp100,
+    format_bps_as_dollars_display,
+)
+
+
+# ── Settlement fallback helpers (removed in 13a-2) ─────────────────
+# Direct-kwarg Settlement fixtures leave the _bps/_fp100 siblings at 0.
+# Prefer the exact-precision field; fall back to cents*100 / contracts*100.
+def _settlement_revenue_bps(s: Settlement) -> int:
+    """Settlement.revenue_bps with legacy fallback (removed in 13a-2)."""
+    return s.revenue_bps if s.revenue_bps else cents_to_bps(s.revenue)
+
+
+def _settlement_fee_cost_bps(s: Settlement) -> int:
+    """Settlement.fee_cost_bps with legacy fallback (removed in 13a-2)."""
+    return s.fee_cost_bps if s.fee_cost_bps else cents_to_bps(s.fee_cost)
+
+
+def _settlement_yes_total_cost_bps(s: Settlement) -> int:
+    """Settlement.yes_total_cost_bps with legacy fallback (removed in 13a-2)."""
+    return s.yes_total_cost_bps if s.yes_total_cost_bps else cents_to_bps(s.yes_total_cost)
+
+
+def _settlement_no_total_cost_bps(s: Settlement) -> int:
+    """Settlement.no_total_cost_bps with legacy fallback (removed in 13a-2)."""
+    return s.no_total_cost_bps if s.no_total_cost_bps else cents_to_bps(s.no_total_cost)
+
+
+def _settlement_yes_count_fp100(s: Settlement) -> int:
+    """Settlement.yes_count_fp100 with legacy fallback (removed in 13a-2)."""
+    return s.yes_count_fp100 if s.yes_count_fp100 else contracts_to_fp100(s.yes_count)
+
+
+def _settlement_no_count_fp100(s: Settlement) -> int:
+    """Settlement.no_count_fp100 with legacy fallback (removed in 13a-2)."""
+    return s.no_count_fp100 if s.no_count_fp100 else contracts_to_fp100(s.no_count)
+
 
 # Duplicated from widgets.py to avoid circular imports
 _SPORT_LEAGUE: dict[str, tuple[str, str]] = {
@@ -193,11 +234,12 @@ class BidScreen(ModalScreen[BidConfirmation | None]):
                 id="qty-input",
                 type="integer",
             )
-            total_cost = opp.cost * default_qty
-            fee_profit = opp.fee_edge * default_qty
+            cost_bps_src = opp.cost_bps if opp.cost_bps else cents_to_bps(opp.cost)
+            total_cost_bps = cost_bps_src * default_qty
+            fee_profit = opp.fee_edge * default_qty  # fee_edge is float cents
             fee_pct = opp.fee_rate * 100
             yield Label(
-                f"Total: ${total_cost / 100:.2f} → "
+                f"Total: {format_bps_as_dollars_display(total_cost_bps)} → "
                 f"Profit: ${fee_profit / 100:.2f} (after {fee_pct:.2g}% fee)",
                 id="cost-label",
             )
@@ -555,17 +597,29 @@ class SettlementHistoryScreen(ModalScreen[None]):
 
             # Compute day total P&L (revenue - cost - fees)
             # Same-ticker pairs: Kalshi nets YES+NO → revenue=0; add
-            # back min(yes,no)*100 for the implicit settlement payout.
-            day_pnl = 0
+            # back min(yes,no) × $1 for the implicit settlement payout.
+            # Bps arithmetic: fp100 × bps / fp100 = bps (units cancel).
+            day_pnl_bps = 0
             for _, legs, _ in day_events:
                 for s in legs:
-                    implicit = min(s.yes_count, s.no_count) * 100
-                    cost = s.no_total_cost + s.yes_total_cost
-                    day_pnl += s.revenue + implicit - cost - s.fee_cost
+                    implicit_bps = (
+                        min(_settlement_yes_count_fp100(s), _settlement_no_count_fp100(s))
+                        * ONE_DOLLAR_BPS
+                    ) // 100
+                    cost_bps = (
+                        _settlement_no_total_cost_bps(s) + _settlement_yes_total_cost_bps(s)
+                    )
+                    day_pnl_bps += (
+                        _settlement_revenue_bps(s) + implicit_bps
+                        - cost_bps - _settlement_fee_cost_bps(s)
+                    )
 
             # Day separator row
             day_label = day_events[0][2].strftime("%b %d")
-            day_pnl_str = f"${day_pnl / 100:.2f}" if day_pnl >= 0 else f"-${abs(day_pnl) / 100:.2f}"
+            if day_pnl_bps >= 0:
+                day_pnl_str = format_bps_as_dollars_display(day_pnl_bps)
+            else:
+                day_pnl_str = f"-{format_bps_as_dollars_display(abs(day_pnl_bps))}"
             sep_text = f"─── {day_label} ─────────────────── Day P&L: {day_pnl_str} ───"
             table.add_row(
                 RichText(sep_text, style=SURFACE2),
@@ -605,13 +659,23 @@ class SettlementHistoryScreen(ModalScreen[None]):
         leg_b = legs[1] if len(legs) > 1 else None
 
         # Event-level actual P&L (sum both legs: revenue - cost - fees)
-        # Same-ticker pairs: add implicit payout for netted YES+NO pairs
-        total_revenue = sum(
-            s.revenue + min(s.yes_count, s.no_count) * 100 for s in legs
+        # Same-ticker pairs: add implicit payout for netted YES+NO pairs.
+        # Bps arithmetic: fp100 × bps / fp100 = bps.
+        total_revenue_bps = sum(
+            _settlement_revenue_bps(s)
+            + (
+                min(_settlement_yes_count_fp100(s), _settlement_no_count_fp100(s))
+                * ONE_DOLLAR_BPS
+            ) // 100
+            for s in legs
         )
-        total_cost = sum(s.no_total_cost + s.yes_total_cost for s in legs)
-        total_fees = sum(s.fee_cost for s in legs)
-        actual_pnl = total_revenue - total_cost - total_fees
+        total_cost_bps = sum(
+            _settlement_no_total_cost_bps(s) + _settlement_yes_total_cost_bps(s)
+            for s in legs
+        )
+        total_fees_bps = sum(_settlement_fee_cost_bps(s) for s in legs)
+        actual_pnl_bps = total_revenue_bps - total_cost_bps - total_fees_bps
+        actual_pnl = bps_to_cents_round(actual_pnl_bps)
 
         # Event-level estimated P&L: prefer live position, fall back to cache
         pos = self._positions.get(evt_ticker)
@@ -626,7 +690,7 @@ class SettlementHistoryScreen(ModalScreen[None]):
         else:
             est_str = RichText("—", style="dim", justify="right")
 
-        actual_str = self._fmt_dollars(actual_pnl)
+        actual_str = self._fmt_dollars_bps(actual_pnl_bps)
 
         # Highlight discrepancy
         if est_pnl_cents is not None and abs(est_pnl_cents - actual_pnl) > 5:
@@ -685,8 +749,14 @@ class SettlementHistoryScreen(ModalScreen[None]):
     def _fmt_no_price(leg: Settlement | None) -> RichText:
         if leg is None or leg.no_count == 0:
             return RichText("—", style="dim", justify="right")
-        avg = leg.no_total_cost // leg.no_count
-        return RichText(f"{avg}¢", justify="right")
+        # Average NO price per contract: (total_cost_bps * fp100) / (count_fp100 * bps)
+        # Display in whole cents (rounded).
+        no_total_bps = _settlement_no_total_cost_bps(leg)
+        no_count_fp100 = _settlement_no_count_fp100(leg)
+        if no_count_fp100 == 0:
+            return RichText("—", style="dim", justify="right")
+        avg_bps = (no_total_bps * 100) // no_count_fp100
+        return RichText(f"{bps_to_cents_round(avg_bps)}¢", justify="right")
 
     @staticmethod
     def _fmt_qty(leg: Settlement | None) -> RichText:
@@ -698,14 +768,25 @@ class SettlementHistoryScreen(ModalScreen[None]):
     def _fmt_cost(leg: Settlement | None) -> RichText:
         if leg is None:
             return RichText("—", style="dim", justify="right")
-        cost = leg.no_total_cost + leg.yes_total_cost
-        return RichText(f"${cost / 100:.2f}", justify="right")
+        cost_bps = (
+            _settlement_no_total_cost_bps(leg) + _settlement_yes_total_cost_bps(leg)
+        )
+        return RichText(format_bps_as_dollars_display(cost_bps), justify="right")
 
     @staticmethod
     def _fmt_dollars(cents: int) -> RichText:
-        if cents >= 0:
-            return RichText(f"${cents / 100:.2f}", style=GREEN, justify="right")
-        return RichText(f"-${abs(cents) / 100:.2f}", style=RED, justify="right")
+        bps = cents_to_bps(cents)
+        return SettlementHistoryScreen._fmt_dollars_bps(bps)
+
+    @staticmethod
+    def _fmt_dollars_bps(bps: int) -> RichText:
+        if bps >= 0:
+            return RichText(
+                format_bps_as_dollars_display(bps), style=GREEN, justify="right",
+            )
+        return RichText(
+            f"-{format_bps_as_dollars_display(abs(bps))}", style=RED, justify="right",
+        )
 
     def action_cancel(self) -> None:
         self.dismiss(None)
