@@ -13,6 +13,8 @@ from textual.containers import VerticalScroll
 from textual.screen import ModalScreen
 from textual.widgets import Static
 
+from talos.ui.reconcile_banner import ReconcileBanner
+
 if TYPE_CHECKING:
     from talos.engine import TradingEngine
 
@@ -627,10 +629,43 @@ class EventReviewScreen(ModalScreen[None]):
         self._engine = engine
         self._db_path = db_path
         self._log_path = log_path
+        self._reconcile_banner: ReconcileBanner | None = None
+
+    def _build_reconcile_banner(self) -> ReconcileBanner | None:
+        """Construct a banner bound to this event's pair+ledger, or None.
+
+        Returns None when the event is not currently tracked (no ArbPair)
+        or has no ledger yet — in both cases there is nothing to reconcile.
+        """
+        pair = None
+        for p in self._engine.scanner.pairs:
+            if p.event_ticker == self._event_ticker:
+                pair = p
+                break
+        if pair is None:
+            return None
+        try:
+            ledger = self._engine.adjuster.get_ledger(self._event_ticker)
+        except KeyError:
+            return None
+        self._reconcile_banner = ReconcileBanner(
+            pair=pair,
+            ledger=ledger,
+            engine=self._engine,
+            id="reconcile-banner",
+        )
+        return self._reconcile_banner
 
     def compose(self) -> ComposeResult:
         with VerticalScroll(id="review-container"):
             yield Static(id="review-header")
+            # Banner slot — populated on_mount if a ledger exists for the pair.
+            # Rendered nothing when the ledger is ready() (no reconcile action
+            # needed). Placed between header and position so the operator sees
+            # it before reading the live state.
+            banner_host = self._build_reconcile_banner()
+            if banner_host is not None:
+                yield banner_host
             yield Static(id="review-position")
             yield Static("─" * 90, id="review-divider")
             yield Static("HISTORY", id="review-timeline-header")
@@ -640,6 +675,11 @@ class EventReviewScreen(ModalScreen[None]):
         """Populate the screen with event data."""
         evt = self._event_ticker
         label = self._engine.game_manager.labels.get(evt, evt)
+
+        # Re-poll banner state every second so the stale->warning (30s)
+        # transition fires even when no event activity occurs on the ledger.
+        if self._reconcile_banner is not None:
+            self.set_interval(1.0, self._reconcile_banner.refresh_state)
 
         # Header
         status = self._engine.event_statuses.get(evt, "")
