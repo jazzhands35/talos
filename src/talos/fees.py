@@ -22,7 +22,6 @@ from talos.units import (
     ONE_CENT_BPS,
     ONE_CONTRACT_FP100,
     ONE_DOLLAR_BPS,
-    complement_bps,
     quadratic_fee_bps,
 )
 
@@ -210,12 +209,6 @@ def fee_adjusted_profit_matched(
 # Legacy cents functions above are deprecated; removed in Task 13 when
 # all callers have migrated to the _bps variants.
 # ==================================================================
-
-# ``complement_bps`` is re-exported here purely so downstream readers of
-# this module can see the bps primitives used below without chasing
-# ``talos.units``. No behavioral change.
-_ = complement_bps  # noqa: F401 — explicit re-export for doc purposes
-
 
 def flat_fee_bps(price_bps: int, *, rate: float) -> int:
     """Per-contract fee in bps for the flat fee model.
