@@ -15,6 +15,12 @@ from talos.errors import KalshiAPIError, KalshiRateLimitError
 from talos.models.market import Event, Market, OrderBook, Series, Trade
 from talos.models.order import BatchOrderResult, Fill, Order
 from talos.models.portfolio import Balance, EventPosition, ExchangeStatus, Position, Settlement
+from talos.units import (
+    ONE_CENT_BPS,
+    ONE_CONTRACT_FP100,
+    bps_to_dollars_str,
+    fp100_to_fp_str,
+)
 
 logger = structlog.get_logger()
 
@@ -290,25 +296,39 @@ class KalshiRESTClient:
         order_type: str = "limit",
         no_price: int | None = None,
         yes_price: int | None = None,
-        count: int,
+        no_price_bps: int | None = None,
+        yes_price_bps: int | None = None,
+        count: int | None = None,
+        count_fp100: int | None = None,
         post_only: bool = True,
         order_group_id: str | None = None,
     ) -> Order:
+        # Resolve effective bps/fp100 values. When both legacy and new params
+        # are passed, the more-precise (_bps / _fp100) form wins.
+        if no_price_bps is None and no_price is not None:
+            no_price_bps = no_price * ONE_CENT_BPS
+        if yes_price_bps is None and yes_price is not None:
+            yes_price_bps = yes_price * ONE_CENT_BPS
+        if count_fp100 is None:
+            if count is None:
+                raise ValueError("create_order requires either count or count_fp100")
+            count_fp100 = count * ONE_CONTRACT_FP100
+
         body: dict[str, Any] = {
             "ticker": ticker,
             "action": action,
             "side": side,
             "type": order_type,
-            "count_fp": str(count),
+            "count_fp": fp100_to_fp_str(count_fp100),
             "client_order_id": str(uuid.uuid4()),
             "post_only": post_only,
         }
         if order_group_id is not None:
             body["order_group_id"] = order_group_id
-        if no_price is not None:
-            body["no_price_dollars"] = f"{no_price / 100:.2f}"
-        if yes_price is not None:
-            body["yes_price_dollars"] = f"{yes_price / 100:.2f}"
+        if no_price_bps is not None:
+            body["no_price_dollars"] = bps_to_dollars_str(no_price_bps)
+        if yes_price_bps is not None:
+            body["yes_price_dollars"] = bps_to_dollars_str(yes_price_bps)
         logger.info(
             "create_order",
             ticker=ticker,
@@ -316,6 +336,8 @@ class KalshiRESTClient:
             side=side,
             price=no_price or yes_price,
             count=count,
+            price_bps=no_price_bps if no_price_bps is not None else yes_price_bps,
+            count_fp100=count_fp100,
         )
         data = await self._request("POST", "/portfolio/orders", json=body)
         return Order.model_validate(data["order"])
@@ -326,16 +348,27 @@ class KalshiRESTClient:
         *,
         reduce_by: int | None = None,
         reduce_to: int | None = None,
+        reduce_by_fp100: int | None = None,
+        reduce_to_fp100: int | None = None,
     ) -> Order:
         """Reduce an order's quantity without losing queue position.
 
-        Exactly one of ``reduce_by`` or ``reduce_to`` must be provided.
+        Exactly one of ``reduce_by`` / ``reduce_by_fp100`` /
+        ``reduce_to`` / ``reduce_to_fp100`` must be provided.
+
+        The ``_fp100`` variants carry fractional-contract precision; when
+        both legacy (whole-contract) and new params are passed, the
+        ``_fp100`` form wins.
         """
+        if reduce_by_fp100 is None and reduce_by is not None:
+            reduce_by_fp100 = reduce_by * ONE_CONTRACT_FP100
+        if reduce_to_fp100 is None and reduce_to is not None:
+            reduce_to_fp100 = reduce_to * ONE_CONTRACT_FP100
         body: dict[str, Any] = {}
-        if reduce_by is not None:
-            body["reduce_by_fp"] = str(reduce_by)
-        if reduce_to is not None:
-            body["reduce_to_fp"] = str(reduce_to)
+        if reduce_by_fp100 is not None:
+            body["reduce_by_fp"] = fp100_to_fp_str(reduce_by_fp100)
+        if reduce_to_fp100 is not None:
+            body["reduce_to_fp"] = fp100_to_fp_str(reduce_to_fp100)
         data = await self._request("POST", f"/portfolio/orders/{order_id}/decrease", json=body)
         return Order.model_validate(data["order"])
 
@@ -352,7 +385,10 @@ class KalshiRESTClient:
         action: str = "buy",
         no_price: int | None = None,
         yes_price: int | None = None,
+        no_price_bps: int | None = None,
+        yes_price_bps: int | None = None,
         count: int | None = None,
+        count_fp100: int | None = None,
     ) -> tuple[Order, Order]:
         """Amend an existing order's price and/or quantity.
 
@@ -360,19 +396,31 @@ class KalshiRESTClient:
         (``fill_count + remaining_count``), and only the unfilled
         portion moves to the new price queue.
 
+        When both legacy (cents / whole-contract) and new
+        (``_bps`` / ``_fp100``) params are passed for the same field,
+        the more-precise form wins.
+
         Returns ``(old_order, amended_order)``.
         """
+        # Resolve effective bps/fp100 values.
+        if no_price_bps is None and no_price is not None:
+            no_price_bps = no_price * ONE_CENT_BPS
+        if yes_price_bps is None and yes_price is not None:
+            yes_price_bps = yes_price * ONE_CENT_BPS
+        if count_fp100 is None and count is not None:
+            count_fp100 = count * ONE_CONTRACT_FP100
+
         body: dict[str, Any] = {
             "ticker": ticker,
             "side": side,
             "action": action,
         }
-        if no_price is not None:
-            body["no_price_dollars"] = f"{no_price / 100:.2f}"
-        if yes_price is not None:
-            body["yes_price_dollars"] = f"{yes_price / 100:.2f}"
-        if count is not None:
-            body["count_fp"] = str(count)
+        if no_price_bps is not None:
+            body["no_price_dollars"] = bps_to_dollars_str(no_price_bps)
+        if yes_price_bps is not None:
+            body["yes_price_dollars"] = bps_to_dollars_str(yes_price_bps)
+        if count_fp100 is not None:
+            body["count_fp"] = fp100_to_fp_str(count_fp100)
         data = await self._request("POST", f"/portfolio/orders/{order_id}/amend", json=body)
         return (
             Order.model_validate(data["old_order"]),

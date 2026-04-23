@@ -483,7 +483,7 @@ class TestOrderEndpoints:
         assert body["side"] == "no"
         assert body["action"] == "buy"
         assert body["no_price_dollars"] == "0.75"
-        assert body["count_fp"] == "10"
+        assert body["count_fp"] == "10.00"
 
     async def test_amend_order_partial_fields(self, client: KalshiRESTClient) -> None:
         """Only optional fields are sent when specified; required fields always present."""
@@ -826,7 +826,7 @@ class TestDecreaseOrder:
         assert order.remaining_count == 5
 
         _, kwargs = client._http.request.call_args
-        assert kwargs["json"]["reduce_to_fp"] == "5"
+        assert kwargs["json"]["reduce_to_fp"] == "5.00"
 
     async def test_decrease_order_reduce_by(self, client: KalshiRESTClient):
         mock_data = {
@@ -846,7 +846,7 @@ class TestDecreaseOrder:
         assert order.remaining_count == 7
 
         _, kwargs = client._http.request.call_args
-        assert kwargs["json"]["reduce_by_fp"] == "3"
+        assert kwargs["json"]["reduce_by_fp"] == "3.00"
 
 
 class TestOrderGroups:
