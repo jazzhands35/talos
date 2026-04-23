@@ -39,5 +39,19 @@ class KalshiRateLimitError(KalshiAPIError):
         )
 
 
+class KalshiNotFoundError(KalshiAPIError):
+    """Raised when Kalshi returns 404 on an order/resource fetch.
+
+    Subclass of :class:`KalshiAPIError` so existing ``except KalshiAPIError``
+    blocks still catch it. The dedicated class lets callers distinguish
+    resource-gone from other API errors (F33: a 404 on a resting-order GET
+    is a specific signal that the single tracked order_id no longer exists
+    — but does NOT prove the whole side is empty).
+    """
+
+    def __init__(self, body: Any = None, message: str = "") -> None:
+        super().__init__(status_code=404, body=body, message=message)
+
+
 class KalshiConnectionError(KalshiError):
     """WebSocket or network connection failure."""

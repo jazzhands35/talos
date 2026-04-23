@@ -12,7 +12,7 @@ import structlog
 
 from talos.auth import KalshiAuth
 from talos.config import KalshiConfig
-from talos.errors import KalshiAPIError, KalshiRateLimitError
+from talos.errors import KalshiAPIError, KalshiNotFoundError, KalshiRateLimitError
 from talos.models.market import Event, Market, OrderBook, Series, Trade
 from talos.models.order import BatchOrderResult, Fill, Order
 from talos.models.portfolio import Balance, EventPosition, ExchangeStatus, Position, Settlement
@@ -97,6 +97,8 @@ class KalshiRESTClient:
                 except (ValueError, UnicodeDecodeError):
                     # CloudFront/nginx may return HTML or plain text on 5xx
                     body = response.text[:500]
+            if response.status_code == 404:
+                raise KalshiNotFoundError(body=body)
             raise KalshiAPIError(
                 status_code=response.status_code,
                 body=body,

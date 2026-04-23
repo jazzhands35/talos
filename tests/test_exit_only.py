@@ -8,12 +8,75 @@ import pytest
 from talos.automation_config import AutomationConfig
 from talos.bid_adjuster import BidAdjuster
 from talos.game_status import GameStatus
+from talos.models.order import Order
 from talos.models.strategy import ArbPair
 from talos.opportunity_proposer import OpportunityProposer
 from talos.orderbook import OrderBookManager
 from talos.position_ledger import PositionLedger, Side
 
 # ── Helpers ─────────────────────────────────────────────────────
+
+
+def _wire_verify_cancel_mocks(rest, order_id: str = "ord-a", ticker: str = "TK-A") -> None:
+    """Set up rest mocks so ``cancel_order_with_verify`` calls cancel_order.
+
+    F36/F33: cancel_order_with_verify first probes via ``get_order``; only
+    if the probe returns a resting/executed Order does it issue the raw
+    ``cancel_order``. Then it resyncs via ``get_orders`` (plural). Tests
+    that assert on ``rest.cancel_order`` must wire these companions.
+    """
+    rest.get_order = AsyncMock(
+        return_value=Order.model_validate(
+            {
+                "order_id": order_id,
+                "ticker": ticker,
+                "status": "resting",
+                "action": "buy",
+                "side": "no",
+                "type": "limit",
+                "remaining_count": 1,
+                "fill_count": 0,
+            }
+        )
+    )
+    rest.get_orders = AsyncMock(return_value=[])
+
+
+def _keep_behind_in_get_orders(
+    rest,
+    order_id: str,
+    ticker: str,
+    *,
+    remaining: int = 1,
+    no_price: int = 49,
+) -> None:
+    """Override ``rest.get_orders`` so a specific (order_id, ticker) stays
+    visible across resync calls. Needed because ``cancel_order_with_verify``
+    calls :meth:`PositionLedger.sync_from_orders` which would otherwise
+    clear the ledger's resting state for sides not represented in the
+    empty default mock.
+    """
+
+    def _side_effect(**kwargs):
+        if kwargs.get("ticker") == ticker:
+            return [
+                Order.model_validate(
+                    {
+                        "order_id": order_id,
+                        "ticker": ticker,
+                        "status": "resting",
+                        "action": "buy",
+                        "side": "no",
+                        "type": "limit",
+                        "remaining_count": remaining,
+                        "fill_count": 0,
+                        "no_price": no_price,
+                    }
+                )
+            ]
+        return []
+
+    rest.get_orders = AsyncMock(side_effect=_side_effect)
 
 
 def _pair(event: str = "EVT-1") -> ArbPair:
@@ -325,6 +388,10 @@ class TestGameStartCancelAll:
         rest.cancel_order = AsyncMock()
         rest.decrease_order = AsyncMock()
         rest.get_all_orders = AsyncMock(return_value=[])
+        _wire_verify_cancel_mocks(rest)
+        # F33 resync: after ahead-side cancel, behind-side ord-b must
+        # still appear in get_orders so ledger retains it for the decrease.
+        _keep_behind_in_get_orders(rest, "ord-b", "TK-B", remaining=17, no_price=49)
 
         await engine._enforce_exit_only("EVT-1")
 
@@ -349,6 +416,8 @@ class TestGameStartCancelAll:
         rest.cancel_order = AsyncMock()
         rest.decrease_order = AsyncMock()
         rest.get_all_orders = AsyncMock(return_value=[])
+        _wire_verify_cancel_mocks(rest)
+        _keep_behind_in_get_orders(rest, "ord-b", "TK-B", remaining=17, no_price=49)
 
         await engine._enforce_exit_only("EVT-1")
 
@@ -370,6 +439,11 @@ class TestGameStartCancelAll:
 
         rest.cancel_order = AsyncMock()
         rest.get_all_orders = AsyncMock(return_value=[])
+        _wire_verify_cancel_mocks(rest)
+        # Both sides still appear in get_orders until each cancel completes.
+        # Model it: always return ord-b on TK-B (ord-a is what we're
+        # cancelling first, so resync clears it naturally).
+        _keep_behind_in_get_orders(rest, "ord-b", "TK-B", remaining=5, no_price=49)
 
         await engine._enforce_exit_only("EVT-1")
 
@@ -525,7 +599,45 @@ class TestExitOnlyEnforcementAsync:
         ledger.record_resting(Side.B, "ord-b", count=19, price=49)
 
         rest.cancel_order = AsyncMock()
-        rest.get_order = AsyncMock(return_value=type("O", (), {"remaining_count": 19})())
+        # F36/F33 wiring: cancel_order_with_verify probes via get_order
+        # (must return status="resting"), then resyncs via get_orders
+        # (must return the OTHER side's live order so the ledger doesn't
+        # clear it and skip the decrease step).
+        rest.get_order = AsyncMock(
+            return_value=Order.model_validate(
+                {
+                    "order_id": "ord-a",
+                    "ticker": "TK-A",
+                    "status": "resting",
+                    "action": "buy",
+                    "side": "no",
+                    "type": "limit",
+                    "remaining_count": 15,
+                    "fill_count": 5,
+                }
+            )
+        )
+
+        def _get_orders_side_effect(**kwargs):
+            if kwargs.get("ticker") == "TK-B":
+                return [
+                    Order.model_validate(
+                        {
+                            "order_id": "ord-b",
+                            "ticker": "TK-B",
+                            "status": "resting",
+                            "action": "buy",
+                            "side": "no",
+                            "type": "limit",
+                            "remaining_count": 19,
+                            "fill_count": 1,
+                            "no_price": 49,
+                        }
+                    )
+                ]
+            return []
+
+        rest.get_orders = AsyncMock(side_effect=_get_orders_side_effect)
         rest.decrease_order = AsyncMock()
         rest.get_all_orders = AsyncMock(return_value=[])
 
@@ -549,6 +661,7 @@ class TestExitOnlyEnforcementAsync:
         rest.cancel_order = AsyncMock()
         rest.decrease_order = AsyncMock()
         rest.get_all_orders = AsyncMock(return_value=[])
+        _wire_verify_cancel_mocks(rest)
 
         await engine._enforce_exit_only("EVT-1")
 
@@ -569,6 +682,7 @@ class TestExitOnlyEnforcementAsync:
         rest.cancel_order = AsyncMock()
         rest.decrease_order = AsyncMock()
         rest.get_all_orders = AsyncMock(return_value=[])
+        _wire_verify_cancel_mocks(rest)
 
         await engine._enforce_exit_only("EVT-1")
 

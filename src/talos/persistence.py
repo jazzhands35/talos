@@ -8,8 +8,12 @@ import os
 import sys
 import tempfile
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import structlog
+
+if TYPE_CHECKING:
+    from talos.position_ledger import LedgerSnapshot
 
 logger = structlog.get_logger()
 
@@ -168,7 +172,54 @@ def save_games(tickers: list[str], path: Path | None = None) -> bool:
         return False
 
 
-def save_games_full(games: list[dict[str, str | float | None]], path: Path | None = None) -> bool:
+def snapshot_to_save_dict(
+    snapshot: LedgerSnapshot,
+    *,
+    legacy_v1_snapshot: dict[str, object] | None = None,
+) -> dict[str, object]:
+    """Convert a :class:`LedgerSnapshot` to the v2 save-dict envelope.
+
+    Mirrors :meth:`PositionLedger.to_save_dict` shape. Used by
+    :meth:`TradingEngine._persist_games_now` to persist a *proposed*
+    ledger state (produced by ``reconcile_from_fills`` /
+    ``accept_pending_mismatch``) without mutating the live ledger first
+    — required by v11 atomicity (persist-before-apply, F13).
+
+    ``legacy_v1_snapshot`` is retained verbatim when
+    ``snapshot.legacy_migration_pending`` is True. Per Section 7 save-path
+    rules, once the reconcile clears the legacy flag the v1 payload is
+    dropped from the envelope.
+    """
+    envelope: dict[str, object] = {
+        "schema_version": 2,
+        "legacy_migration_pending": snapshot.legacy_migration_pending,
+        "ledger": {
+            "filled_count_fp100_a": snapshot.filled_count_fp100_a,
+            "filled_total_cost_bps_a": snapshot.filled_total_cost_bps_a,
+            "filled_fees_bps_a": snapshot.filled_fees_bps_a,
+            "closed_count_fp100_a": snapshot.closed_count_fp100_a,
+            "closed_total_cost_bps_a": snapshot.closed_total_cost_bps_a,
+            "closed_fees_bps_a": snapshot.closed_fees_bps_a,
+            "resting_id_a": snapshot.resting_id_a,
+            "resting_count_fp100_a": snapshot.resting_count_fp100_a,
+            "resting_price_bps_a": snapshot.resting_price_bps_a,
+            "filled_count_fp100_b": snapshot.filled_count_fp100_b,
+            "filled_total_cost_bps_b": snapshot.filled_total_cost_bps_b,
+            "filled_fees_bps_b": snapshot.filled_fees_bps_b,
+            "closed_count_fp100_b": snapshot.closed_count_fp100_b,
+            "closed_total_cost_bps_b": snapshot.closed_total_cost_bps_b,
+            "closed_fees_bps_b": snapshot.closed_fees_bps_b,
+            "resting_id_b": snapshot.resting_id_b,
+            "resting_count_fp100_b": snapshot.resting_count_fp100_b,
+            "resting_price_bps_b": snapshot.resting_price_bps_b,
+        },
+    }
+    if snapshot.legacy_migration_pending and legacy_v1_snapshot is not None:
+        envelope["legacy_v1_snapshot"] = dict(legacy_v1_snapshot)
+    return envelope
+
+
+def save_games_full(games: list[dict[str, object]], path: Path | None = None) -> bool:
     """Save full game data so startup can skip REST calls.
 
     Wraps the games list in a versioned envelope so future schema

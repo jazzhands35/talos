@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from typing import Any
 from unittest.mock import AsyncMock
 
 import pytest
@@ -21,6 +22,17 @@ from talos.rebalance import (
 )
 from talos.rest_client import KalshiRESTClient
 from talos.scanner import ArbitrageScanner
+
+
+def _default_cancel_with_verify(rest: Any) -> Any:
+    """Test shim: forward to ``rest.cancel_order`` so existing assertions
+    continue to observe the raw-REST call. Production routes through
+    :meth:`TradingEngine.cancel_order_with_verify` (F36 + F33)."""
+
+    async def _impl(order_id: str, _pair: Any) -> None:
+        await rest.cancel_order(order_id)
+
+    return _impl
 
 # ── Helpers ──────────────────────────────────────────────────────────
 
@@ -445,6 +457,7 @@ class TestExecuteRebalance:
             adjuster=adjuster,
             scanner=scanner,
             notify=lambda msg, sev: notifications.append((msg, sev)),
+            cancel_with_verify=_default_cancel_with_verify(rest),
         )
 
         rest.cancel_order.assert_called_once_with("ord-a")
@@ -486,6 +499,7 @@ class TestExecuteRebalance:
             adjuster=adjuster,
             scanner=scanner,
             notify=lambda msg, sev: None,
+            cancel_with_verify=_default_cancel_with_verify(rest),
         )
 
         rest.get_order.assert_called_once_with("ord-a")
@@ -518,6 +532,7 @@ class TestExecuteRebalance:
             adjuster=adjuster,
             scanner=scanner,
             notify=lambda msg, sev: notifications.append((msg, sev)),
+            cancel_with_verify=_default_cancel_with_verify(rest),
         )
 
         rest.decrease_order.assert_not_called()
@@ -551,6 +566,7 @@ class TestExecuteRebalance:
             adjuster=adjuster,
             scanner=scanner,
             notify=lambda msg, sev: None,
+            cancel_with_verify=_default_cancel_with_verify(rest),
         )
 
         rest.decrease_order.assert_called_once_with("ord-a-new", reduce_to=10)
@@ -582,6 +598,7 @@ class TestExecuteRebalance:
             adjuster=adjuster,
             scanner=scanner,
             notify=lambda msg, sev: notifications.append((msg, sev)),
+            cancel_with_verify=_default_cancel_with_verify(rest),
         )
 
         rest.amend_order.assert_not_called()
@@ -627,6 +644,7 @@ class TestExecuteRebalance:
             adjuster=adjuster,
             scanner=scanner,
             notify=lambda msg, sev: notifications.append((msg, sev)),
+            cancel_with_verify=_default_cancel_with_verify(rest),
         )
 
         # catchup=True bypasses P16, P18 passes → order placed with recalculated qty=15
@@ -662,6 +680,7 @@ class TestExecuteRebalance:
             adjuster=adjuster,
             scanner=scanner,
             notify=lambda msg, sev: None,
+            cancel_with_verify=_default_cancel_with_verify(rest),
         )
 
         rest.get_all_orders.assert_called_once()
@@ -694,6 +713,7 @@ class TestExecuteRebalance:
             adjuster=adjuster,
             scanner=scanner,
             notify=lambda msg, sev: None,
+            cancel_with_verify=_default_cancel_with_verify(rest),
         )
 
         # Should place 10 (recalculated), not 25 (stale)
@@ -727,6 +747,7 @@ class TestExecuteRebalance:
             adjuster=adjuster,
             scanner=scanner,
             notify=lambda msg, sev: notifications.append((msg, sev)),
+            cancel_with_verify=_default_cancel_with_verify(rest),
         )
 
         rest.create_order.assert_not_called()
@@ -779,6 +800,7 @@ class TestExecuteRebalance:
             adjuster=adjuster,
             scanner=scanner,
             notify=lambda msg, sev: notifications.append((msg, sev)),
+            cancel_with_verify=_default_cancel_with_verify(rest),
         )
 
         # Tracked order should NOT be decreased (already at 1)
@@ -824,6 +846,7 @@ class TestExecuteRebalance:
             adjuster=adjuster,
             scanner=scanner,
             notify=lambda msg, sev: None,
+            cancel_with_verify=_default_cancel_with_verify(rest),
         )
 
         rest.decrease_order.assert_called_once_with("ord-a", reduce_to=3)
@@ -871,6 +894,7 @@ class TestFreshSyncBeforeCatchup:
             adjuster=adjuster,
             scanner=scanner,
             notify=lambda msg, sev: notifications.append((msg, sev)),
+            cancel_with_verify=_default_cancel_with_verify(rest),
         )
 
         rest.create_order.assert_not_called()
@@ -898,6 +922,7 @@ class TestFreshSyncBeforeCatchup:
             adjuster=adjuster,
             scanner=scanner,
             notify=lambda msg, sev: notifications.append((msg, sev)),
+            cancel_with_verify=_default_cancel_with_verify(rest),
         )
 
         rest.create_order.assert_not_called()
@@ -927,6 +952,7 @@ class TestFreshSyncBeforeCatchup:
             adjuster=adjuster,
             scanner=scanner,
             notify=lambda msg, sev: notifications.append((msg, sev)),
+            cancel_with_verify=_default_cancel_with_verify(rest),
         )
 
         rest.create_order.assert_not_called()
@@ -959,6 +985,7 @@ class TestFreshSyncBeforeCatchup:
             adjuster=adjuster,
             scanner=scanner,
             notify=lambda msg, sev: None,
+            cancel_with_verify=_default_cancel_with_verify(rest),
         )
 
         rest.create_order.assert_called_once_with(
@@ -1008,6 +1035,7 @@ class TestFreshSyncBeforeCatchup:
             adjuster=adjuster,
             scanner=scanner,
             notify=lambda msg, sev: None,
+            cancel_with_verify=_default_cancel_with_verify(rest),
         )
 
         # Ledger must reflect the catch-up placement immediately
@@ -1050,6 +1078,7 @@ class TestFreshSyncBeforeCatchup:
             adjuster=adjuster,
             scanner=scanner,
             notify=lambda msg, sev: None,
+            cancel_with_verify=_default_cancel_with_verify(rest),
         )
 
         # Positions API must have been called during fresh sync

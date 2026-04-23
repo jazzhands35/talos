@@ -23,7 +23,7 @@ if TYPE_CHECKING:
 from talos.automation_config import AutomationConfig
 from talos.bid_adjuster import BidAdjuster
 from talos.cpm import CPMTracker
-from talos.errors import KalshiAPIError, KalshiRateLimitError
+from talos.errors import KalshiAPIError, KalshiNotFoundError, KalshiRateLimitError
 from talos.fees import MAKER_FEE_RATE, fee_adjusted_cost, fee_adjusted_edge
 from talos.game_manager import (
     CommitResult,
@@ -67,6 +67,12 @@ if TYPE_CHECKING:
 logger = structlog.get_logger()
 _STALE_BOOK_RECOVERY_COOLDOWN_S = 120.0
 _EVENT_CLAIM_STALE_S = 60.0  # force-release stale per-event claims after this
+
+# Section 8 startup safety gate — how long to block a risk-increasing op
+# while waiting for the ledger's confirmation flags to clear, and how long
+# to wait before auto-triggering reconcile_from_fills on a stale-fills flag.
+STARTUP_SYNC_TIMEOUT_S = 30.0
+AUTO_RECONCILE_DELAY_S = 5.0
 
 
 def _merge_queue(existing: int | None, incoming: int) -> int:
@@ -526,14 +532,32 @@ class TradingEngine:
         except KeyError:
             return
 
+        pair = self.find_pair(event_ticker)
         filled_a = ledger.filled_count(Side.A)
         filled_b = ledger.filled_count(Side.B)
         game_started = event_ticker in self._game_started_events
 
         async def _cancel(side: Side, order_id: str, reason: str) -> None:
-            """Cancel a resting order. On market_closed, clear ledger."""
+            """Cancel a resting order. On market_closed, clear ledger.
+
+            F36: routes through :meth:`cancel_order_with_verify` so a
+            404 on the tracked ID triggers a full resync rather than a
+            blind optimistic-clear (F33).
+            """
+            if pair is None:
+                # Pair was removed between ledger lookup and now — rare
+                # race. Skip rather than issue a raw cancel that would
+                # violate the F36 cancel-discipline guard. Resync will
+                # happen via the broader sync_from_orders cycle.
+                logger.warning(
+                    "exit_only_cancel_no_pair",
+                    event_ticker=event_ticker,
+                    side=side.value,
+                    order_id=order_id,
+                )
+                return
             try:
-                await self._rest.cancel_order(order_id)
+                await self.cancel_order_with_verify(order_id, pair)
                 logger.info(
                     "exit_only_cancel",
                     event_ticker=event_ticker,
@@ -545,8 +569,6 @@ class TradingEngine:
                 if e.status_code == 409 and "market_closed" in str(e).lower():
                     # Market is done — orders no longer exist. Clear ledger
                     # so the cleanup path sees resting=0.
-                    import contextlib
-
                     with contextlib.suppress(ValueError):
                         ledger.record_cancel(side, order_id)
                     ledger.mark_order_cancelled(order_id)
@@ -2361,6 +2383,7 @@ class TradingEngine:
                 adjuster=self._adjuster,
                 scanner=self._scanner,
                 notify=self._notify,
+                cancel_with_verify=self.cancel_order_with_verify,
                 feed=self._feed,
                 name=self._display_name(event_ticker),
             )
@@ -2385,6 +2408,7 @@ class TradingEngine:
                 adjuster=self._adjuster,
                 scanner=self._scanner,
                 notify=self._notify,
+                cancel_with_verify=self.cancel_order_with_verify,
                 feed=self._feed,
                 name=self._display_name(event_ticker),
             )
@@ -2537,6 +2561,7 @@ class TradingEngine:
                             adjuster=self._adjuster,
                             scanner=self._scanner,
                             notify=self._notify,
+                            cancel_with_verify=self.cancel_order_with_verify,
                             feed=self._feed,
                             name=self._display_name(pair.event_ticker),
                         )
@@ -2569,6 +2594,12 @@ class TradingEngine:
                                 )
                                 continue
                             ticker = pair.ticker_a if side == Side.A else pair.ticker_b
+                            # Section 8 startup gate — block risk-
+                            # increasing placement until ledger confirmed.
+                            if not await self._wait_for_ledger_ready(
+                                pair, "top-up"
+                            ):
+                                continue
                             group = await _create_order_group(
                                 self._rest, pair.event_ticker, side.value, qty
                             )
@@ -2634,6 +2665,7 @@ class TradingEngine:
                     adjuster=self._adjuster,
                     scanner=self._scanner,
                     notify=self._notify,
+                    cancel_with_verify=self.cancel_order_with_verify,
                     feed=self._feed,
                     name=self._display_name(pair.event_ticker),
                 )
@@ -2947,6 +2979,11 @@ class TradingEngine:
             )
             return
 
+        # Section 8 startup gate — block paired placement until ledger
+        # confirmed. Cancel path is NOT gated (F31).
+        if not await self._wait_for_ledger_ready(pair, "place_bids"):
+            return
+
         try:
             order_a = await self._rest.create_order(
                 ticker=bid.ticker_a,
@@ -2976,7 +3013,9 @@ class TradingEngine:
                     order_id_a=order_a.order_id,
                 )
                 try:
-                    await self._rest.cancel_order(order_a.order_id)
+                    # F36: route compensating cancel through verify wrapper
+                    # so F33 resync runs rather than blind optimistic-clear.
+                    await self.cancel_order_with_verify(order_a.order_id, pair)
                 except (KalshiAPIError, KalshiRateLimitError, httpx.HTTPError):
                     # Compensating cancel failed — log separately but preserve
                     # the original placement failure (re-raised below).
@@ -3975,6 +4014,7 @@ class TradingEngine:
                     adjuster=self._adjuster,
                     scanner=self._scanner,
                     notify=self._notify,
+                    cancel_with_verify=self.cancel_order_with_verify,
                     feed=self._feed,
                     name=self._display_name(envelope.key.event_ticker),
                 )
@@ -4078,13 +4118,25 @@ class TradingEngine:
             self._notify(f"Withdraw FAILED: no ledger for {event_ticker}", "error", toast=True)
             return
 
+        pair = self.find_pair(event_ticker)
+        if pair is None:
+            # Rare: pair removed between queue-add and execution. Skip
+            # rather than issue a raw cancel that would violate the
+            # F36 cancel-discipline guard.
+            self._notify(
+                f"Withdraw SKIPPED: pair gone for {event_ticker}",
+                "warning",
+            )
+            return
         name = self._display_name(event_ticker)
         cancelled = 0
         for side in (Side.A, Side.B):
             order_id = ledger.resting_order_id(side)
             if order_id is not None:
                 try:
-                    await self._rest.cancel_order(order_id)
+                    # F36: route through verify wrapper so F33 resync
+                    # runs on 404 instead of blind optimistic-clear.
+                    await self.cancel_order_with_verify(order_id, pair)
                     cancelled += 1
                     logger.info(
                         "withdrawal_cancelled",
@@ -4159,6 +4211,11 @@ class TradingEngine:
                 f"Queue improve BLOCKED: {name} {qi.improved_price}c would cross spread",
                 "warning",
             )
+            return
+
+        # Section 8 startup gate — amend is a risk-increasing op (price
+        # or quantity change); block until ledger confirmed.
+        if not await self._wait_for_ledger_ready(pair, "queue_improve"):
             return
 
         # Execute amend
@@ -4308,6 +4365,256 @@ class TradingEngine:
                 f"Verify FAILED for {name} ({type(e).__name__}) — position data may be stale",
                 "warning",
             )
+
+    # ── Section 8 startup safety gate ────────────────────────────────
+
+    async def _wait_for_ledger_ready(
+        self, pair: ArbPair, op_name: str
+    ) -> bool:
+        """Block risk-increasing ops until the ledger is confirmed.
+
+        Returns True if the ledger clears within
+        :data:`STARTUP_SYNC_TIMEOUT_S`. Returns False (with operator
+        notification) if timeout exceeded or the flag requires operator
+        action (``legacy_migration_pending``,
+        ``reconcile_mismatch_pending``).
+
+        Caller pattern::
+
+            if not await self._wait_for_ledger_ready(pair, "create_order"):
+                return None
+
+        ``cancel_order`` is NOT gated — use
+        :meth:`cancel_order_with_verify` instead (F31 carve-out).
+        """
+        try:
+            ledger = self._adjuster.get_ledger(pair.event_ticker)
+        except KeyError:
+            # No ledger yet — fresh pair with no position. Blocking makes
+            # no sense; safety gates downstream handle placement rules.
+            return True
+
+        deadline = time.monotonic() + STARTUP_SYNC_TIMEOUT_S
+        reconcile_attempted = False
+        while not ledger.ready():
+            if (
+                ledger.legacy_migration_pending
+                or ledger.reconcile_mismatch_pending
+            ):
+                self._notify(
+                    f"Confirm or reconcile {pair.event_ticker} before {op_name}",
+                    "error",
+                )
+                return False
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                self._notify(
+                    f"Confirmation pending for {pair.event_ticker} "
+                    f"— {op_name} blocked",
+                    "error",
+                )
+                return False
+            # Auto-reconcile trigger: if stale_fills_unconfirmed is still
+            # set after AUTO_RECONCILE_DELAY_S, call reconcile_from_fills
+            # to attempt an authoritative rebuild from per-fill data.
+            elapsed = STARTUP_SYNC_TIMEOUT_S - remaining
+            if (
+                ledger.stale_fills_unconfirmed
+                and not reconcile_attempted
+                and elapsed >= AUTO_RECONCILE_DELAY_S
+            ):
+                reconcile_attempted = True
+                try:
+                    await ledger.reconcile_from_fills(
+                        self._rest, self._persist_games_now
+                    )
+                except Exception:
+                    logger.exception(
+                        "auto_reconcile_failed",
+                        event_ticker=pair.event_ticker,
+                    )
+                    # Fall through — next loop iteration re-checks flags.
+            await asyncio.sleep(min(0.2, remaining))
+        return True
+
+    def _persist_games_now(
+        self,
+        proposed: Any | None,
+        event_ticker: str | None,
+    ) -> None:
+        """Synchronous persist callback for reconcile and accept paths.
+
+        Iterates active pairs; for the pair matching ``event_ticker``,
+        substitutes ``proposed`` (a :class:`LedgerSnapshot`) for the
+        live ``ledger.to_save_dict()`` output. For all other pairs, uses
+        their current live ``to_save_dict()``. Writes ``games_full.json``
+        via atomic temp+rename.
+
+        **MUST remain synchronous** — the v11 atomicity contract rests
+        on this: the ledger's mutation phase is a single sync block and
+        this persist runs inside that block, with no ``await`` or lock.
+        """
+        from talos.persistence import (
+            save_games,
+            save_games_full,
+            snapshot_to_save_dict,
+        )
+        from talos.persistence_errors import PersistenceError
+
+        try:
+            save_games(
+                [p.event_ticker for p in self._game_manager.active_games]
+            )
+            games_data: list[dict[str, object]] = []
+            for p in self._game_manager.active_games:
+                entry: dict[str, object] = {
+                    "event_ticker": p.event_ticker,
+                    "ticker_a": p.ticker_a,
+                    "ticker_b": p.ticker_b,
+                    "fee_type": p.fee_type,
+                    "fee_rate": p.fee_rate,
+                    "close_time": p.close_time,
+                    "expected_expiration_time": p.expected_expiration_time,
+                    "label": self._game_manager.labels.get(p.event_ticker, ""),
+                    "sub_title": self._game_manager.subtitles.get(
+                        p.event_ticker, ""
+                    ),
+                    "side_a": p.side_a,
+                    "side_b": p.side_b,
+                    "kalshi_event_ticker": p.kalshi_event_ticker,
+                    "series_ticker": p.series_ticker,
+                    "talos_id": p.talos_id,
+                }
+                if p.source is not None:
+                    entry["source"] = p.source
+                entry["engine_state"] = p.engine_state
+                vol_a = self._game_manager.volumes_24h.get(p.ticker_a)
+                vol_b = self._game_manager.volumes_24h.get(p.ticker_b)
+                if vol_a is not None:
+                    entry["volume_a"] = vol_a
+                if vol_b is not None:
+                    entry["volume_b"] = vol_b
+                # Substitute proposed snapshot for the target event.
+                if (
+                    proposed is not None
+                    and event_ticker is not None
+                    and p.event_ticker == event_ticker
+                ):
+                    entry["ledger"] = snapshot_to_save_dict(proposed)
+                else:
+                    try:
+                        ledger = self._adjuster.get_ledger(p.event_ticker)
+                        entry["ledger"] = ledger.to_save_dict()
+                    except KeyError:
+                        pass
+                games_data.append(entry)
+            ok = save_games_full(games_data)
+            if not ok:
+                raise PersistenceError(
+                    "save_games_full() returned failure"
+                )
+        except PersistenceError:
+            raise
+        except Exception as exc:
+            raise PersistenceError(
+                f"persistence-path failure during _persist_games_now: "
+                f"{type(exc).__name__}: {exc}"
+            ) from exc
+
+    async def cancel_order_with_verify(
+        self, order_id: str, pair: ArbPair
+    ) -> None:
+        """Fail-safe cancel. Always allowed regardless of ``ledger.ready()``.
+
+        F33: a 404 on a single ``order_id`` does NOT prove the side has
+        zero resting exposure. :class:`PositionLedger` stores only the
+        *first* resting order_id per side, but Kalshi supports multiple
+        live orders on a side. A stale first ID disappearing could mean
+        either one-gone-others-exist or all-gone. We resync via
+        :meth:`PositionLedger.sync_from_orders` to get ground truth
+        rather than blind-clearing.
+        """
+        # Phase 1: probe the order.
+        live: Order | None = None
+        try:
+            live = await self._rest.get_order(order_id)
+        except KalshiNotFoundError:
+            # Tracked ID is gone. Could mean fully cancelled, fully
+            # filled, or simply evicted from Kalshi's order store.
+            # Resync gives ground truth; do NOT attempt cancel.
+            await self._resync_pair_orders(pair)
+            return
+        except (KalshiAPIError, httpx.HTTPError):
+            # Network / non-404 error on the probe. Fall through and
+            # still attempt the cancel — we'd rather cancel blindly
+            # than skip. Resync after either outcome.
+            live = None
+
+        if live is not None and live.status not in ("resting", "executed"):
+            # Terminal state already (cancelled, closed, etc.). No cancel
+            # to issue; resync is sufficient to align ledger to truth.
+            await self._resync_pair_orders(pair)
+            return
+
+        # Phase 2: issue the cancel.
+        try:
+            await self._rest.cancel_order(order_id)
+        except KalshiNotFoundError:
+            # Race: order disappeared between probe and cancel.
+            # Resync instead of optimistic-clear.
+            await self._resync_pair_orders(pair)
+            return
+        except KalshiRateLimitError:
+            raise
+        except (KalshiAPIError, httpx.HTTPError) as e:
+            # Best-effort resync so ledger tracks whatever state did land.
+            # Don't swallow the error — caller may want to surface it.
+            logger.warning(
+                "cancel_order_api_error",
+                order_id=order_id,
+                event_ticker=pair.event_ticker,
+                exc_type=type(e).__name__,
+            )
+            with contextlib.suppress(Exception):
+                await self._resync_pair_orders(pair)
+            raise
+
+        # Successful cancel — resync rather than optimistically update.
+        await self._resync_pair_orders(pair)
+
+    async def _resync_pair_orders(self, pair: ArbPair) -> None:
+        """Fetch the pair's active orders and reconcile ledger resting state.
+
+        Calls :meth:`PositionLedger.sync_from_orders` with the union of
+        resting orders for both sides. For same-ticker pairs, only one
+        GET is issued (YES/NO on the same market share a ticker).
+        """
+        try:
+            ledger = self._adjuster.get_ledger(pair.event_ticker)
+        except KeyError:
+            return
+        try:
+            orders_a = await self._rest.get_orders(
+                ticker=pair.ticker_a, status="resting"
+            )
+            orders_b = (
+                []
+                if pair.is_same_ticker
+                else await self._rest.get_orders(
+                    ticker=pair.ticker_b, status="resting"
+                )
+            )
+        except (KalshiAPIError, httpx.HTTPError):
+            logger.warning(
+                "resync_pair_orders_fetch_failed",
+                event_ticker=pair.event_ticker,
+                exc_info=True,
+            )
+            return
+        orders = list(orders_a) + list(orders_b)
+        ledger.sync_from_orders(
+            orders, ticker_a=pair.ticker_a, ticker_b=pair.ticker_b
+        )
 
     # ── Internal helpers ─────────────────────────────────────────────
 

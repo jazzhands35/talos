@@ -336,6 +336,9 @@ class TestQueueImprovementExecution:
         ledger = engine._adjuster.get_ledger(pair.event_ticker)
         ledger.record_fill(Side.A, count=5, price=57)
         ledger.record_resting(Side.B, order_id="order-b-1", count=5, price=41)
+        # Task 6b-2 Section 8 startup gate: amend is risk-increasing and
+        # blocks until ledger.ready() is True.
+        ledger._first_orders_sync.set()
 
         qi = ProposedQueueImprovement(
             event_ticker=pair.event_ticker,

@@ -137,6 +137,22 @@ def _make_order(
     )
 
 
+def _mark_all_ledgers_ready(adjuster: BidAdjuster) -> None:
+    """Set :attr:`PositionLedger._first_orders_sync` on every ledger so
+    Section 8's ``_wait_for_ledger_ready`` returns immediately.
+
+    Pre-Task-6b-2 tests assumed ledgers were always operable; the new
+    gate blocks create/amend until first sync completes. Tests that
+    bypass the real sync path need to signal readiness manually.
+    """
+    for ledger in adjuster.ledgers.values():
+        ledger._first_orders_sync.set()
+        ledger.stale_fills_unconfirmed = False
+        ledger.stale_resting_unconfirmed = False
+        ledger.legacy_migration_pending = False
+        ledger.reconcile_mismatch_pending = False
+
+
 def _engine_with_pair() -> tuple[TradingEngine, AsyncMock]:
     """Build an engine with one registered pair and a mock REST client."""
     books = OrderBookManager()
@@ -152,6 +168,7 @@ def _engine_with_pair() -> tuple[TradingEngine, AsyncMock]:
     )
     engine._initial_sync_done = True  # tests assume synced state
     engine._account_sync_done = True
+    _mark_all_ledgers_ready(adjuster)
     return engine, rest
 
 
@@ -182,6 +199,7 @@ def _engine_with_pair_and_books(
     )
     engine._initial_sync_done = True  # tests assume synced state
     engine._account_sync_done = True
+    _mark_all_ledgers_ready(adjuster)
     return engine, rest
 
 
@@ -214,6 +232,7 @@ def _engine_with_same_ticker_pair() -> tuple[TradingEngine, AsyncMock]:
     )
     engine._initial_sync_done = True
     engine._account_sync_done = True
+    _mark_all_ledgers_ready(adjuster)
     return engine, rest
 
 
@@ -716,8 +735,67 @@ class TestProposalQueue:
         adjuster = BidAdjuster(books, [pair], unit_size=10)
         tracker = TopOfMarketTracker(books)
         rest = AsyncMock(spec=KalshiRESTClient)
-        rest.get_orders = AsyncMock(return_value=[])
         rest.get_all_positions = AsyncMock(return_value=[])
+        # F36/F33: cancel_order_with_verify probes via get_order before
+        # issuing the raw cancel. Return a resting Order so we proceed.
+        from talos.models.order import Order as _Order
+
+        def _probe(order_id: str) -> _Order:
+            return _Order.model_validate(
+                {
+                    "order_id": order_id,
+                    "ticker": "TK-A" if order_id == "ord-a" else "TK-B",
+                    "status": "resting",
+                    "action": "buy",
+                    "side": "no",
+                    "type": "limit",
+                    "remaining_count": 10,
+                    "fill_count": 0,
+                }
+            )
+
+        rest.get_order = AsyncMock(side_effect=_probe)
+
+        # F33 resync after cancel: return the OTHER side's resting order
+        # so sync_from_orders keeps it on the ledger until we get to it.
+        # (sync_from_orders filters out recently-cancelled IDs.)
+        def _get_orders(**kwargs) -> list[_Order]:
+            ticker = kwargs.get("ticker")
+            if ticker == "TK-A":
+                return [
+                    _Order.model_validate(
+                        {
+                            "order_id": "ord-a",
+                            "ticker": "TK-A",
+                            "status": "resting",
+                            "action": "buy",
+                            "side": "no",
+                            "type": "limit",
+                            "remaining_count": 10,
+                            "fill_count": 0,
+                            "no_price": 48,
+                        }
+                    )
+                ]
+            if ticker == "TK-B":
+                return [
+                    _Order.model_validate(
+                        {
+                            "order_id": "ord-b",
+                            "ticker": "TK-B",
+                            "status": "resting",
+                            "action": "buy",
+                            "side": "no",
+                            "type": "limit",
+                            "remaining_count": 10,
+                            "fill_count": 0,
+                            "no_price": 47,
+                        }
+                    )
+                ]
+            return []
+
+        rest.get_orders = AsyncMock(side_effect=_get_orders)
         engine = TradingEngine(
             scanner=scanner,
             game_manager=MagicMock(spec=GameManager),
@@ -729,6 +807,7 @@ class TestProposalQueue:
         ledger = adjuster.get_ledger("EVT-1")
         ledger.record_resting(Side.A, order_id="ord-a", count=10, price=48)
         ledger.record_resting(Side.B, order_id="ord-b", count=10, price=47)
+        _mark_all_ledgers_ready(adjuster)
 
         engine.on_top_of_market_change("TK-B", side="no", at_top=False)
         key = engine.proposal_queue.pending()[0].key
@@ -928,6 +1007,24 @@ class TestCheckImbalances:
         engine.proposal_queue.add(proposal)
 
         rest.cancel_order = AsyncMock()
+        # F36/F33: verify wrapper probes via get_order before cancelling.
+        from talos.models.order import Order as _Order
+
+        rest.get_order = AsyncMock(
+            return_value=_Order.model_validate(
+                {
+                    "order_id": "ord-a",
+                    "ticker": "TK-A",
+                    "status": "resting",
+                    "action": "buy",
+                    "side": "no",
+                    "type": "limit",
+                    "remaining_count": 10,
+                    "fill_count": 40,
+                }
+            )
+        )
+        rest.get_orders = AsyncMock(return_value=[])
         # Verification sync happens after action (single event-scoped fetch)
         rest.get_all_orders = AsyncMock(return_value=[])
         rest.get_all_positions = AsyncMock(return_value=[])
@@ -977,6 +1074,24 @@ class TestCheckImbalances:
         engine.proposal_queue.add(proposal)
 
         rest.cancel_order = AsyncMock()
+        # F36/F33: verify wrapper probes via get_order before cancelling.
+        from talos.models.order import Order as _Order
+
+        rest.get_order = AsyncMock(
+            return_value=_Order.model_validate(
+                {
+                    "order_id": "ord-a",
+                    "ticker": "TK-A",
+                    "status": "resting",
+                    "action": "buy",
+                    "side": "no",
+                    "type": "limit",
+                    "remaining_count": 10,
+                    "fill_count": 40,
+                }
+            )
+        )
+        rest.get_orders = AsyncMock(return_value=[])
         # Verify fails — API unreachable after action
         rest.get_all_orders = AsyncMock(
             side_effect=KalshiAPIError(status_code=500, body="API down")

@@ -18,7 +18,7 @@ from talos.models.proposal import Proposal, ProposalKey, ProposedRebalance
 from talos.position_ledger import PositionLedger, Side
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Awaitable, Callable
 
     from talos.bid_adjuster import BidAdjuster
     from talos.market_feed import MarketFeed
@@ -26,6 +26,10 @@ if TYPE_CHECKING:
     from talos.orderbook import OrderBookManager
     from talos.rest_client import KalshiRESTClient
     from talos.scanner import ArbitrageScanner
+
+    # F36: engine-owned cancel wrapper. Signature:
+    #   async def cancel_order_with_verify(order_id: str, pair: ArbPair) -> None
+    CancelWithVerify = Callable[[str, ArbPair], Awaitable[None]]
 
 logger = structlog.get_logger()
 
@@ -386,6 +390,7 @@ async def execute_rebalance(
     adjuster: BidAdjuster,
     scanner: ArbitrageScanner,
     notify: Callable[[str, str], None],
+    cancel_with_verify: CancelWithVerify,
     feed: MarketFeed | None = None,
     name: str = "",
 ) -> None:
@@ -408,6 +413,17 @@ async def execute_rebalance(
     pair = _find_pair(scanner, rebalance.event_ticker)
     api_event_ticker = pair.api_event_ticker if pair else rebalance.event_ticker
 
+    # F36: cancel-discipline requires a pair for cancel_with_verify.
+    # If we can't resolve a pair, skip the rebalance — the ledger sync
+    # cycle will eventually correct the imbalance via other paths.
+    if pair is None:
+        logger.warning(
+            "rebalance_skipped_no_pair",
+            event_ticker=rebalance.event_ticker,
+        )
+        _notify("Rebalance SKIPPED: pair not found", "warning")
+        return
+
     # Step 1: Reduce over-side resting
     has_reduce = (
         rebalance.order_id is not None
@@ -428,6 +444,8 @@ async def execute_rebalance(
                     rebalance.ticker,
                     rebalance.order_id,
                     target_side=rebalance.reduce_side,
+                    cancel_with_verify=cancel_with_verify,
+                    pair=pair,
                 )
                 # Update ledger immediately so next cycle doesn't re-cancel
                 try:
@@ -502,6 +520,8 @@ async def execute_rebalance(
                     adjuster=adjuster,
                     event_ticker=rebalance.event_ticker,
                     side=Side(rebalance.side),
+                    cancel_with_verify=cancel_with_verify,
+                    pair=pair,
                 )
         except KalshiAPIError as e:
             if _is_no_op(e):
@@ -711,6 +731,9 @@ async def _cancel_all_resting(
     event_ticker: str,
     ticker: str,
     primary_order_id: str,
+    *,
+    cancel_with_verify: CancelWithVerify,
+    pair: ArbPair,
     target_side: str = "no",
 ) -> tuple[int, list[str]]:
     """Cancel all resting buy orders on the target side for a specific ticker.
@@ -718,6 +741,10 @@ async def _cancel_all_resting(
     First cancels the primary order_id (from the proposal), then fetches
     all orders for the event and cancels any other resting orders on the
     same ticker. Returns (total_contracts_cancelled, list_of_order_ids).
+
+    F36: all cancels route through ``cancel_with_verify`` (the engine's
+    :meth:`TradingEngine.cancel_order_with_verify`) so F33 resync runs
+    on a 404 instead of a blind optimistic-clear.
     """
     total_cancelled = 0
     cancelled_ids: list[str] = []
@@ -725,7 +752,7 @@ async def _cancel_all_resting(
 
     # Cancel the primary order first
     try:
-        await rest_client.cancel_order(primary_order_id)
+        await cancel_with_verify(primary_order_id, pair)
         cancelled_ids.append(primary_order_id)
         primary_cancelled = True
     except KalshiRateLimitError:
@@ -752,7 +779,7 @@ async def _cancel_all_resting(
             if order.remaining_count <= 0:
                 continue
             try:
-                await rest_client.cancel_order(order.order_id)
+                await cancel_with_verify(order.order_id, pair)
                 total_cancelled += order.remaining_count
                 cancelled_ids.append(order.order_id)
                 logger.info(
@@ -795,12 +822,17 @@ async def _cancel_duplicate_orders(
     adjuster: BidAdjuster,
     event_ticker: str,
     side: Side,
+    cancel_with_verify: CancelWithVerify,
+    pair: ArbPair,
 ) -> None:
     """Cancel any resting orders on ticker EXCEPT the one we want to keep.
 
     Handles the double-bid scenario: two separate orders exist on the same
     side, each at qty 1 with unit_size=1.  decrease_order on the kept order
     is a no-op, so the duplicate must be explicitly swept.
+
+    F36: all cancels route through ``cancel_with_verify`` so F33 resync
+    runs on a 404 instead of a blind optimistic-clear.
     """
     try:
         orders = await rest_client.get_all_orders(
@@ -829,7 +861,7 @@ async def _cancel_duplicate_orders(
         if order.remaining_count <= 0:
             continue
         try:
-            await rest_client.cancel_order(order.order_id)
+            await cancel_with_verify(order.order_id, pair)
             cancelled += order.remaining_count
             logger.info(
                 "duplicate_order_cancelled",
