@@ -22,12 +22,10 @@ in the codebase:
 
 The full Section 9 AST test (banning raw ``100``/``10_000`` arithmetic
 on money identifiers, banning ``:.2f``/``:.4f`` format specs on money
-identifiers, banning calls to the deprecated ``dollars_to_cents`` /
-``fp_to_int`` helpers outside the re-export block) lands in a follow-up
-commit AFTER legacy cents/contracts paths are deleted (Task 13a/13b).
-Landing it now would require an allowlist of ~98 entries — a number
-large enough to defeat the purpose of the test. Post-cleanup the
-allowlist drops to <10 entries (legit time/ratio/display uses).
+identifiers) remains a potential follow-up. The ``dollars_to_cents`` /
+``fp_to_int`` deprecated helpers referenced in earlier drafts of this
+docstring were deleted in Task 13b — no code or ban-list entry is
+needed for them anymore.
 """
 
 from __future__ import annotations
