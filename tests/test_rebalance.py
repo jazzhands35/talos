@@ -1184,7 +1184,7 @@ class TestOvercommitReduction:
         ledger = PositionLedger(event_ticker="EVT-1", unit_size=20)
         ledger.record_fill(Side.B, 5, 48)
         # Simulate resting without a tracked order_id (e.g., orphaned)
-        ledger._sides[Side.B].resting_count = 20
+        ledger._sides[Side.B].resting_count_fp100 = 20 * 100
 
         result = compute_overcommit_reduction("EVT-1", ledger, pair, "Test")
         assert result is None

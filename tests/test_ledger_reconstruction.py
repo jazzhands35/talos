@@ -26,19 +26,19 @@ class TestRegime5cColdStart:
     def test_seed_from_saved_none_early_returns(self):
         ledger = PositionLedger("EVT-X", unit_size=5)
         ledger.seed_from_saved(None)
-        assert ledger._sides[Side.A].filled_count == 0
-        assert ledger._sides[Side.A].closed_count == 0
-        assert ledger._sides[Side.B].filled_count == 0
-        assert ledger._sides[Side.B].closed_count == 0
+        assert ledger._sides[Side.A].filled_count_fp100 == 0
+        assert ledger._sides[Side.A].closed_count_fp100 == 0
+        assert ledger._sides[Side.B].filled_count_fp100 == 0
+        assert ledger._sides[Side.B].closed_count_fp100 == 0
 
     def test_seed_from_saved_empty_dict_early_returns(self):
         ledger = PositionLedger("EVT-X", unit_size=5)
         empty: _SaveDict = {}
         ledger.seed_from_saved(empty)
-        assert ledger._sides[Side.A].filled_count == 0
-        assert ledger._sides[Side.A].closed_count == 0
-        assert ledger._sides[Side.B].filled_count == 0
-        assert ledger._sides[Side.B].closed_count == 0
+        assert ledger._sides[Side.A].filled_count_fp100 == 0
+        assert ledger._sides[Side.A].closed_count_fp100 == 0
+        assert ledger._sides[Side.B].filled_count_fp100 == 0
+        assert ledger._sides[Side.B].closed_count_fp100 == 0
 
     def test_cold_start_then_fills_reconcile_normally(self):
         """Empty ledger + subsequent fills trigger reconcile via record_fill."""
@@ -46,8 +46,8 @@ class TestRegime5cColdStart:
         ledger.seed_from_saved(None)
         ledger.record_fill(Side.A, 5, 80)
         ledger.record_fill(Side.B, 5, 20)
-        assert ledger._sides[Side.A].closed_count == 5
-        assert ledger._sides[Side.B].closed_count == 5
+        assert ledger._sides[Side.A].closed_count_fp100 == 5 * 100
+        assert ledger._sides[Side.B].closed_count_fp100 == 5 * 100
 
 
 # Note: tests below deliberately overlap with TestSavedDictSchema in
@@ -82,11 +82,11 @@ class TestRegime5aNormalRestart:
         }
         ledger = PositionLedger("EVT-X", unit_size=5)
         ledger.seed_from_saved(persisted)
-        closed_a = ledger._sides[Side.A].closed_count
-        closed_b = ledger._sides[Side.B].closed_count
+        closed_a = ledger._sides[Side.A].closed_count_fp100
+        closed_b = ledger._sides[Side.B].closed_count_fp100
         ledger._reconcile_closed()
-        assert ledger._sides[Side.A].closed_count == closed_a
-        assert ledger._sides[Side.B].closed_count == closed_b
+        assert ledger._sides[Side.A].closed_count_fp100 == closed_a
+        assert ledger._sides[Side.B].closed_count_fp100 == closed_b
 
     def test_restored_log_line_once_per_ledger(self, caplog):
         caplog.set_level(logging.INFO)
@@ -112,8 +112,8 @@ class TestRegime5bFirstBootMigration:
         }
         ledger = PositionLedger("EVT-X", unit_size=5)
         ledger.seed_from_saved(old_save)
-        assert ledger._sides[Side.A].closed_count == 10
-        assert ledger._sides[Side.B].closed_count == 10
+        assert ledger._sides[Side.A].closed_count_fp100 == 10 * 100
+        assert ledger._sides[Side.B].closed_count_fp100 == 10 * 100
         assert ledger.open_count(Side.A) == 0
         assert ledger.open_count(Side.B) == 0
 
@@ -139,6 +139,7 @@ class TestRegime5bFirstBootMigration:
         assert len(migrated) == 1
 
     def test_post_migration_save_includes_closed_keys(self):
+        """After v1 → v2 migration round-trip, new save carries bps/fp100 closed-bucket keys."""
         old_save: _SaveDict = {
             "filled_a": 10, "cost_a": 820, "fees_a": 0,
             "filled_b": 10, "cost_b": 205, "fees_b": 0,
@@ -146,9 +147,14 @@ class TestRegime5bFirstBootMigration:
         ledger = PositionLedger("EVT-X", unit_size=5)
         ledger.seed_from_saved(old_save)
         new_save = ledger.to_save_dict()
-        for k in ("closed_count_a", "closed_total_cost_a", "closed_fees_a",
-                  "closed_count_b", "closed_total_cost_b", "closed_fees_b"):
-            assert k in new_save, f"expected {k} in new save"
+        assert new_save["schema_version"] == 2
+        ledger_payload = new_save["ledger"]
+        assert isinstance(ledger_payload, dict)
+        for k in (
+            "closed_count_fp100_a", "closed_total_cost_bps_a", "closed_fees_bps_a",
+            "closed_count_fp100_b", "closed_total_cost_bps_b", "closed_fees_bps_b",
+        ):
+            assert k in ledger_payload, f"expected {k} in new save"
 
 
 class TestRegime5bPartialKeys:
@@ -165,8 +171,8 @@ class TestRegime5bPartialKeys:
         ledger = PositionLedger("EVT-X", unit_size=5)
         ledger.seed_from_saved(corrupt)
         # Migration zeroed and reconciled from blend — NOT restored verbatim
-        assert ledger._sides[Side.A].closed_count == 10  # reconciled, not 999
-        assert ledger._sides[Side.B].closed_count == 10
+        assert ledger._sides[Side.A].closed_count_fp100 == 10 * 100  # reconciled, not 999
+        assert ledger._sides[Side.B].closed_count_fp100 == 10 * 100
         migrated = [r for r in caplog.records if "ledger_migrated_missing_closed" in r.getMessage()]
         assert len(migrated) == 1
 
@@ -189,7 +195,7 @@ class TestRegime5bCorruptValues:
         migrated = [r for r in caplog.records if "ledger_migrated_missing_closed" in r.getMessage()]
         assert len(migrated) == 1
         # Migration re-ran reconcile from blend; closed_count_a != 5
-        assert ledger._sides[Side.A].closed_count == 10
+        assert ledger._sides[Side.A].closed_count_fp100 == 10 * 100
 
 
 class TestRegime5dSameTicker:
@@ -213,8 +219,8 @@ class TestRegime5dSameTicker:
             position_fills={Side.A: 5, Side.B: 10},
             position_costs={Side.A: 410, Side.B: 205},
         )
-        assert ledger._sides[Side.A].closed_count == 5
-        assert ledger._sides[Side.B].closed_count == 5
+        assert ledger._sides[Side.A].closed_count_fp100 == 5 * 100
+        assert ledger._sides[Side.B].closed_count_fp100 == 5 * 100
         assert ledger.open_avg_filled_price(Side.B) == 23.0
 
     def test_same_ticker_migration_works_without_sync_from_positions(self):
@@ -230,5 +236,5 @@ class TestRegime5dSameTicker:
             is_same_ticker=True,
         )
         ledger.seed_from_saved(old_save)
-        assert ledger._sides[Side.A].closed_count == 10
-        assert ledger._sides[Side.B].closed_count == 10
+        assert ledger._sides[Side.A].closed_count_fp100 == 10 * 100
+        assert ledger._sides[Side.B].closed_count_fp100 == 10 * 100

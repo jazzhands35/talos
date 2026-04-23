@@ -259,8 +259,8 @@ class TestSafetyGates:
         # A at 55c, B resting at 44c → 45c would be unprofitable
         # fee_adjusted_cost(45) ≈ 45.43, fee_adjusted_cost(55) ≈ 55.43
         # Total ≈ 100.86 >= 100 → blocked
-        ledger._sides[Side.A].filled_count = 5
-        ledger._sides[Side.A].filled_total_cost = 55 * 5
+        ledger._sides[Side.A].filled_count_fp100 = 5 * 100
+        ledger._sides[Side.A].filled_total_cost_bps = 55 * 5 * 100
         ledger.record_resting(Side.B, order_id="order-b-1", count=5, price=44)
 
         engine._queue_cache["order-b-1"] = 186_000

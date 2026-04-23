@@ -370,8 +370,8 @@ class TestSyncFromPositions:
         """Positions API provides cost when orders had none."""
         ledger = PositionLedger(event_ticker="EVT-1", unit_size=10)
         # Fills set by positions (no cost data from orders)
-        ledger._sides[Side.A].filled_count = 30
-        ledger._sides[Side.A].filled_total_cost = 0  # no cost yet
+        ledger._sides[Side.A].filled_count_fp100 = 30 * 100
+        ledger._sides[Side.A].filled_total_cost_bps = 0  # no cost yet
         ledger.sync_from_positions(
             position_fills={Side.A: 30, Side.B: 0},
             position_costs={Side.A: 1380, Side.B: 0},
@@ -829,41 +829,45 @@ class TestSameTickerSync:
 
 
 class TestClosedBucket:
-    """closed_* fields mirror filled_* and start at zero."""
+    """closed_* fields mirror filled_* and start at zero.
+
+    White-box tests: poke the internal _SideState (bps/fp100) directly.
+    Cents × 100 = bps, contracts × 100 = fp100. See talos.units.
+    """
 
     def test_new_ledger_has_zero_closed_fields(self):
         from talos.position_ledger import PositionLedger, Side
         ledger = PositionLedger("EVT-X", unit_size=5)
         for side in (Side.A, Side.B):
             s = ledger._sides[side]
-            assert s.closed_count == 0
-            assert s.closed_total_cost == 0
-            assert s.closed_fees == 0
+            assert s.closed_count_fp100 == 0
+            assert s.closed_total_cost_bps == 0
+            assert s.closed_fees_bps == 0
 
     def test_reset_zeroes_closed_fields(self):
         from talos.position_ledger import PositionLedger, Side
         ledger = PositionLedger("EVT-X", unit_size=5)
         s = ledger._sides[Side.A]
-        s.closed_count = 99
-        s.closed_total_cost = 500
-        s.closed_fees = 3
+        s.closed_count_fp100 = 99 * 100
+        s.closed_total_cost_bps = 500 * 100
+        s.closed_fees_bps = 3 * 100
         s.reset()
-        assert s.closed_count == 0
-        assert s.closed_total_cost == 0
-        assert s.closed_fees == 0
+        assert s.closed_count_fp100 == 0
+        assert s.closed_total_cost_bps == 0
+        assert s.closed_fees_bps == 0
 
     def test_open_count_equals_filled_when_closed_is_zero(self):
         from talos.position_ledger import PositionLedger, Side
         ledger = PositionLedger("EVT-X", unit_size=5)
-        ledger._sides[Side.A].filled_count = 7
+        ledger._sides[Side.A].filled_count_fp100 = 7 * 100
         assert ledger.open_count(Side.A) == 7
 
     def test_open_count_subtracts_closed(self):
         from talos.position_ledger import PositionLedger, Side
         ledger = PositionLedger("EVT-X", unit_size=5)
         s = ledger._sides[Side.A]
-        s.filled_count = 10
-        s.closed_count = 5
+        s.filled_count_fp100 = 10 * 100
+        s.closed_count_fp100 = 5 * 100
         assert ledger.open_count(Side.A) == 5
 
     def test_open_avg_filled_price_zero_when_no_open_fills(self):
@@ -875,10 +879,10 @@ class TestClosedBucket:
         from talos.position_ledger import PositionLedger, Side
         ledger = PositionLedger("EVT-X", unit_size=5)
         s = ledger._sides[Side.A]
-        s.filled_count = 5
-        s.filled_total_cost = 400
-        s.closed_count = 5
-        s.closed_total_cost = 400
+        s.filled_count_fp100 = 5 * 100
+        s.filled_total_cost_bps = 400 * 100
+        s.closed_count_fp100 = 5 * 100
+        s.closed_total_cost_bps = 400 * 100
         assert ledger.open_avg_filled_price(Side.A) == 0.0
 
     def test_open_avg_filled_price_uses_open_bucket_only(self):
@@ -886,13 +890,13 @@ class TestClosedBucket:
         ledger = PositionLedger("EVT-X", unit_size=5)
         s = ledger._sides[Side.A]
         # Closed bucket: 5 contracts at avg 18c (90c total)
-        s.closed_count = 5
-        s.closed_total_cost = 90
+        s.closed_count_fp100 = 5 * 100
+        s.closed_total_cost_bps = 90 * 100
         # Open bucket: 5 more contracts at avg 23c (115c total)
         # filled_* is cumulative: 10 total fills for 205c
-        s.filled_count = 10
-        s.filled_total_cost = 205
-        # Open avg = (205 - 90) / (10 - 5) = 115 / 5 = 23.0
+        s.filled_count_fp100 = 10 * 100
+        s.filled_total_cost_bps = 205 * 100
+        # Open avg = (205 - 90) / (10 - 5) = 115 / 5 = 23.0 (cents-per-contract)
         assert ledger.open_avg_filled_price(Side.A) == 23.0
 
     def test_lifetime_avg_unchanged(self):
@@ -900,10 +904,10 @@ class TestClosedBucket:
         from talos.position_ledger import PositionLedger, Side
         ledger = PositionLedger("EVT-X", unit_size=5)
         s = ledger._sides[Side.A]
-        s.filled_count = 10
-        s.filled_total_cost = 205
-        s.closed_count = 5
-        s.closed_total_cost = 90
+        s.filled_count_fp100 = 10 * 100
+        s.filled_total_cost_bps = 205 * 100
+        s.closed_count_fp100 = 5 * 100
+        s.closed_total_cost_bps = 90 * 100
         assert ledger.avg_filled_price(Side.A) == 20.5
 
 
@@ -913,29 +917,29 @@ class TestReconcileClosed:
     def test_noop_when_imbalanced(self):
         from talos.position_ledger import PositionLedger, Side
         ledger = PositionLedger("EVT-X", unit_size=5)
-        ledger._sides[Side.A].filled_count = 5
-        ledger._sides[Side.A].filled_total_cost = 410
-        ledger._sides[Side.B].filled_count = 3
-        ledger._sides[Side.B].filled_total_cost = 54
+        ledger._sides[Side.A].filled_count_fp100 = 5 * 100
+        ledger._sides[Side.A].filled_total_cost_bps = 410 * 100
+        ledger._sides[Side.B].filled_count_fp100 = 3 * 100
+        ledger._sides[Side.B].filled_total_cost_bps = 54 * 100
         ledger._reconcile_closed()
         # min(5, 3) = 3, 3 // 5 = 0 units, no close fires
-        assert ledger._sides[Side.A].closed_count == 0
-        assert ledger._sides[Side.B].closed_count == 0
+        assert ledger._sides[Side.A].closed_count_fp100 == 0
+        assert ledger._sides[Side.B].closed_count_fp100 == 0
 
     def test_closes_one_balanced_unit(self):
         from talos.position_ledger import PositionLedger, Side
         ledger = PositionLedger("EVT-X", unit_size=5)
         a = ledger._sides[Side.A]
         b = ledger._sides[Side.B]
-        a.filled_count = 5
-        a.filled_total_cost = 410  # avg 82
-        b.filled_count = 5
-        b.filled_total_cost = 90   # avg 18
+        a.filled_count_fp100 = 5 * 100
+        a.filled_total_cost_bps = 410 * 100  # avg 82c
+        b.filled_count_fp100 = 5 * 100
+        b.filled_total_cost_bps = 90 * 100   # avg 18c
         ledger._reconcile_closed()
-        assert a.closed_count == 5
-        assert a.closed_total_cost == 410
-        assert b.closed_count == 5
-        assert b.closed_total_cost == 90
+        assert a.closed_count_fp100 == 5 * 100
+        assert a.closed_total_cost_bps == 410 * 100
+        assert b.closed_count_fp100 == 5 * 100
+        assert b.closed_total_cost_bps == 90 * 100
         assert ledger.open_count(Side.A) == 0
         assert ledger.open_count(Side.B) == 0
 
@@ -944,49 +948,50 @@ class TestReconcileClosed:
         ledger = PositionLedger("EVT-X", unit_size=5)
         a = ledger._sides[Side.A]
         b = ledger._sides[Side.B]
-        a.filled_count = 10
-        a.filled_total_cost = 820
-        b.filled_count = 10
-        b.filled_total_cost = 180
+        a.filled_count_fp100 = 10 * 100
+        a.filled_total_cost_bps = 820 * 100
+        b.filled_count_fp100 = 10 * 100
+        b.filled_total_cost_bps = 180 * 100
         ledger._reconcile_closed()
-        assert a.closed_count == 10
-        assert b.closed_count == 10
+        assert a.closed_count_fp100 == 10 * 100
+        assert b.closed_count_fp100 == 10 * 100
 
     def test_imbalanced_close_flushes_min_units(self):
         from talos.position_ledger import PositionLedger, Side
         ledger = PositionLedger("EVT-X", unit_size=5)
         a = ledger._sides[Side.A]
         b = ledger._sides[Side.B]
-        a.filled_count = 5
-        a.filled_total_cost = 410  # 82
-        b.filled_count = 10
-        b.filled_total_cost = 205  # avg 20.5
+        a.filled_count_fp100 = 5 * 100
+        a.filled_total_cost_bps = 410 * 100  # 82c
+        b.filled_count_fp100 = 10 * 100
+        b.filled_total_cost_bps = 205 * 100  # avg 20.5c
         ledger._reconcile_closed()
         # min(5,10)//5 = 1 unit. Close 5 each.
-        # A: 5 close = full flush of open (410)
-        # B: 5 close = pro-rata of open avg. round(205*5/10) = round(102.5).
-        # Python 3 uses banker's rounding (round-half-to-even) → 102.
-        assert a.closed_count == 5
-        assert a.closed_total_cost == 410
-        assert b.closed_count == 5
-        assert b.closed_total_cost == 102
-        # After close, open B has 5 contracts: (205 - 102) / 5 = 20.6c avg.
+        # A: 5 close = full flush of open (410 cents = 41_000 bps).
+        # B: 5 close = pro-rata of open avg. round(20500*500/1000) = 10250 bps.
+        # 10250 bps = 102.5c → bps_to_cents_round → 102c (banker's).
+        assert a.closed_count_fp100 == 5 * 100
+        assert a.closed_total_cost_bps == 410 * 100
+        assert b.closed_count_fp100 == 5 * 100
+        assert b.closed_total_cost_bps == 10250  # 102.5c in bps
+        # Legacy accessor sees 102c (half-even).
+        assert ledger._sides[Side.B].closed_total_cost_bps // 100 == 102
         assert ledger.open_count(Side.A) == 0
         assert ledger.open_count(Side.B) == 5
 
     def test_idempotent_second_call_is_noop(self):
         from talos.position_ledger import PositionLedger, Side
         ledger = PositionLedger("EVT-X", unit_size=5)
-        ledger._sides[Side.A].filled_count = 5
-        ledger._sides[Side.A].filled_total_cost = 400
-        ledger._sides[Side.B].filled_count = 5
-        ledger._sides[Side.B].filled_total_cost = 100
+        ledger._sides[Side.A].filled_count_fp100 = 5 * 100
+        ledger._sides[Side.A].filled_total_cost_bps = 400 * 100
+        ledger._sides[Side.B].filled_count_fp100 = 5 * 100
+        ledger._sides[Side.B].filled_total_cost_bps = 100 * 100
         ledger._reconcile_closed()
-        a_closed_before = ledger._sides[Side.A].closed_count
-        b_closed_before = ledger._sides[Side.B].closed_count
+        a_closed_before = ledger._sides[Side.A].closed_count_fp100
+        b_closed_before = ledger._sides[Side.B].closed_count_fp100
         ledger._reconcile_closed()
-        assert ledger._sides[Side.A].closed_count == a_closed_before
-        assert ledger._sides[Side.B].closed_count == b_closed_before
+        assert ledger._sides[Side.A].closed_count_fp100 == a_closed_before
+        assert ledger._sides[Side.B].closed_count_fp100 == b_closed_before
 
     def test_emits_paper_trail_log(self, caplog):
         import logging
@@ -994,10 +999,10 @@ class TestReconcileClosed:
         from talos.position_ledger import PositionLedger, Side
         caplog.set_level(logging.INFO)
         ledger = PositionLedger("EVT-X", unit_size=5)
-        ledger._sides[Side.A].filled_count = 5
-        ledger._sides[Side.A].filled_total_cost = 400
-        ledger._sides[Side.B].filled_count = 5
-        ledger._sides[Side.B].filled_total_cost = 100
+        ledger._sides[Side.A].filled_count_fp100 = 5 * 100
+        ledger._sides[Side.A].filled_total_cost_bps = 400 * 100
+        ledger._sides[Side.B].filled_count_fp100 = 5 * 100
+        ledger._sides[Side.B].filled_total_cost_bps = 100 * 100
         ledger._reconcile_closed()
         # structlog records go through the standard logging module; look for the event
         assert any(
@@ -1011,11 +1016,11 @@ class TestReconcileClosed:
         ledger = PositionLedger("EVT-X", unit_size=5)
         # Pre-load A with 5 fills; B at zero
         ledger.record_fill(Side.A, 5, 80)
-        assert ledger._sides[Side.A].closed_count == 0  # not yet balanced
+        assert ledger._sides[Side.A].closed_count_fp100 == 0  # not yet balanced
         # Fill B to balance; reconcile should fire
         ledger.record_fill(Side.B, 5, 20)
-        assert ledger._sides[Side.A].closed_count == 5
-        assert ledger._sides[Side.B].closed_count == 5
+        assert ledger._sides[Side.A].closed_count_fp100 == 5 * 100
+        assert ledger._sides[Side.B].closed_count_fp100 == 5 * 100
         # After close, open_avg_filled_price is 0 on both sides
         assert ledger.open_avg_filled_price(Side.A) == 0.0
         assert ledger.open_avg_filled_price(Side.B) == 0.0
@@ -1032,8 +1037,8 @@ class TestReconcileClosed:
             _make_order("TK-B", fill_count=5, no_price=20, maker_fill_cost=100, status="executed"),
         ]
         ledger.sync_from_orders(orders, ticker_a="TK-A", ticker_b="TK-B")
-        assert ledger._sides[Side.A].closed_count == 5
-        assert ledger._sides[Side.B].closed_count == 5
+        assert ledger._sides[Side.A].closed_count_fp100 == 5 * 100
+        assert ledger._sides[Side.B].closed_count_fp100 == 5 * 100
 
     def test_sync_from_positions_triggers_reconcile_non_same_ticker(self):
         from talos.position_ledger import PositionLedger, Side
@@ -1046,8 +1051,8 @@ class TestReconcileClosed:
             position_fills={Side.A: 5, Side.B: 5},
             position_costs={Side.A: 400, Side.B: 100},
         )
-        assert ledger._sides[Side.A].closed_count == 5
-        assert ledger._sides[Side.B].closed_count == 5
+        assert ledger._sides[Side.A].closed_count_fp100 == 5 * 100
+        assert ledger._sides[Side.B].closed_count_fp100 == 5 * 100
 
     def test_sync_from_positions_same_ticker_early_returns_no_mutation(self):
         from talos.position_ledger import PositionLedger, Side
@@ -1060,39 +1065,46 @@ class TestReconcileClosed:
         ledger.record_fill(Side.A, 5, 80)
         ledger.record_fill(Side.B, 5, 20)
         # closed already populated from record_fill's reconcile
-        closed_a_before = ledger._sides[Side.A].closed_count
-        closed_b_before = ledger._sides[Side.B].closed_count
+        closed_a_before = ledger._sides[Side.A].closed_count_fp100
+        closed_b_before = ledger._sides[Side.B].closed_count_fp100
         # sync_from_positions early-returns for same-ticker; closed unchanged
         ledger.sync_from_positions(
             position_fills={Side.A: 99, Side.B: 99},  # bogus values
             position_costs={Side.A: 999, Side.B: 999},
         )
-        assert ledger._sides[Side.A].closed_count == closed_a_before
-        assert ledger._sides[Side.B].closed_count == closed_b_before
+        assert ledger._sides[Side.A].closed_count_fp100 == closed_a_before
+        assert ledger._sides[Side.B].closed_count_fp100 == closed_b_before
 
 
 class TestSavedDictSchema:
-    """to_save_dict includes the closed_* keys."""
+    """to_save_dict emits a v2 envelope with bps/fp100 fields.
 
-    def test_save_dict_includes_closed_keys(self):
+    Legacy v1 payloads (cents/contracts, flat shape) remain loadable via
+    seed_from_saved's version detection — see the v1-path cases below.
+    """
+
+    def test_save_dict_is_v2_envelope_with_bps_fp100(self):
         from talos.position_ledger import PositionLedger, Side
         ledger = PositionLedger("EVT-X", unit_size=5)
-        ledger._sides[Side.A].closed_count = 5
-        ledger._sides[Side.A].closed_total_cost = 410
-        ledger._sides[Side.A].closed_fees = 7
-        ledger._sides[Side.B].closed_count = 5
-        ledger._sides[Side.B].closed_total_cost = 90
-        ledger._sides[Side.B].closed_fees = 2
+        ledger._sides[Side.A].closed_count_fp100 = 5 * 100
+        ledger._sides[Side.A].closed_total_cost_bps = 410 * 100
+        ledger._sides[Side.A].closed_fees_bps = 7 * 100
+        ledger._sides[Side.B].closed_count_fp100 = 5 * 100
+        ledger._sides[Side.B].closed_total_cost_bps = 90 * 100
+        ledger._sides[Side.B].closed_fees_bps = 2 * 100
         d = ledger.to_save_dict()
-        assert d["closed_count_a"] == 5
-        assert d["closed_total_cost_a"] == 410
-        assert d["closed_fees_a"] == 7
-        assert d["closed_count_b"] == 5
-        assert d["closed_total_cost_b"] == 90
-        assert d["closed_fees_b"] == 2
+        assert d["schema_version"] == 2
+        ledger_payload = d["ledger"]
+        assert isinstance(ledger_payload, dict)
+        assert ledger_payload["closed_count_fp100_a"] == 500
+        assert ledger_payload["closed_total_cost_bps_a"] == 41_000
+        assert ledger_payload["closed_fees_bps_a"] == 700
+        assert ledger_payload["closed_count_fp100_b"] == 500
+        assert ledger_payload["closed_total_cost_bps_b"] == 9_000
+        assert ledger_payload["closed_fees_bps_b"] == 200
 
     def test_seed_restores_closed_verbatim_when_all_six_keys_valid(self):
-        """5a normal restart: closed values restored as-is, no re-derivation."""
+        """5a normal restart (v1 payload): closed values restored as-is (×100 scaled)."""
         from talos.position_ledger import PositionLedger, Side
         ledger = PositionLedger("EVT-X", unit_size=5)
         # filled_a=5 closed_a=5 → open_A empty. filled_b=10 closed_b=5 → open_B=5 @ 23c.
@@ -1138,8 +1150,8 @@ class TestSavedDictSchema:
         }
         ledger.seed_from_saved(data)
         # After migration + terminal reconcile: all closed populated via pro-rata
-        assert ledger._sides[Side.A].closed_count == 10
-        assert ledger._sides[Side.B].closed_count == 10
+        assert ledger._sides[Side.A].closed_count_fp100 == 10 * 100
+        assert ledger._sides[Side.B].closed_count_fp100 == 10 * 100
         migrated = [r for r in caplog.records if "ledger_migrated_missing_closed" in r.getMessage()]
         assert len(migrated) == 1
 
@@ -1157,8 +1169,9 @@ class TestSavedDictSchema:
             "closed_count_a": 999, "closed_total_cost_a": 999,
         }
         ledger.seed_from_saved(data)
-        # Migration zeros and repopulates; verbatim restore would have set closed_count_a = 999
-        assert ledger._sides[Side.A].closed_count == 10  # from reconcile, not 999
+        # Migration zeros and repopulates; verbatim restore would have set
+        # closed_count_fp100_a = 99_900 (999 * 100). The reconcile path produces 1000 instead.
+        assert ledger._sides[Side.A].closed_count_fp100 == 10 * 100  # from reconcile
         migrated = [r for r in caplog.records if "ledger_migrated_missing_closed" in r.getMessage()]
         assert len(migrated) == 1
 
@@ -1185,8 +1198,8 @@ class TestSavedDictSchema:
                 if "ledger_migrated_missing_closed" in r.getMessage()
             ]
             assert len(migrated) == 1, f"Expected migration log for bad_value={bad_value!r}"
-            # Migration zeroed and reconciled — closed_count_a != 5 (the restored-verbatim value)
-            assert ledger._sides[Side.A].closed_count == 10  # reconciled, not restored
+            # Migration zeroed and reconciled — closed_count_fp100_a != 5*100 (restored-verbatim)
+            assert ledger._sides[Side.A].closed_count_fp100 == 10 * 100  # reconciled, not restored
 
 
 class TestIsPlacementSafeOpenScope:
