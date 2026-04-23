@@ -18,13 +18,31 @@ logger = structlog.get_logger()
 _STALE_THRESHOLD = 120.0
 
 
-def _parse_levels_sorted(raw: list[list[int]]) -> list[OrderBookLevel]:
-    """Parse raw [[price, qty], ...] into OrderBookLevel list, sorted descending by price."""
-    return sorted(
-        (OrderBookLevel(price=p, quantity=q) for p, q in raw),
-        key=lambda lvl: lvl.price,
-        reverse=True,
-    )
+def _parse_levels_sorted(
+    raw: list[list[int]],
+    raw_bps_fp100: list[list[int]] | None = None,
+) -> list[OrderBookLevel]:
+    """Parse raw [[price, qty], ...] into OrderBookLevel list, sorted descending by price.
+
+    ``raw_bps_fp100``, if provided with matching length, is a parallel list of
+    ``[price_bps, quantity_fp100]`` pairs populated from the WS payload's
+    ``_dollars_fp`` arrays via ``OrderBookSnapshot._migrate_fp``. When present,
+    each ``OrderBookLevel`` carries BOTH the legacy cents/contracts fields and
+    the exact bps/fp100 siblings — scanner reads the bps siblings directly
+    for sub-cent correctness. When absent (e.g. legacy fixtures), the bps
+    siblings stay at their default 0 and the scanner's ``_level_price_bps``
+    fallback derives them from ``cents_to_bps(level.price)`` — lossy on
+    sub-cent prices, but those markets are blocked by Phase 0 admission
+    until Task 12 relaxes the guards.
+    """
+    if raw_bps_fp100 is not None and len(raw_bps_fp100) == len(raw):
+        levels = [
+            OrderBookLevel(price=p, quantity=q, price_bps=pb, quantity_fp100=qf)
+            for (p, q), (pb, qf) in zip(raw, raw_bps_fp100, strict=True)
+        ]
+    else:
+        levels = [OrderBookLevel(price=p, quantity=q) for p, q in raw]
+    return sorted(levels, key=lambda lvl: lvl.price, reverse=True)
 
 
 class LocalOrderBook(BaseModel):
@@ -64,8 +82,8 @@ class OrderBookManager:
 
     def apply_snapshot(self, ticker: str, snapshot: OrderBookSnapshot) -> None:
         """Replace entire book for a ticker. Resets update timestamp."""
-        yes_levels = _parse_levels_sorted(snapshot.yes)
-        no_levels = _parse_levels_sorted(snapshot.no)
+        yes_levels = _parse_levels_sorted(snapshot.yes, snapshot.yes_bps_fp100)
+        no_levels = _parse_levels_sorted(snapshot.no, snapshot.no_bps_fp100)
         now = time.time()
         self._books[ticker] = LocalOrderBook(
             ticker=ticker,
@@ -120,13 +138,19 @@ class OrderBookManager:
         )
 
         if idx is not None:
-            # Accumulate delta into existing level
+            # Accumulate delta into existing level (both legacy + bps/fp100 siblings).
             side_levels[idx].quantity += delta.delta
+            side_levels[idx].quantity_fp100 += delta.delta_fp100
             if side_levels[idx].quantity <= 0:
                 side_levels.pop(idx)
         elif delta.delta > 0:
-            # Insert new level, maintain descending sort via bisect
-            new_level = OrderBookLevel(price=delta.price, quantity=delta.delta)
+            # Insert new level, maintain descending sort via bisect.
+            new_level = OrderBookLevel(
+                price=delta.price,
+                quantity=delta.delta,
+                price_bps=delta.price_bps,
+                quantity_fp100=delta.delta_fp100,
+            )
             bisect.insort(side_levels, new_level, key=lambda lvl: -lvl.price)
 
         logger.debug(
