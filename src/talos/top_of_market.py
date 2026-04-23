@@ -9,9 +9,34 @@ import structlog
 from talos.models.order import ACTIVE_STATUSES, Order
 from talos.models.strategy import ArbPair
 from talos.orderbook import OrderBookManager
-from talos.units import bps_to_cents_round, cents_to_bps
+from talos.units import ONE_CONTRACT_FP100, bps_to_cents_round, cents_to_bps
 
 logger = structlog.get_logger()
+
+
+def _order_remaining_fp100(order: Order) -> int:
+    """Read remaining count preferring fp100, falling back to legacy contracts.
+
+    Order instances parsed from Kalshi wire payloads (via Order._migrate_fp)
+    populate BOTH legacy and fp100 fields. Test fixtures that construct
+    Order directly with legacy kwargs (``remaining_count=10``) leave
+    ``remaining_count_fp100`` at default 0. The fallback keeps the tests
+    passing; it is removed by Task 13a-2 when the legacy field itself is
+    deleted from the model.
+    """
+    if order.remaining_count_fp100:
+        return order.remaining_count_fp100
+    return order.remaining_count * ONE_CONTRACT_FP100
+
+
+def _order_price_bps(order: Order, side: str) -> int:
+    """Read order price in bps for the given side, with legacy fallback.
+
+    Same fallback story as :func:`_order_remaining_fp100`. Removed by 13a-2.
+    """
+    if side == "no":
+        return order.no_price_bps if order.no_price_bps else cents_to_bps(order.no_price)
+    return order.yes_price_bps if order.yes_price_bps else cents_to_bps(order.yes_price)
 
 
 class TopOfMarketTracker:
@@ -45,15 +70,12 @@ class TopOfMarketTracker:
                 continue
             if order.status not in ACTIVE_STATUSES:
                 continue
-            if order.remaining_count_fp100 <= 0:
+            if _order_remaining_fp100(order) <= 0:
                 continue
             expected_sides = tracked.get(order.ticker)
             if expected_sides is None or order.side not in expected_sides:
                 continue
-            price_bps = (
-                order.no_price_bps if order.side == "no" else order.yes_price_bps
-            )
-            price = bps_to_cents_round(price_bps)
+            price = bps_to_cents_round(_order_price_bps(order, order.side))
             key = (order.ticker, order.side)
             prev = new_resting.get(key, 0)
             new_resting[key] = max(prev, price)
