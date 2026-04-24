@@ -13,13 +13,13 @@ from textual.binding import Binding
 from textual.widgets import DataTable, RichLog, Static
 
 from talos.cpm import format_cpm, format_eta
-from talos.fees import fee_adjusted_cost
+from talos.fees import fee_adjusted_cost_bps
 from talos.game_status import ESTIMATED_DETAIL, GameStatus
 from talos.models.position import EventPositionSummary
 from talos.scanner import ArbitrageScanner
 from talos.top_of_market import TopOfMarketTracker
 from talos.ui.theme import BLUE, GREEN, PEACH, RED, SUBTEXT0, SURFACE0, SURFACE2, YELLOW
-from talos.units import bps_to_cents_round
+from talos.units import ONE_CENT_BPS, bps_to_cents_round
 
 
 def _fmt_cents(value: int) -> RichText:
@@ -65,12 +65,15 @@ def _fmt_pos(
         return DIM_DASH
     resting_suffix = ""
     if resting_no_price is not None:
-        resting_fee = fee_adjusted_cost(resting_no_price)
-        resting_suffix = f" @{resting_fee:.0f}¢"
+        resting_fee_bps = fee_adjusted_cost_bps(resting_no_price * ONE_CENT_BPS)
+        resting_suffix = f" @{resting_fee_bps / ONE_CENT_BPS:.0f}¢"
     if filled == 0:
         return RichText(f"0/{total}{resting_suffix}", justify="right")
-    fee_avg = fee_adjusted_cost(avg_no_price)
-    return RichText(f"{filled}/{total} {fee_avg:.1f}¢{resting_suffix}", justify="right")
+    fee_avg_bps = fee_adjusted_cost_bps(avg_no_price * ONE_CENT_BPS)
+    return RichText(
+        f"{filled}/{total} {fee_avg_bps / ONE_CENT_BPS:.1f}¢{resting_suffix}",
+        justify="right",
+    )
 
 
 DIM_DASH = RichText("—", style="dim", justify="right")

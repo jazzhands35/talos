@@ -36,7 +36,7 @@ import structlog
 from talos.automation_config import DEFAULT_UNIT_SIZE
 from talos.fees import (
     MAKER_FEE_RATE,
-    fee_adjusted_cost,
+    fee_adjusted_cost_bps,
     fee_adjusted_profit_matched_bps,
 )
 from talos.models.order import Fill
@@ -44,7 +44,9 @@ from talos.models.position import EventPositionSummary, LegSummary
 from talos.units import (
     ONE_CENT_BPS,
     ONE_CONTRACT_FP100,
+    ONE_DOLLAR_BPS,
     bps_to_cents_round,
+    cents_to_bps,
     quadratic_fee_bps,
 )
 
@@ -448,15 +450,19 @@ class PositionLedger:
             # No position on the other side — can't check arb yet, allow placement
             return True, ""
 
-        # Fee-adjusted: effective cost = price + fee(price)
-        effective_this = fee_adjusted_cost(price, rate=rate)
-        effective_other = fee_adjusted_cost(int(round(other_price)), rate=rate)
-        if effective_this + effective_other >= 100:
+        # Fee-adjusted: effective cost = price + fee(price), in bps.
+        effective_this_bps = fee_adjusted_cost_bps(cents_to_bps(price), rate=rate)
+        effective_other_bps = fee_adjusted_cost_bps(
+            cents_to_bps(int(round(other_price))), rate=rate
+        )
+        if effective_this_bps + effective_other_bps >= ONE_DOLLAR_BPS:
             return (
                 False,
                 f"arb not profitable after fees: "
-                f"{effective_this:.2f} + {effective_other:.2f} = "
-                f"{effective_this + effective_other:.2f} >= 100",
+                f"{effective_this_bps / ONE_CENT_BPS:.2f}¢ + "
+                f"{effective_other_bps / ONE_CENT_BPS:.2f}¢ = "
+                f"{(effective_this_bps + effective_other_bps) / ONE_CENT_BPS:.2f}¢ "
+                f">= $1.00",
             )
 
         return True, ""

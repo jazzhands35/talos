@@ -205,9 +205,9 @@ _ALLOWLIST: frozenset[tuple[str, int]] = frozenset(
         ("src/talos/ui/event_review.py", 120),  # pnl (cents, sqlite col) → $N.NN display
         ("src/talos/ui/event_review.py", 121),  # revenue (cents, sqlite col) → $N.NN display
         ("src/talos/ui/widgets.py", 51),        # kalshi_pnl param (cents) → $N.NN display
-        ("src/talos/ui/widgets.py", 251),       # pnl_cents → $N.NN display
-        ("src/talos/ui/widgets.py", 818),       # exposure (cents post bps→cents round) → display
-        ("src/talos/ui/widgets.py", 923),       # _exposure (cents internal store) → display
+        ("src/talos/ui/widgets.py", 254),       # pnl_cents → $N.NN display
+        ("src/talos/ui/widgets.py", 821),       # exposure (cents post bps→cents round) → display
+        ("src/talos/ui/widgets.py", 926),       # _exposure (cents internal store) → display
     }
 )
 
