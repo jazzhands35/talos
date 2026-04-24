@@ -176,38 +176,27 @@ _BANNED_LITERALS = {100, 10_000}
 _BANNED_FORMAT_SUFFIXES = (".2f", ".4f")
 
 # Allowlist entries: (posix_path, lineno). Keep small. Each entry
-# documents a legitimate exception. Two legit categories at migration
-# landing time:
+# documents a legitimate exception.
 #
-# 1. ``fees.py`` still exposes the pre-migration cents-scale API as a
-#    convenience layer alongside the bps-aware _bps siblings. Inside
-#    those legacy functions, literal ``100`` IS cents-per-dollar /
-#    cents-per-unit — the real thing, not a bps proxy. These functions
-#    will be deleted when the last caller migrates, but that's post-PR.
-# 2. ``ui/event_review.py`` and ``ui/widgets.py`` display cents-valued
-#    fields from models that are NOT part of the bps migration
-#    (EventPositionSummary.locked_profit_cents / exposure_cents,
-#    PortfolioPanel._cash / _exposure / _locked internal cents storage,
-#    LegSummary.total_fill_cost cents). These are display-only `/100` to
-#    convert whole cents into dollars for render. Using ``ONE_CENT_BPS``
-#    would be semantically wrong (that constant is "bps per cent", not
-#    "cents per dollar") and would mislead a reader about what layer
-#    the value is in.
+# After the bps/fp100 migration and its cleanup PR landed, the allowlist
+# carries only genuine cents-layer exceptions — values that originate
+# from an external cents-scale boundary (sqlite columns written before
+# the migration, operator-facing balance plumbing, externally-provided
+# ``kalshi_pnl`` payloads) and are displayed as dollars via ``/ 100``.
+# Using ``ONE_CENT_BPS`` on these would be semantically wrong (that
+# constant is "bps per cent", not "cents per dollar") and would mislead
+# a reader about what layer the value is in.
 _ALLOWLIST: frozenset[tuple[str, int]] = frozenset(
     {
-        # Category 1: fees.py legacy cents-scale convenience API.
-        ("src/talos/fees.py", 66),   # quadratic_fee: cents × (100 - cents) × rate / 100
-        ("src/talos/fees.py", 109),  # max_profitable_price: other_cost budget in cents
-        ("src/talos/fees.py", 180),  # scenario_pnl: filled * 100 cents-per-contract payout
-        ("src/talos/fees.py", 181),  # scenario_pnl: mirror
-        # Category 2: legacy cents display on non-migrated sqlite columns / cents stores.
+        # Cents-scale sqlite columns (event-review timeline display).
         ("src/talos/ui/event_review.py", 103),  # pnl (cents, sqlite col) → $N.NN display
         ("src/talos/ui/event_review.py", 120),  # pnl (cents, sqlite col) → $N.NN display
         ("src/talos/ui/event_review.py", 121),  # revenue (cents, sqlite col) → $N.NN display
-        ("src/talos/ui/widgets.py", 51),        # kalshi_pnl param (cents) → $N.NN display
-        ("src/talos/ui/widgets.py", 254),       # pnl_cents → $N.NN display
-        ("src/talos/ui/widgets.py", 821),       # exposure (cents post bps→cents round) → display
-        ("src/talos/ui/widgets.py", 926),       # _exposure (cents internal store) → display
+        # Cents-scale UI widgets / plumbing.
+        ("src/talos/ui/widgets.py", 51),   # kalshi_pnl param (cents) → $N.NN display
+        ("src/talos/ui/widgets.py", 254),  # pnl_cents → $N.NN display
+        ("src/talos/ui/widgets.py", 821),  # exposure (cents post bps→cents round) → display
+        ("src/talos/ui/widgets.py", 926),  # _exposure (cents internal store) → display
     }
 )
 
