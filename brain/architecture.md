@@ -19,6 +19,14 @@ Sports markets can be blocked via `sports_enabled=False` in `AutomationConfig`.
 ### Unit
 The atomic bidding quantity. Currently **20 contracts** in production (default 10). Configurable, but always a fixed integer. All order placement, position tracking, and safety checks are denominated in units. A "pair" is one unit on side A and one unit on side B of the same event.
 
+### Money units (bps / fp100)
+
+Shipped 2026-04-23 via PR #1 ([bps/fp100 unit migration](../docs/superpowers/specs/2026-04-17-bps-fp100-unit-migration-design.md)). Every money value in the core trading path is an integer in **basis points** (`$1 = 10,000 bps`, `1¢ = 100 bps`); every contract count is an integer in **fp100** (`1 contract = 100 fp100`). See [`src/talos/units.py`](../src/talos/units.py) for the canonical constants + Decimal-boundary parsers.
+
+Abstract formulas in this document (e.g. `100 - price_a - price_b`, `avg_price_A + avg_price_B < 100`) describe the underlying arithmetic as a concept. In code those formulas operate on bps values — e.g. the scanner's admission check is actually `raw_edge_bps > 0` where `raw_edge_bps = ONE_DOLLAR_BPS - pa_bps - pb_bps`. The `100` in prose is shorthand for the dollar boundary (`$1`), not a literal cents arithmetic constant.
+
+Display layers render bps back to dollars/cents via formatters (`format_bps_as_dollars_display`, `format_bps_as_cents`, `format_fp100_as_contracts`); operator config fields like `edge_threshold_cents` stay in cents at the config boundary and convert via `cents_to_bps` at first consumption. A permanent AST discipline test ([`tests/test_unit_discipline.py`](../tests/test_unit_discipline.py)) prevents regression to literal-`100` arithmetic on money identifiers.
+
 ### Event Lifecycle (per-event, independent)
 Each event maintains an independent position ledger. Events are completely isolated — no cross-event logic.
 
