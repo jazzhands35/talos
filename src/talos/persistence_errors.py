@@ -1,0 +1,58 @@
+"""Persistence error types shared across modules.
+
+Lives in its own module to avoid a circular import: __main__'s
+_persist_games callback raises this, engine.add_pairs_from_selection
+catches it to trigger rollback, and TreeScreen.commit catches it again
+to surface a clear toast and preserve staged_changes for retry.
+"""
+from __future__ import annotations
+
+
+class PersistenceError(Exception):
+    """A persistence write failed in a way that breaks the durability
+    contract — the in-memory engine state was mutated but the on-disk
+    snapshot does NOT reflect it. Callers should treat this as a hard
+    commit failure, roll back the in-memory mutation if possible, and
+    refuse to clear staged changes so the user can retry.
+
+    Specifically: a save_games_full() failure means engine_state for
+    winding-down pairs is no longer durable. On a restart from this
+    state, those pairs would resurrect as freely tradable — exactly
+    the failure mode the safety branch is designed to prevent.
+    """
+
+
+class RemoveBatchPersistenceError(PersistenceError):
+    """Persistence failed mid-batch in remove_pairs_from_selection.
+
+    Carries the count of successfully-persisted winding-down transitions
+    so the UI can surface "Wind-down committed for N pairs; persistence
+    failed at pair N+1" instead of a generic failure toast.
+
+    `phase` distinguishes which save failed:
+      - "transition": a per-transition save failed mid-batch. Pairs
+        before this point are durable on disk; the failing pair was
+        rolled back to its prior state. Clean removes processed before
+        this point may NOT yet be durable (they only get persisted by
+        the batch-end save, which never ran).
+      - "batch_end": all per-transition saves succeeded but the
+        final batch-end save failed. Winding-down transitions are
+        durable, but clean removes in this batch are NOT durable on
+        disk and will reappear from the stale snapshot on restart.
+
+    Subclasses PersistenceError so existing `except PersistenceError`
+    handlers catch it; commit() additionally `isinstance` checks to
+    extract `persisted_count` and `phase` for the toast.
+    """
+
+    def __init__(
+        self,
+        persisted_count: int,
+        message: str,
+        original: BaseException | None = None,
+        phase: str = "transition",
+    ) -> None:
+        super().__init__(message)
+        self.persisted_count = persisted_count
+        self.original = original
+        self.phase = phase

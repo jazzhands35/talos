@@ -15,9 +15,9 @@ Run static analysis tools and report issues concisely.
 
 Run from project root: `C:/Users/Sean/Documents/Python/Talos`
 
-1. **Ruff lint:** `cd "C:/Users/Sean/Documents/Python/Talos" && python -m ruff check src/ tests/`
-2. **Ruff format check:** `cd "C:/Users/Sean/Documents/Python/Talos" && python -m ruff format --check src/ tests/`
-3. **Pyright:** `cd "C:/Users/Sean/Documents/Python/Talos" && python -m pyright`
+1. **Ruff lint:** `cd "C:/Users/Sean/Documents/Python/Talos" && .venv/Scripts/python -m ruff check src/ tests/`
+2. **Ruff format check:** `cd "C:/Users/Sean/Documents/Python/Talos" && .venv/Scripts/python -m ruff format --check src/ tests/`
+3. **Pyright:** `cd "C:/Users/Sean/Documents/Python/Talos" && .venv/Scripts/python -m pyright`
 
 ## Rules
 

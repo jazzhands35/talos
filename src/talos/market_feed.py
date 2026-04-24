@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
+
 import structlog
 
 from talos.models.ws import OrderBookDelta, OrderBookSnapshot
@@ -29,7 +31,10 @@ class MarketFeed:
         self._books = book_manager
         self._subscribed_tickers: set[str] = set()
         self._ticker_to_sid: dict[str, int] = {}
+        self._bulk_batches: list[set[str]] = []  # tracks which tickers were subscribed together
         self._ws.on_message(_ORDERBOOK_CHANNEL, self._on_message)
+        self._ws.on_seq_gap(self._on_seq_gap)
+        self.on_book_update: Callable[[str], None] | None = None
 
     async def _on_message(
         self,
@@ -41,8 +46,8 @@ class MarketFeed:
         """Route a WS message to the book manager."""
         ticker = msg.market_ticker
 
-        # Learn sid mapping from first message for this ticker
-        if sid and ticker not in self._ticker_to_sid:
+        # Always update sid mapping — a resubscribe may assign a new sid
+        if sid:
             self._ticker_to_sid[ticker] = sid
 
         if isinstance(msg, OrderBookSnapshot):
@@ -51,18 +56,125 @@ class MarketFeed:
         elif isinstance(msg, OrderBookDelta):
             self._books.apply_delta(ticker, msg, seq=seq)
 
+        if self.on_book_update:
+            self.on_book_update(ticker)
+
+    async def _on_seq_gap(self, sid: int, channel: str) -> None:
+        """Recover from a sequence gap by resubscribing.
+
+        Unsubscribes the stale sid and re-subscribes to ALL tickers that shared it.
+        Bulk subscriptions share a single sid across many tickers, so we must
+        collect every ticker mapped to the failed sid before resubscribing.
+        Kalshi sends a fresh snapshot on subscribe, resetting state cleanly.
+        """
+        # Collect tickers sharing this sid.
+        learned = [t for t, s in self._ticker_to_sid.items() if s == sid]
+        # Include unmapped tickers ONLY from batches that contain a learned
+        # ticker — avoids churning unrelated in-flight subscriptions.
+        # Fallback: if no tickers have learned this sid (entire subscription
+        # gapped before any snapshot), include all unmapped as last resort.
+        if learned:
+            affected_batches = [
+                batch for batch in self._bulk_batches
+                if any(t in batch for t in learned)
+            ]
+            unmapped = [
+                t for batch in affected_batches
+                for t in batch
+                if t in self._subscribed_tickers and t not in self._ticker_to_sid
+            ]
+        else:
+            unmapped = [
+                t for t in self._subscribed_tickers
+                if t not in self._ticker_to_sid
+            ]
+        affected_tickers = list(set(learned + unmapped))
+        if not affected_tickers:
+            logger.warning("ws_seq_gap_unknown_sid", sid=sid, channel=channel)
+            return
+
+        logger.info(
+            "ws_seq_gap_recovery",
+            sid=sid,
+            channel=channel,
+            ticker_count=len(affected_tickers),
+            learned=len(learned),
+            unmapped=len(unmapped),
+        )
+        # Unsubscribe stale sid BEFORE clearing mappings
+        await self._ws.unsubscribe([sid])
+        # Remove stale mappings and batch entries for affected tickers
+        affected_set = set(affected_tickers)
+        for ticker in affected_tickers:
+            self._ticker_to_sid.pop(ticker, None)
+        for batch in self._bulk_batches:
+            batch -= affected_set
+        self._bulk_batches = [b for b in self._bulk_batches if b]
+        # Resubscribe all affected tickers — use bulk when multiple
+        if len(affected_tickers) == 1:
+            await self._ws.subscribe(channel, affected_tickers[0])
+        else:
+            await self._ws.subscribe(channel, market_tickers=affected_tickers)
+            self._bulk_batches.append(set(affected_tickers))
+
+    async def connect(self) -> None:
+        """Connect the underlying WebSocket."""
+        await self._ws.connect()
+
     async def subscribe(self, ticker: str) -> None:
         """Subscribe to orderbook updates for a ticker."""
         await self._ws.subscribe(_ORDERBOOK_CHANNEL, ticker)
         self._subscribed_tickers.add(ticker)
         logger.info("market_feed_subscribe", ticker=ticker)
 
+    async def subscribe_bulk(self, tickers: list[str]) -> None:
+        """Subscribe to orderbook updates for multiple tickers in batches.
+
+        Subscribing 292 tickers at once triggers 292 orderbook snapshots
+        back-to-back, which freezes the event loop during processing.
+        Batching with yields lets the UI stay responsive.
+        """
+        import asyncio
+
+        # Dedupe input — same-ticker YES/NO pairs produce (ticker, ticker) duplicates
+        seen: set[str] = set()
+        unique = []
+        for t in tickers:
+            if t not in seen:
+                seen.add(t)
+                unique.append(t)
+        new_tickers = [t for t in unique if t not in self._subscribed_tickers]
+        if not new_tickers:
+            return
+        batch_size = 20
+        for i in range(0, len(new_tickers), batch_size):
+            batch = new_tickers[i : i + batch_size]
+            await self._ws.subscribe(_ORDERBOOK_CHANNEL, market_tickers=batch)
+            self._subscribed_tickers.update(batch)
+            self._bulk_batches.append(set(batch))
+            await asyncio.sleep(0.1)  # yield to event loop between batches
+        logger.info("market_feed_subscribe_bulk", count=len(new_tickers))
+
     async def unsubscribe(self, ticker: str) -> None:
-        """Unsubscribe and remove from book manager."""
+        """Unsubscribe and remove from book manager.
+
+        Bulk-safe: if other tickers share the same subscription (sid),
+        removes only this ticker via update_subscription instead of
+        killing the entire sid.
+        """
         sid = self._ticker_to_sid.pop(ticker, None)
         if sid is not None:
-            await self._ws.unsubscribe([sid])
+            siblings = [t for t, s in self._ticker_to_sid.items() if s == sid]
+            if siblings:
+                # Other tickers share this sid — remove just this one
+                await self._ws.update_subscription(sid, [ticker], action="delete_markets")
+            else:
+                # Last ticker on this sid — kill the subscription
+                await self._ws.unsubscribe([sid])
         self._subscribed_tickers.discard(ticker)
+        for batch in self._bulk_batches:
+            batch.discard(ticker)
+        self._bulk_batches = [b for b in self._bulk_batches if b]  # prune empty
         self._books.remove(ticker)
         logger.info("market_feed_unsubscribe", ticker=ticker)
 
@@ -77,6 +189,11 @@ class MarketFeed:
             await self.unsubscribe(ticker)
         await self._ws.disconnect()
         logger.info("market_feed_stop")
+
+    @property
+    def book_manager(self) -> OrderBookManager:
+        """The underlying orderbook manager."""
+        return self._books
 
     @property
     def subscriptions(self) -> set[str]:

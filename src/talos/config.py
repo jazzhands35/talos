@@ -19,11 +19,11 @@ class KalshiEnvironment(Enum):
 _URLS: dict[KalshiEnvironment, tuple[str, str]] = {
     KalshiEnvironment.DEMO: (
         "https://demo-api.kalshi.co/trade-api/v2",
-        "wss://demo-api.kalshi.co/",
+        "wss://demo-api.kalshi.co/trade-api/ws/v2",
     ),
     KalshiEnvironment.PRODUCTION: (
         "https://api.elections.kalshi.com/trade-api/v2",
-        "wss://api.elections.kalshi.com/",
+        "wss://api.elections.kalshi.com/trade-api/ws/v2",
     ),
 }
 
