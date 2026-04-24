@@ -252,13 +252,17 @@ class TestSettlementScreenRender:
         positions = [
             EventPositionSummary(
                 event_ticker="EVT-TEST",
-                leg_a=LegSummary(ticker="MKT-A", no_price=38, filled_count=10, resting_count=0),
-                leg_b=LegSummary(ticker="MKT-B", no_price=55, filled_count=10, resting_count=0),
+                leg_a=LegSummary(
+                    ticker="MKT-A", no_price_bps=38 * 100, filled_count=10, resting_count=0
+                ),
+                leg_b=LegSummary(
+                    ticker="MKT-B", no_price_bps=55 * 100, filled_count=10, resting_count=0
+                ),
                 matched_pairs=10,
-                locked_profit_cents=70,
+                locked_profit_bps=70 * 100,
                 unmatched_a=0,
                 unmatched_b=0,
-                exposure_cents=0,
+                exposure_bps=0,
             )
         ]
 

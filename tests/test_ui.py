@@ -247,10 +247,10 @@ class TestTablePositions:
                         event_ticker="EVT-STANMIA",
                         leg_a=LegSummary(
                             ticker="GAME-STAN",
-                            no_price=31,
+                            no_price_bps=31 * 100,
                             filled_count=3,
                             resting_count=2,
-                            total_fill_cost=3 * 31,
+                            total_fill_cost_bps=3 * 31 * 100,
                             queue_position=8,
                             cpm=12.5,
                             cpm_partial=False,
@@ -258,20 +258,20 @@ class TestTablePositions:
                         ),
                         leg_b=LegSummary(
                             ticker="GAME-MIA",
-                            no_price=67,
+                            no_price_bps=67 * 100,
                             filled_count=3,
                             resting_count=2,
-                            total_fill_cost=3 * 67,
+                            total_fill_cost_bps=3 * 67 * 100,
                             queue_position=15,
                             cpm=6.0,
                             cpm_partial=True,
                             eta_minutes=2.5,
                         ),
                         matched_pairs=3,
-                        locked_profit_cents=2.38,
+                        locked_profit_bps=238.0,
                         unmatched_a=0,
                         unmatched_b=0,
-                        exposure_cents=0,
+                        exposure_bps=0,
                     )
                 ]
             )
@@ -405,23 +405,23 @@ class TestRichTextCells:
                         event_ticker="EVT-STANMIA",
                         leg_a=LegSummary(
                             ticker="GAME-STAN",
-                            no_price=31,
+                            no_price_bps=31 * 100,
                             filled_count=3,
                             resting_count=7,
-                            total_fill_cost=93,
+                            total_fill_cost_bps=93 * 100,
                         ),
                         leg_b=LegSummary(
                             ticker="GAME-MIA",
-                            no_price=67,
+                            no_price_bps=67 * 100,
                             filled_count=5,
                             resting_count=5,
-                            total_fill_cost=335,
+                            total_fill_cost_bps=335 * 100,
                         ),
                         matched_pairs=3,
-                        locked_profit_cents=0,
+                        locked_profit_bps=0,
                         unmatched_a=0,
                         unmatched_b=2,
-                        exposure_cents=0,
+                        exposure_bps=0,
                     )
                 ]
             )

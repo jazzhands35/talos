@@ -6,7 +6,7 @@ from datetime import UTC, datetime
 
 import structlog
 
-from talos.fees import fee_adjusted_edge, fee_adjusted_edge_bps
+from talos.fees import fee_adjusted_edge_bps
 from talos.models.market import OrderBookLevel
 from talos.models.strategy import ArbPair, Opportunity
 from talos.orderbook import OrderBookManager
@@ -248,7 +248,10 @@ class ArbitrageScanner:
                     update["qty_b_fp100"] = qb_fp100
                 if pa is not None and pb is not None:
                     update["raw_edge"] = 100 - pa - pb
-                    update["fee_edge"] = fee_adjusted_edge(pa, pb, rate=pair.fee_rate)
+                    # fee_edge historically returns float cents; derive from bps.
+                    update["fee_edge"] = fee_adjusted_edge_bps(
+                        pa * ONE_CENT_BPS, pb * ONE_CENT_BPS, rate=pair.fee_rate
+                    ) / ONE_CENT_BPS
                     update["tradeable_qty"] = min(qa, qb)
                 if pa_bps is not None and pb_bps is not None:
                     update["raw_edge_bps"] = (
@@ -296,7 +299,15 @@ class ArbitrageScanner:
         no_b_cents = pb_bps // ONE_CENT_BPS
         no_a_qty = qa_fp100 // ONE_CONTRACT_FP100
         no_b_qty = qb_fp100 // ONE_CONTRACT_FP100
-        fee_edge = fee_adjusted_edge(no_a_cents, no_b_cents, rate=pair.fee_rate)
+        # fee_edge historically returns float cents; derive from bps.
+        fee_edge = (
+            fee_adjusted_edge_bps(
+                no_a_cents * ONE_CENT_BPS,
+                no_b_cents * ONE_CENT_BPS,
+                rate=pair.fee_rate,
+            )
+            / ONE_CENT_BPS
+        )
         tradeable_qty = min(no_a_qty, no_b_qty)
         tradeable_qty_fp100 = min(qa_fp100, qb_fp100)
 

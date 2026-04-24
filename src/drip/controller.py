@@ -11,7 +11,8 @@ from pydantic import BaseModel
 
 from drip.config import DripConfig
 from drip.side_state import DripSide
-from talos.fees import fee_adjusted_cost
+from talos.fees import fee_adjusted_cost_bps
+from talos.units import ONE_CENT_BPS, ONE_DOLLAR_BPS
 
 log = structlog.get_logger()
 
@@ -75,10 +76,12 @@ class DripController:
 
     def is_profitable(self) -> bool:
         """Check whether current target prices pass the profitability gate."""
-        cost = fee_adjusted_cost(
-            self.side_a.target_price, rate=self.config.fee_rate
-        ) + fee_adjusted_cost(self.side_b.target_price, rate=self.config.fee_rate)
-        return cost < 100
+        cost_bps = fee_adjusted_cost_bps(
+            self.side_a.target_price * ONE_CENT_BPS, rate=self.config.fee_rate
+        ) + fee_adjusted_cost_bps(
+            self.side_b.target_price * ONE_CENT_BPS, rate=self.config.fee_rate
+        )
+        return cost_bps < ONE_DOLLAR_BPS
 
     def _place_if_profitable(self, label: str) -> PlaceOrder | NoOp:
         """Return a PlaceOrder if profitable, else NoOp."""
