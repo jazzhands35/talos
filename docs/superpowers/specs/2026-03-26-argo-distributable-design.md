@@ -382,7 +382,7 @@ argo = "argo.__main__:main"
 
 # Add src/argo to hatch build targets
 [tool.hatch.build.targets.wheel]
-packages = ["src/talos", "src/drip", "src/argo"]
+packages = ["src/talos", "src/argo"]
 ```
 
 ## What Talos Has That Argo Inherits (Unchanged)

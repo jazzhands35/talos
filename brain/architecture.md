@@ -84,16 +84,6 @@ Single source of truth for both UI display and bid adjustment safety gates. `com
 
 See [[codebase/index]] for the full module map and gotchas.
 
-## Drip — Sibling Program
-
-Standalone Textual TUI at `src/drip/` that manages a single arb event by drip-feeding 1-contract bids with fill-reactive balance control. Prevents imbalance instead of reacting to it (Talos's approach).
-
-- **Pure state machine** (`DripController`) + async orchestrator (`DripApp`) — same pattern as Talos
-- **REST polling v1** — no WS; polls every 10s for fills/orderbook, 30s full reconciliation
-- **Imports from Talos** — `talos.auth`, `talos.rest_client`, `talos.fees`, `talos.config`
-- **Run:** `python -m drip EVENT TICKER_A TICKER_B PRICE_A PRICE_B [--demo]`
-- **Design spec:** `docs/specs/2026-03-19-drip-staggered-arb-design.md`
-
 ## API Reference
 
 - REST: `https://api.elections.kalshi.com/trade-api/v2` (prod) / `https://demo-api.kalshi.co/trade-api/v2` (demo)
