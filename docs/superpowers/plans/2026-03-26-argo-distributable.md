@@ -355,7 +355,7 @@ Add `argo` script entry and package:
 argo = "argo.__main__:main"
 
 # [tool.hatch.build.targets.wheel] — update:
-packages = ["src/talos", "src/drip", "src/argo"]
+packages = ["src/talos", "src/argo"]
 ```
 
 - [ ] **Step 2: Create `src/argo/__init__.py`**
