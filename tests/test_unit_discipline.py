@@ -200,15 +200,14 @@ _ALLOWLIST: frozenset[tuple[str, int]] = frozenset(
         ("src/talos/fees.py", 109),  # max_profitable_price: other_cost budget in cents
         ("src/talos/fees.py", 180),  # scenario_pnl: filled * 100 cents-per-contract payout
         ("src/talos/fees.py", 181),  # scenario_pnl: mirror
-        # Category 2: legacy cents display on non-migrated models.
-        ("src/talos/ui/event_review.py", 102),  # pnl (cents) → $N.NN display
-        ("src/talos/ui/event_review.py", 119),  # pnl (cents) → $N.NN display
-        ("src/talos/ui/event_review.py", 120),  # revenue (cents) → $N.NN display
-        ("src/talos/ui/event_review.py", 398),  # exposure_cents → $N.NN display
-        ("src/talos/ui/widgets.py", 50),        # kalshi_pnl (cents) → $N.NN display
-        ("src/talos/ui/widgets.py", 250),       # pnl_cents → $N.NN display
-        ("src/talos/ui/widgets.py", 801),       # exposure (cents) → $N.NN display
-        ("src/talos/ui/widgets.py", 906),       # _exposure (cents) → $N.NN display
+        # Category 2: legacy cents display on non-migrated sqlite columns / cents stores.
+        ("src/talos/ui/event_review.py", 103),  # pnl (cents, sqlite col) → $N.NN display
+        ("src/talos/ui/event_review.py", 120),  # pnl (cents, sqlite col) → $N.NN display
+        ("src/talos/ui/event_review.py", 121),  # revenue (cents, sqlite col) → $N.NN display
+        ("src/talos/ui/widgets.py", 51),        # kalshi_pnl param (cents) → $N.NN display
+        ("src/talos/ui/widgets.py", 251),       # pnl_cents → $N.NN display
+        ("src/talos/ui/widgets.py", 818),       # exposure (cents post bps→cents round) → display
+        ("src/talos/ui/widgets.py", 923),       # _exposure (cents internal store) → display
     }
 )
 

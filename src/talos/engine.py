@@ -1912,7 +1912,7 @@ class TradingEngine:
                 sub = ""
                 for ps in self._position_summaries:
                     if ps.event_ticker == s.event_ticker:
-                        est_pnl = int(ps.locked_profit_cents)
+                        est_pnl = bps_to_cents_round(int(ps.locked_profit_bps))
                         break
                 sub = self._game_manager.subtitles.get(s.event_ticker, "")
                 self._settlement_cache.upsert(s, est_pnl_cents=est_pnl, sub_title=sub)
@@ -4907,7 +4907,7 @@ class TradingEngine:
             summary.status = self._compute_event_status(summary.event_ticker)
             ep = self._event_positions.get(summary.event_ticker)
             if ep is not None:
-                summary.kalshi_pnl = ep.realized_pnl_bps // ONE_CENT_BPS
+                summary.kalshi_pnl_bps = ep.realized_pnl_bps
 
         # Compute status for ALL pairs — use dict instead of O(N²) scan
         summary_index = {s.event_ticker: s for s in self._position_summaries}

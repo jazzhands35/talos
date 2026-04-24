@@ -28,7 +28,6 @@ from talos.milestones import MilestoneResolver
 from talos.models.proposal import ProposalKey
 from talos.models.strategy import BidConfirmation
 from talos.scanner import ArbitrageScanner
-from talos.units import ONE_CENT_BPS, ONE_CONTRACT_FP100
 from talos.tree_metadata import TreeMetadataStore
 from talos.ui.event_review import EventReviewScreen
 from talos.ui.proposal_panel import ProposalPanel
@@ -49,6 +48,7 @@ from talos.ui.widgets import (
     PerformancePanel,
     PortfolioPanel,
 )
+from talos.units import ONE_CENT_BPS, ONE_CONTRACT_FP100, bps_to_cents_round
 
 logger = structlog.get_logger()
 
@@ -328,7 +328,7 @@ class TalosApp(App):
                 "leg_b_filled": summary.leg_b.filled_count,
                 "leg_b_resting": summary.leg_b.resting_count,
                 "matched_pairs": summary.matched_pairs,
-                "locked_profit_cents": summary.locked_profit_cents,
+                "locked_profit_bps": summary.locked_profit_bps,
             }
 
         resting_orders = [
@@ -612,7 +612,7 @@ class TalosApp(App):
             # Populate cache if available
             if self._engine.has_settlement_cache:
                 est_map = {
-                    s.event_ticker: int(s.locked_profit_cents)
+                    s.event_ticker: bps_to_cents_round(int(s.locked_profit_bps))
                     for s in self._engine.position_summaries
                 }
                 self._engine.cache_settlements(settlements, est_pnl_map=est_map)
@@ -623,7 +623,7 @@ class TalosApp(App):
                 pos = summaries_by_event.get(s.event_ticker)
                 if pos is None:
                     continue
-                our_expected = int(pos.locked_profit_cents)
+                our_expected = bps_to_cents_round(int(pos.locked_profit_bps))
                 disc = reconcile_event(
                     our_expected, s.revenue_bps // ONE_CENT_BPS, s.event_ticker
                 )
@@ -730,8 +730,8 @@ class TalosApp(App):
             summaries = self._engine.position_summaries
             total_matched_units = 0
             total_partial_events = 0
-            total_locked = 0
-            total_exposure = 0
+            total_locked_bps: float = 0.0
+            total_exposure_bps = 0
             with_positions = 0
             bidding = 0
 
@@ -741,8 +741,8 @@ class TalosApp(App):
                 matched = s.matched_pairs
 
                 total_matched_units += matched // s.unit_size if s.unit_size > 0 else 0
-                total_locked += s.locked_profit_cents
-                total_exposure += s.exposure_cents
+                total_locked_bps += s.locked_profit_bps
+                total_exposure_bps += s.exposure_bps
 
                 if filled > 0:
                     with_positions += 1
@@ -758,6 +758,10 @@ class TalosApp(App):
             total_events = len(self._scanner.pairs) if self._scanner else 0
             unentered = total_events - with_positions - bidding
 
+            # PortfolioPanel._locked / _exposure are cents-scale (same unit as
+            # _cash); convert bps totals back at this display-layer boundary.
+            total_locked = float(bps_to_cents_round(int(total_locked_bps)))
+            total_exposure = bps_to_cents_round(total_exposure_bps)
             panel.update_account(
                 total_matched_units, total_partial_events, total_locked, total_exposure
             )
@@ -977,7 +981,7 @@ class TalosApp(App):
             if new_settlements:
                 # Build est_pnl map from live positions
                 est_map = {
-                    s.event_ticker: int(s.locked_profit_cents)
+                    s.event_ticker: bps_to_cents_round(int(s.locked_profit_bps))
                     for s in self._engine.position_summaries
                 }
                 self._engine.cache_settlements(new_settlements, est_pnl_map=est_map)

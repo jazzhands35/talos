@@ -21,7 +21,6 @@ from talos.models.position import EventPositionSummary
 from talos.models.strategy import BidConfirmation, Opportunity
 from talos.ui.theme import GREEN, RED, SURFACE2, YELLOW
 from talos.units import (
-    ONE_CENT_BPS,
     ONE_CONTRACT_FP100,
     ONE_DOLLAR_BPS,
     bps_to_cents_round,
@@ -650,7 +649,7 @@ class SettlementHistoryScreen(ModalScreen[None]):
         pos = self._positions.get(evt_ticker)
         est_pnl_cents: int | None = None
         if pos is not None:
-            est_pnl_cents = int(pos.locked_profit_cents)
+            est_pnl_cents = bps_to_cents_round(int(pos.locked_profit_bps))
         elif evt_ticker in self._est_pnl_map:
             est_pnl_cents = self._est_pnl_map[evt_ticker]
 
