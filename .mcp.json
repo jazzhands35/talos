@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "kalshi-mcp": {
+      "command": "C:/Users/Sean/Documents/Python/kalshi-mcp/.venv/Scripts/python.exe",
+      "args": ["-m", "kalshi_mcp.server"]
+    }
+  }
+}

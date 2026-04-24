@@ -64,12 +64,27 @@ These skills MUST be invoked proactively — do not wait for the user to ask.
 
 | Trigger | Skill | When |
 |---------|-------|------|
-| Any Kalshi API work (REST or WS) | `kalshi-api-research` | BEFORE writing code |
+| Any Kalshi API work (REST or WS) | `kalshi-mcp` MCP server (see below) + `kalshi-api-research` | BEFORE writing code |
 | Order placement, position tracking, fees | `safety-audit` | AFTER changes |
 | position_ledger.py, bid_adjuster.py changes | `position-scenarios` | AFTER changes |
 | Any bug or unexpected behavior | `superpowers:systematic-debugging` | BEFORE proposing fixes |
 | New feature or behavior change | `superpowers:brainstorming` | BEFORE coding |
 | Implementing from a plan | `superpowers:subagent-driven-development` | During implementation |
+
+## Kalshi API Knowledge (via kalshi-mcp)
+
+Before claiming anything about Kalshi API shape, fields, or behavior, consult the local `kalshi-mcp` MCP server (configured in `.mcp.json`). It serves a curated, cited wisdom layer built from this project's history (plus Kairos and EZarbAssets) and verified against Kalshi's primary docs and the official fee schedule PDF.
+
+Mandatory consultation pattern:
+
+- Endpoint shape / fields / deprecation → `kalshi-mcp__describe_endpoint`
+- A single field's meaning or gotcha → `kalshi-mcp__lookup_field`
+- Concept without knowing the endpoint → `kalshi-mcp__search_gotchas`
+- Actual response shape → `kalshi-mcp__get_example_response`
+
+If the MCP has no entry for the question, consult Kalshi primary docs directly (docs.kalshi.com, kalshi.com/fee-schedule, the fee PDF). Do NOT guess, and do NOT rely on training-data knowledge of Kalshi — the API changes frequently.
+
+**When you find a new Kalshi gotcha**, add it to `C:/Users/Sean/Documents/Python/kalshi-mcp/data/annotations.yaml` so the next agent inherits the lesson. Every entry must carry `source_type` (`kalshi-docs` / `third-party` / `project-empirical`) and `source_urls`; non-`kalshi-docs` entries must also carry `verify_against_kalshi: true`. Tests enforce this.
 
 ## Key Conventions
 
