@@ -13,7 +13,7 @@ from typing import TYPE_CHECKING
 import structlog
 
 from talos.errors import KalshiAPIError, KalshiRateLimitError
-from talos.fees import max_profitable_price
+from talos.fees import max_profitable_price_bps
 from talos.models.proposal import Proposal, ProposalKey, ProposedRebalance
 from talos.position_ledger import PositionLedger, Side
 from talos.units import ONE_CENT_BPS, ONE_CONTRACT_FP100, bps_to_cents_round
@@ -143,18 +143,19 @@ def compute_rebalance_proposal(
                 # Compute the highest price that IS profitable
                 if ledger.open_count(over) > 0:
                     other_avg = ledger.open_avg_filled_price(over)
-                    fallback = max_profitable_price(
-                        other_avg,
+                    # max_profitable_price_bps ceils to whole-cent internally.
+                    fallback_bps = max_profitable_price_bps(
+                        int(round(other_avg * ONE_CENT_BPS)),
                         rate=pair.fee_rate,
                     )
-                    if fallback > 0:
+                    if fallback_bps > 0:
                         orig = catchup_price  # snapshot price before fallback
-                        catchup_price = fallback
+                        catchup_price = bps_to_cents_round(fallback_bps)
                         logger.info(
                             "catchup_price_fallback",
                             event_ticker=event_ticker,
                             snapshot_price=orig,
-                            fallback_price=fallback,
+                            fallback_price=catchup_price,
                         )
                     else:
                         catchup_qty = 0

@@ -412,12 +412,12 @@ class TestComputeDisplayPositions:
         assert s.matched_pairs == 5
         assert s.unmatched_a == 0
         assert s.unmatched_b == 0
-        assert s.locked_profit_cents > 0  # 45+47=92 < 100, profitable
-        assert s.exposure_cents == 0
+        assert s.locked_profit_bps > 0  # 45+47=92 < 100, profitable
+        assert s.exposure_bps == 0
         assert s.leg_a.filled_count == 5
         assert s.leg_b.filled_count == 5
-        assert s.leg_a.no_price == 45
-        assert s.leg_b.no_price == 47
+        assert s.leg_a.no_price_bps == 45 * 100
+        assert s.leg_b.no_price_bps == 47 * 100
 
     def test_one_side_ahead(self):
         ledger = PositionLedger(event_ticker="EVT-1", unit_size=10)
@@ -431,7 +431,7 @@ class TestComputeDisplayPositions:
         assert s.matched_pairs == 3
         assert s.unmatched_a == 2
         assert s.unmatched_b == 0
-        assert s.exposure_cents > 0  # 2 unmatched contracts on A
+        assert s.exposure_bps > 0  # 2 unmatched contracts on A
 
     def test_resting_only_shows_resting_price(self):
         ledger = PositionLedger(event_ticker="EVT-1", unit_size=10)
@@ -440,7 +440,7 @@ class TestComputeDisplayPositions:
 
         result = compute_display_positions(ledgers, [_pair()], {}, CPMTracker())
         assert len(result) == 1
-        assert result[0].leg_a.no_price == 45
+        assert result[0].leg_a.no_price_bps == 45 * 100
         assert result[0].leg_a.resting_count == 10
 
     def test_queue_enrichment(self):

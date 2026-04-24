@@ -36,16 +36,18 @@ import structlog
 from talos.automation_config import DEFAULT_UNIT_SIZE
 from talos.fees import (
     MAKER_FEE_RATE,
-    fee_adjusted_cost,
-    fee_adjusted_profit_matched,
-    quadratic_fee,
+    fee_adjusted_cost_bps,
+    fee_adjusted_profit_matched_bps,
 )
 from talos.models.order import Fill
 from talos.models.position import EventPositionSummary, LegSummary
 from talos.units import (
     ONE_CENT_BPS,
     ONE_CONTRACT_FP100,
+    ONE_DOLLAR_BPS,
     bps_to_cents_round,
+    cents_to_bps,
+    quadratic_fee_bps,
 )
 
 if TYPE_CHECKING:
@@ -448,15 +450,19 @@ class PositionLedger:
             # No position on the other side — can't check arb yet, allow placement
             return True, ""
 
-        # Fee-adjusted: effective cost = price + fee(price)
-        effective_this = fee_adjusted_cost(price, rate=rate)
-        effective_other = fee_adjusted_cost(int(round(other_price)), rate=rate)
-        if effective_this + effective_other >= 100:
+        # Fee-adjusted: effective cost = price + fee(price), in bps.
+        effective_this_bps = fee_adjusted_cost_bps(cents_to_bps(price), rate=rate)
+        effective_other_bps = fee_adjusted_cost_bps(
+            cents_to_bps(int(round(other_price))), rate=rate
+        )
+        if effective_this_bps + effective_other_bps >= ONE_DOLLAR_BPS:
             return (
                 False,
                 f"arb not profitable after fees: "
-                f"{effective_this:.2f} + {effective_other:.2f} = "
-                f"{effective_this + effective_other:.2f} >= 100",
+                f"{effective_this_bps / ONE_CENT_BPS:.2f}¢ + "
+                f"{effective_other_bps / ONE_CENT_BPS:.2f}¢ = "
+                f"{(effective_this_bps + effective_other_bps) / ONE_CENT_BPS:.2f}¢ "
+                f">= $1.00",
             )
 
         return True, ""
@@ -1605,10 +1611,13 @@ def compute_display_positions(
         unmatched_a = filled_a - matched
         unmatched_b = filled_b - matched
 
-        cost_a = ledger.filled_total_cost(Side.A)
-        cost_b = ledger.filled_total_cost(Side.B)
-        fees_a = ledger.filled_fees(Side.A)
-        fees_b = ledger.filled_fees(Side.B)
+        # Exact-precision bps state from the ledger.
+        cost_a_bps = ledger.filled_total_cost_bps(Side.A)
+        cost_b_bps = ledger.filled_total_cost_bps(Side.B)
+        fees_a_bps = ledger.filled_fees_bps(Side.A)
+        fees_b_bps = ledger.filled_fees_bps(Side.B)
+        filled_a_fp100 = ledger.filled_count_fp100(Side.A)
+        filled_b_fp100 = ledger.filled_count_fp100(Side.B)
 
         # When orders were archived across restart, fees are lost (zero)
         # but cost/count are restored from positions API. Estimate fees
@@ -1617,28 +1626,47 @@ def compute_display_positions(
         # but returned zero — not when record_fill() was used without sync.
         side_a = ledger._sides[Side.A]
         side_b = ledger._sides[Side.B]
-        if fees_a == 0 and filled_a > 0 and cost_a > 0 and side_a._fees_from_api:
-            avg_a = cost_a // filled_a
-            fees_a = round(quadratic_fee(avg_a, rate=pair.fee_rate) * filled_a)
-        if fees_b == 0 and filled_b > 0 and cost_b > 0 and side_b._fees_from_api:
-            avg_b = cost_b // filled_b
-            fees_b = round(quadratic_fee(avg_b, rate=pair.fee_rate) * filled_b)
+        if fees_a_bps == 0 and filled_a_fp100 > 0 and cost_a_bps > 0 and side_a._fees_from_api:
+            avg_a_bps = cost_a_bps * ONE_CONTRACT_FP100 // filled_a_fp100
+            per_contract_fee = quadratic_fee_bps(avg_a_bps, rate=pair.fee_rate)
+            fees_a_bps = per_contract_fee * filled_a_fp100 // ONE_CONTRACT_FP100
+        if fees_b_bps == 0 and filled_b_fp100 > 0 and cost_b_bps > 0 and side_b._fees_from_api:
+            avg_b_bps = cost_b_bps * ONE_CONTRACT_FP100 // filled_b_fp100
+            per_contract_fee = quadratic_fee_bps(avg_b_bps, rate=pair.fee_rate)
+            fees_b_bps = per_contract_fee * filled_b_fp100 // ONE_CONTRACT_FP100
 
         if matched > 0:
-            cost_a_matched = _prorate(cost_a, matched, filled_a)
-            cost_b_matched = _prorate(cost_b, matched, filled_b)
-            fees_a_matched = _prorate(fees_a, matched, filled_a)
-            fees_b_matched = _prorate(fees_b, matched, filled_b)
-            locked_profit = fee_adjusted_profit_matched(
-                matched, cost_a_matched, cost_b_matched, fees_a_matched, fees_b_matched
+            matched_fp100 = matched * ONE_CONTRACT_FP100
+            cost_a_matched_bps = _prorate(cost_a_bps, matched, filled_a)
+            cost_b_matched_bps = _prorate(cost_b_bps, matched, filled_b)
+            fees_a_matched_bps = _prorate(fees_a_bps, matched, filled_a)
+            fees_b_matched_bps = _prorate(fees_b_bps, matched, filled_b)
+            locked_profit_bps: float = fee_adjusted_profit_matched_bps(
+                matched_fp100,
+                cost_a_matched_bps,
+                cost_b_matched_bps,
+                fees_a_matched_bps,
+                fees_b_matched_bps,
             )
         else:
-            locked_profit = 0.0
+            locked_profit_bps = 0.0
 
-        exposure = _prorate(cost_a, unmatched_a, filled_a) + _prorate(cost_b, unmatched_b, filled_b)
+        exposure_bps = _prorate(cost_a_bps, unmatched_a, filled_a) + _prorate(
+            cost_b_bps, unmatched_b, filled_b
+        )
 
-        avg_a = cost_a // filled_a if filled_a > 0 else ledger.resting_price(Side.A)
-        avg_b = cost_b // filled_b if filled_b > 0 else ledger.resting_price(Side.B)
+        # Average fill price per whole contract, in bps. Falls back to the
+        # resting price (in bps) when no fills exist yet.
+        avg_a_bps = (
+            cost_a_bps * ONE_CONTRACT_FP100 // filled_a_fp100
+            if filled_a_fp100 > 0
+            else ledger.resting_price_bps(Side.A)
+        )
+        avg_b_bps = (
+            cost_b_bps * ONE_CONTRACT_FP100 // filled_b_fp100
+            if filled_b_fp100 > 0
+            else ledger.resting_price_bps(Side.B)
+        )
 
         # Queue positions from cache (keyed by order_id)
         oid_a = ledger.resting_order_id(Side.A)
@@ -1660,35 +1688,39 @@ def compute_display_positions(
                 event_ticker=pair.event_ticker,
                 leg_a=LegSummary(
                     ticker=pair.ticker_a,
-                    no_price=avg_a,
+                    no_price_bps=avg_a_bps,
                     filled_count=filled_a,
                     resting_count=resting_a,
-                    total_fill_cost=cost_a,
-                    total_fees=fees_a,
+                    total_fill_cost_bps=cost_a_bps,
+                    total_fees_bps=fees_a_bps,
                     queue_position=qp_a,
                     cpm=cpm_a,
                     cpm_partial=cpm_a_partial,
                     eta_minutes=eta_a,
-                    resting_no_price=ledger.resting_price(Side.A) if resting_a > 0 else None,
+                    resting_no_price_bps=(
+                        ledger.resting_price_bps(Side.A) if resting_a > 0 else None
+                    ),
                 ),
                 leg_b=LegSummary(
                     ticker=pair.ticker_b,
-                    no_price=avg_b,
+                    no_price_bps=avg_b_bps,
                     filled_count=filled_b,
                     resting_count=resting_b,
-                    total_fill_cost=cost_b,
-                    total_fees=fees_b,
+                    total_fill_cost_bps=cost_b_bps,
+                    total_fees_bps=fees_b_bps,
                     queue_position=qp_b,
                     cpm=cpm_b,
                     cpm_partial=cpm_b_partial,
                     eta_minutes=eta_b,
-                    resting_no_price=ledger.resting_price(Side.B) if resting_b > 0 else None,
+                    resting_no_price_bps=(
+                        ledger.resting_price_bps(Side.B) if resting_b > 0 else None
+                    ),
                 ),
                 matched_pairs=matched,
-                locked_profit_cents=locked_profit,
+                locked_profit_bps=locked_profit_bps,
                 unmatched_a=unmatched_a,
                 unmatched_b=unmatched_b,
-                exposure_cents=exposure,
+                exposure_bps=exposure_bps,
                 unit_size=ledger.unit_size,
             )
         )

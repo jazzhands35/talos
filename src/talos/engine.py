@@ -24,7 +24,7 @@ from talos.automation_config import AutomationConfig
 from talos.bid_adjuster import BidAdjuster
 from talos.cpm import CPMTracker
 from talos.errors import KalshiAPIError, KalshiNotFoundError, KalshiRateLimitError
-from talos.fees import MAKER_FEE_RATE, fee_adjusted_cost, fee_adjusted_edge
+from talos.fees import MAKER_FEE_RATE, fee_adjusted_cost_bps, fee_adjusted_edge_bps
 from talos.game_manager import (
     CommitResult,
     GameManager,
@@ -1912,7 +1912,7 @@ class TradingEngine:
                 sub = ""
                 for ps in self._position_summaries:
                     if ps.event_ticker == s.event_ticker:
-                        est_pnl = int(ps.locked_profit_cents)
+                        est_pnl = bps_to_cents_round(int(ps.locked_profit_bps))
                         break
                 sub = self._game_manager.subtitles.get(s.event_ticker, "")
                 self._settlement_cache.upsert(s, est_pnl_cents=est_pnl, sub_title=sub)
@@ -2892,9 +2892,13 @@ class TradingEngine:
             if other_avg <= 0:
                 continue
 
-            eff_improved = fee_adjusted_cost(improved_price, rate=pair.fee_rate)
-            eff_other = fee_adjusted_cost(int(round(other_avg)), rate=pair.fee_rate)
-            if eff_improved + eff_other >= 100:
+            eff_improved_bps = fee_adjusted_cost_bps(
+                improved_price * ONE_CENT_BPS, rate=pair.fee_rate
+            )
+            eff_other_bps = fee_adjusted_cost_bps(
+                int(round(other_avg)) * ONE_CENT_BPS, rate=pair.fee_rate
+            )
+            if eff_improved_bps + eff_other_bps >= ONE_DOLLAR_BPS:
                 continue
 
             # Safety gate #2: no spread crossing
@@ -3011,12 +3015,14 @@ class TradingEngine:
             pair = self.find_pair(ledger.event_ticker)
             fee_rate = pair.fee_rate if pair is not None else MAKER_FEE_RATE
             # P18: pair profitability — new prices must sum < 100 after fees
-            pair_edge = fee_adjusted_edge(bid.no_a, bid.no_b, rate=fee_rate)
-            if pair_edge < 0:
+            pair_edge_bps = fee_adjusted_edge_bps(
+                bid.no_a * ONE_CENT_BPS, bid.no_b * ONE_CENT_BPS, rate=fee_rate
+            )
+            if pair_edge_bps < 0:
                 name = self._display_name(ledger.event_ticker)
                 self._notify(
                     f"Bid BLOCKED {name}: pair not profitable "
-                    f"({bid.no_a}+{bid.no_b} edge={pair_edge:.1f}c)",
+                    f"({bid.no_a}+{bid.no_b} edge={pair_edge_bps / ONE_CENT_BPS:.1f}c)",
                     "error",
                     toast=True,
                 )
@@ -4278,9 +4284,13 @@ class TradingEngine:
             self._notify(f"Queue improve skipped: no fills on other side for {name}", "warning")
             return
 
-        eff_improved = fee_adjusted_cost(qi.improved_price, rate=pair.fee_rate)
-        eff_other = fee_adjusted_cost(int(round(other_avg)), rate=pair.fee_rate)
-        if eff_improved + eff_other >= 100:
+        eff_improved_bps = fee_adjusted_cost_bps(
+            qi.improved_price * ONE_CENT_BPS, rate=pair.fee_rate
+        )
+        eff_other_bps = fee_adjusted_cost_bps(
+            int(round(other_avg)) * ONE_CENT_BPS, rate=pair.fee_rate
+        )
+        if eff_improved_bps + eff_other_bps >= ONE_DOLLAR_BPS:
             self._notify(
                 f"Queue improve BLOCKED: {name} {qi.improved_price}c unprofitable",
                 "warning",
@@ -4907,7 +4917,7 @@ class TradingEngine:
             summary.status = self._compute_event_status(summary.event_ticker)
             ep = self._event_positions.get(summary.event_ticker)
             if ep is not None:
-                summary.kalshi_pnl = ep.realized_pnl_bps // ONE_CENT_BPS
+                summary.kalshi_pnl_bps = ep.realized_pnl_bps
 
         # Compute status for ALL pairs — use dict instead of O(N²) scan
         summary_index = {s.event_ticker: s for s in self._position_summaries}

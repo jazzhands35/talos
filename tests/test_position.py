@@ -58,12 +58,12 @@ class TestBothLegsMatched:
         assert len(result) == 1
         s = result[0]
         assert s.matched_pairs == 5
-        # Raw: 100 - 31 - 67 = 2c/pair -> 10c total
+        # Raw: 100 - 31 - 67 = 2c/pair -> 10c total = 1000 bps
         # Fees are 0 here (record_fill doesn't track fees; sync_from_orders does)
-        assert s.locked_profit_cents == pytest.approx(10)
+        assert s.locked_profit_bps == pytest.approx(1000)
         assert s.unmatched_a == 0
         assert s.unmatched_b == 0
-        assert s.exposure_cents == 0
+        assert s.exposure_bps == 0
 
 
 class TestOneLegAhead:
@@ -72,11 +72,11 @@ class TestOneLegAhead:
         result = _compute(ledger)
         s = result[0]
         assert s.matched_pairs == 3
-        # 3 matched pairs at 31+67=98, raw profit = 3 * 2 = 6
-        assert s.locked_profit_cents == pytest.approx(6)
+        # 3 matched pairs at 31+67=98, raw profit = 3 * 2 = 6¢ = 600 bps
+        assert s.locked_profit_bps == pytest.approx(600)
         assert s.unmatched_a == 2
         assert s.unmatched_b == 0
-        assert s.exposure_cents == 2 * 31
+        assert s.exposure_bps == 2 * 31 * 100
 
     def test_leg_b_ahead_shows_exposure(self) -> None:
         ledger = _ledger(fill_a=(2, 31), fill_b=(5, 67))
@@ -85,7 +85,7 @@ class TestOneLegAhead:
         assert s.matched_pairs == 2
         assert s.unmatched_a == 0
         assert s.unmatched_b == 3
-        assert s.exposure_cents == 3 * 67
+        assert s.exposure_bps == 3 * 67 * 100
 
 
 class TestMultipleFillsAccumulate:
@@ -97,11 +97,11 @@ class TestMultipleFillsAccumulate:
         result = _compute(ledger)
         s = result[0]
         assert s.leg_a.filled_count == 5  # 3 + 2
-        # Weighted average: (31*3 + 33*2) / 5 = 159/5 = 31
-        assert s.leg_a.no_price == 31
+        # Weighted average: (31*3 + 33*2) / 5 = 159/5 = 31.8 ¢ = 3180 bps
+        assert s.leg_a.no_price_bps == 3180
         assert s.matched_pairs == 5
-        # Raw profit: 500 - 159 - 335 = 6 (no fees via record_fill)
-        assert s.locked_profit_cents == pytest.approx(6)
+        # Raw profit: 500 - 159 - 335 = 6¢ = 600 bps (no fees via record_fill)
+        assert s.locked_profit_bps == pytest.approx(600)
 
 
 class TestMixedPricePnL:
@@ -116,8 +116,8 @@ class TestMixedPricePnL:
         assert s.matched_pairs == 10
         # Costs: A = 170+175=345, B = 320+335=655, total=1000
         # Revenue = 1000, raw profit = 0 (no fees via record_fill)
-        assert s.locked_profit_cents == pytest.approx(0)
-        assert s.exposure_cents == 0
+        assert s.locked_profit_bps == pytest.approx(0)
+        assert s.exposure_bps == 0
 
 
 class TestLegSummaryFields:
@@ -131,18 +131,18 @@ class TestLegSummaryFields:
         result = _compute(ledger)
         s = result[0]
         assert s.leg_a.ticker == "MKT-A"
-        assert s.leg_a.no_price == 31
+        assert s.leg_a.no_price_bps == 31 * 100
         assert s.leg_a.filled_count == 3
         assert s.leg_a.resting_count == 2
         assert s.leg_b.ticker == "MKT-B"
-        assert s.leg_b.no_price == 67
+        assert s.leg_b.no_price_bps == 67 * 100
 
     def test_total_fill_cost_propagated(self) -> None:
         ledger = _ledger(fill_a=(3, 31), fill_b=(3, 67))
         result = _compute(ledger)
         s = result[0]
-        assert s.leg_a.total_fill_cost == 3 * 31
-        assert s.leg_b.total_fill_cost == 3 * 67
+        assert s.leg_a.total_fill_cost_bps == 3 * 31 * 100
+        assert s.leg_b.total_fill_cost_bps == 3 * 67 * 100
 
 
 class TestRestingOnlyPair:
@@ -155,8 +155,8 @@ class TestRestingOnlyPair:
         assert len(result) == 1
         s = result[0]
         assert s.matched_pairs == 0
-        assert s.locked_profit_cents == 0
-        assert s.exposure_cents == 0
+        assert s.locked_profit_bps == 0
+        assert s.exposure_bps == 0
 
 
 class TestQueuePosition:

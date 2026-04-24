@@ -388,7 +388,8 @@ class TestDynamicFeeRate:
     """Phase 9: scanner uses pair-specific fee rate for edge calculation."""
 
     def test_fee_edge_uses_custom_rate(self) -> None:
-        from talos.fees import fee_adjusted_edge
+        from talos.fees import fee_adjusted_edge_bps
+        from talos.units import ONE_CENT_BPS
 
         manager = OrderBookManager()
         scanner = ArbitrageScanner(manager)
@@ -397,11 +398,15 @@ class TestDynamicFeeRate:
         scanner.scan("GAME-STAN")
 
         opp = scanner.opportunities[0]
-        expected = fee_adjusted_edge(38, 55, rate=0.03)
+        expected = (
+            fee_adjusted_edge_bps(38 * ONE_CENT_BPS, 55 * ONE_CENT_BPS, rate=0.03)
+            / ONE_CENT_BPS
+        )
         assert opp.fee_edge == pytest.approx(expected)
 
     def test_default_fee_rate(self) -> None:
-        from talos.fees import fee_adjusted_edge
+        from talos.fees import fee_adjusted_edge_bps
+        from talos.units import ONE_CENT_BPS
 
         manager = OrderBookManager()
         scanner = ArbitrageScanner(manager)
@@ -410,7 +415,9 @@ class TestDynamicFeeRate:
         scanner.scan("GAME-STAN")
 
         opp = scanner.opportunities[0]
-        expected = fee_adjusted_edge(38, 55)  # default rate
+        expected = (
+            fee_adjusted_edge_bps(38 * ONE_CENT_BPS, 55 * ONE_CENT_BPS) / ONE_CENT_BPS
+        )  # default rate
         assert opp.fee_edge == pytest.approx(expected)
 
     def test_pair_stores_fee_rate(self) -> None:

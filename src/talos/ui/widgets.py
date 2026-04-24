@@ -13,12 +13,13 @@ from textual.binding import Binding
 from textual.widgets import DataTable, RichLog, Static
 
 from talos.cpm import format_cpm, format_eta
-from talos.fees import fee_adjusted_cost
+from talos.fees import fee_adjusted_cost_bps
 from talos.game_status import ESTIMATED_DETAIL, GameStatus
 from talos.models.position import EventPositionSummary
 from talos.scanner import ArbitrageScanner
 from talos.top_of_market import TopOfMarketTracker
 from talos.ui.theme import BLUE, GREEN, PEACH, RED, SUBTEXT0, SURFACE0, SURFACE2, YELLOW
+from talos.units import ONE_CENT_BPS, bps_to_cents_round
 
 
 def _fmt_cents(value: int) -> RichText:
@@ -64,12 +65,15 @@ def _fmt_pos(
         return DIM_DASH
     resting_suffix = ""
     if resting_no_price is not None:
-        resting_fee = fee_adjusted_cost(resting_no_price)
-        resting_suffix = f" @{resting_fee:.0f}¢"
+        resting_fee_bps = fee_adjusted_cost_bps(resting_no_price * ONE_CENT_BPS)
+        resting_suffix = f" @{resting_fee_bps / ONE_CENT_BPS:.0f}¢"
     if filled == 0:
         return RichText(f"0/{total}{resting_suffix}", justify="right")
-    fee_avg = fee_adjusted_cost(avg_no_price)
-    return RichText(f"{filled}/{total} {fee_avg:.1f}¢{resting_suffix}", justify="right")
+    fee_avg_bps = fee_adjusted_cost_bps(avg_no_price * ONE_CENT_BPS)
+    return RichText(
+        f"{filled}/{total} {fee_avg_bps / ONE_CENT_BPS:.1f}¢{resting_suffix}",
+        justify="right",
+    )
 
 
 DIM_DASH = RichText("—", style="dim", justify="right")
@@ -580,10 +584,10 @@ class OpportunitiesTable(DataTable):
             return order.get(gs.state, 3) if gs else 3
         if key_name == "locked":
             pos = self._positions.get(opp.event_ticker)
-            return pos.locked_profit_cents if pos else 0
+            return pos.locked_profit_bps if pos else 0
         if key_name == "exposure":
             pos = self._positions.get(opp.event_ticker)
-            return pos.exposure_cents if pos else 0
+            return pos.exposure_bps if pos else 0
         if key_name == "pos":
             pos = self._positions.get(opp.event_ticker)
             if pos is None:
@@ -746,11 +750,27 @@ class OpportunitiesTable(DataTable):
         if pos is not None:
             total_a = pos.leg_a.filled_count + pos.leg_a.resting_count
             total_b = pos.leg_b.filled_count + pos.leg_b.resting_count
+            resting_cents_a = (
+                bps_to_cents_round(pos.leg_a.resting_no_price_bps)
+                if pos.leg_a.resting_no_price_bps is not None
+                else None
+            )
+            resting_cents_b = (
+                bps_to_cents_round(pos.leg_b.resting_no_price_bps)
+                if pos.leg_b.resting_no_price_bps is not None
+                else None
+            )
             pos_a = _fmt_pos(
-                pos.leg_a.filled_count, total_a, pos.leg_a.no_price, pos.leg_a.resting_no_price
+                pos.leg_a.filled_count,
+                total_a,
+                bps_to_cents_round(pos.leg_a.no_price_bps),
+                resting_cents_a,
             )
             pos_b = _fmt_pos(
-                pos.leg_b.filled_count, total_b, pos.leg_b.no_price, pos.leg_b.resting_no_price
+                pos.leg_b.filled_count,
+                total_b,
+                bps_to_cents_round(pos.leg_b.no_price_bps),
+                resting_cents_b,
             )
 
             # Highlight imbalanced legs
@@ -787,8 +807,8 @@ class OpportunitiesTable(DataTable):
                 format_eta(pos.leg_b.eta_minutes, pos.leg_b.cpm_partial), justify="right"
             )
 
-            # Locked and Exposure
-            locked = pos.locked_profit_cents
+            # Locked and Exposure — convert bps to cents for display.
+            locked = bps_to_cents_round(int(pos.locked_profit_bps))
             if locked > 0:
                 locked_str = RichText(f"${locked / 100:.2f}", style=GREEN, justify="right")
             elif locked == 0:
@@ -796,7 +816,7 @@ class OpportunitiesTable(DataTable):
             else:
                 locked_str = RichText(f"-${abs(locked) / 100:.2f}", style=RED, justify="right")
 
-            exposure = pos.exposure_cents
+            exposure = bps_to_cents_round(pos.exposure_bps)
             if exposure > 0:
                 exposure_str = RichText(f"${exposure / 100:.2f}", style=RED, justify="right")
             else:

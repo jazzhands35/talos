@@ -14,6 +14,7 @@ from textual.screen import ModalScreen
 from textual.widgets import Static
 
 from talos.ui.reconcile_banner import ReconcileBanner
+from talos.units import format_bps_as_dollars_display
 
 if TYPE_CHECKING:
     from talos.engine import TradingEngine
@@ -391,11 +392,11 @@ def render_position_snapshot(
             break
 
     if summary is not None:
-        if summary.locked_profit_cents != 0:
-            profit_str = f"${summary.locked_profit_cents / 100:.2f}"
+        if summary.locked_profit_bps != 0:
+            profit_str = format_bps_as_dollars_display(int(summary.locked_profit_bps))
             lines.append(f"Locked profit (if both sides settle): {profit_str}.")
-        if summary.exposure_cents != 0:
-            exp_str = f"${summary.exposure_cents / 100:.2f}"
+        if summary.exposure_bps != 0:
+            exp_str = format_bps_as_dollars_display(summary.exposure_bps)
             lines.append(f"Exposure (unmatched risk): {exp_str}.")
 
     # Queue / CPM / ETA
