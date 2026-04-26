@@ -183,9 +183,11 @@ class TestPersistenceMixedRoundTrip:
 
 # ── 6. Task 13d defensive bug fixes ──────────────────────────────────
 class TestResetPairBumpsMutationGeneration:
-    """13d-2: reset_pair() must bump _mutation_generation so any pending
-    reconcile mismatch captured before the reset is flagged stale on
-    accept_pending_mismatch (F19 generation guard).
+    """13d-2: reset_pair() must bump _mutation_generation so any downstream
+    stale-detection logic that samples the counter before the reset sees a
+    fresh value after. (Originally motivated by F19 pending-mismatch
+    invalidation; that state is gone now but the counter discipline
+    remains — any future sampler relies on the same invariant.)
     """
 
     def test_reset_pair_increments_generation(self) -> None:
@@ -195,18 +197,17 @@ class TestResetPairBumpsMutationGeneration:
         ledger.reset_pair()
         assert ledger._mutation_generation == gen_before + 1
 
-    def test_reset_pair_invalidates_pending_mismatch_gen(self) -> None:
-        """Before 13d-2, reset_pair left _mutation_generation unchanged, so a
-        pending mismatch captured at gen G could still be accepted after a
-        reset (which should have invalidated any pre-reset rebuild).
+    def test_reset_pair_advances_counter_past_sampled_value(self) -> None:
+        """Any caller that captures ``_mutation_generation`` at time T and
+        compares it after ``reset_pair`` must observe a bump. This held the
+        F19 invariant historically (pending-mismatch invalidation) and
+        remains the contract for any future sampler.
         """
         ledger = PositionLedger("EVT-RESET-GEN", unit_size=5)
         ledger.record_fill(Side.A, count=5, price=50)
-        # Simulate a captured pending mismatch at the current gen.
-        ledger._pending_mismatch_gen = ledger._mutation_generation
+        captured_gen = ledger._mutation_generation
         ledger.reset_pair()
-        # After reset, the captured gen is now stale relative to current.
-        assert ledger._pending_mismatch_gen != ledger._mutation_generation
+        assert captured_gen != ledger._mutation_generation
 
 
 class TestReconcileClosedNegativeStateGuard:

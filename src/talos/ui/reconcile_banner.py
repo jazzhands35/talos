@@ -1,18 +1,21 @@
 """ReconcileBanner — operator-facing banner for ledger staleness / reconcile states.
 
-Surfaces the four per-pair ledger flags introduced by the bps/fp100 migration
-(Section 8 of the migration spec, lines 1100-1109) and provides the buttons
-for the operator actions that clear them.
+Surfaces the per-pair ledger flags introduced by the bps/fp100 migration
+(Section 8 of the migration spec, lines 1100-1109) and provides buttons for
+the operator actions that clear them.
 
 Priority resolution (highest severity first):
 
-1. ``reconcile_mismatch_pending``  → error   — "Accept Kalshi-fills state" /
-                                               "Resolve on Kalshi, then reset pair"
-2. ``legacy_migration_pending``    → warning — "Reconcile now" /
+1. ``legacy_migration_pending``    → warning — "Reconcile now" /
                                                "View what will change"
-3. ``stale_*_unconfirmed`` < 30s   → info    — "Confirming state with Kalshi..."
-4. ``stale_*_unconfirmed`` >= 30s  → warning — "Retry sync" /
+2. ``stale_*_unconfirmed`` < 30s   → info    — "Confirming state with Kalshi..."
+3. ``stale_*_unconfirmed`` >= 30s  → warning — "Retry sync" /
                                                "Manual reconcile"
+
+Mismatches between the local ledger and Kalshi's authoritative fills are
+resolved automatically by ``reconcile_from_fills`` (Principle 7 — Kalshi
+wins, unconditionally). No banner state exists for that case — a single
+``reconcile_auto_adopted`` warning log captures what was overwritten.
 
 The banner hides itself entirely when ``ledger.ready()`` returns True.
 
@@ -40,11 +43,7 @@ from textual.containers import Horizontal, Vertical
 from textual.screen import ModalScreen
 from textual.widgets import Button, Label, Static
 
-from talos.position_ledger import (
-    PositionLedger,
-    ReconcileOutcome,
-    StaleMismatchError,
-)
+from talos.position_ledger import PositionLedger, ReconcileOutcome
 from talos.ui.theme import BLUE, RED, SUBTEXT0, SURFACE0, SURFACE1, YELLOW
 
 if TYPE_CHECKING:
@@ -129,16 +128,6 @@ def _resolve_banner_state(
     """
     if ledger.ready():
         return None
-
-    # Highest priority: explicit reconcile mismatch (error — operator must resolve).
-    if ledger.reconcile_mismatch_pending:
-        return (
-            "mismatch",
-            "error",
-            "Reconcile mismatch — Kalshi fills disagree with the local ledger. "
-            "Resolution required before new orders.",
-            "Resolve on Kalshi, then reset pair",
-        )
 
     # Legacy migration: pre-migration save that must be reconciled (warning).
     if ledger.legacy_migration_pending:
@@ -240,79 +229,6 @@ class LegacyDiffModal(ModalScreen[None]):
 
     def action_dismiss_modal(self) -> None:
         self.dismiss(None)
-
-
-# ── Reset-pair confirmation modal ───────────────────────────────────────
-
-
-class ResetPairConfirmModal(ModalScreen[bool]):
-    """Confirm a destructive ``ledger.reset_pair()`` call.
-
-    Because ``reset_pair`` zeros every position field, this must never fire
-    from a stray click. Returns True if the operator confirms, False otherwise.
-    """
-
-    DEFAULT_CSS = f"""
-    ResetPairConfirmModal {{
-        align: center middle;
-    }}
-    #reset-dialog {{
-        width: 70;
-        height: auto;
-        border: thick {RED};
-        background: {SURFACE0};
-        padding: 1 2;
-    }}
-    #reset-title {{
-        color: {RED};
-        text-style: bold;
-        margin: 0 0 1 0;
-    }}
-    #reset-body {{
-        height: auto;
-        margin: 0 0 1 0;
-    }}
-    #reset-buttons {{
-        layout: horizontal;
-        height: auto;
-        align: right middle;
-    }}
-    #reset-buttons Button {{
-        margin: 0 0 0 1;
-    }}
-    """
-
-    BINDINGS = [("escape", "cancel", "Cancel")]
-
-    def __init__(self, event_ticker: str) -> None:
-        super().__init__()
-        self._event_ticker = event_ticker
-
-    def compose(self) -> ComposeResult:
-        with Vertical(id="reset-dialog"):
-            yield Label(
-                f"Reset pair — {self._event_ticker}",
-                id="reset-title",
-            )
-            yield Static(
-                "This zeros all ledger state (fills, resting orders, closed "
-                "units) and clears every reconcile flag. Use only after you "
-                "have already manually resolved the position on Kalshi. "
-                "This action cannot be undone.",
-                id="reset-body",
-            )
-            with Horizontal(id="reset-buttons"):
-                yield Button("Cancel", id="cancel-btn", variant="default")
-                yield Button("Reset pair", id="confirm-btn", variant="error")
-
-    def on_button_pressed(self, event: Button.Pressed) -> None:
-        if event.button.id == "cancel-btn":
-            self.dismiss(False)
-        elif event.button.id == "confirm-btn":
-            self.dismiss(True)
-
-    def action_cancel(self) -> None:
-        self.dismiss(False)
 
 
 # ── Banner widget ───────────────────────────────────────────────────────
@@ -439,23 +355,7 @@ class ReconcileBanner(Static):
         self.mount(msg)
 
         buttons: list[Button] = []
-        if mode == "mismatch":
-            buttons.append(
-                Button(
-                    "Accept Kalshi-fills state",
-                    id="reconcile-primary",
-                    variant="error",
-                )
-            )
-            if secondary_label is not None:
-                buttons.append(
-                    Button(
-                        secondary_label,
-                        id="reconcile-secondary",
-                        variant="default",
-                    )
-                )
-        elif mode == "legacy":
+        if mode == "legacy":
             buttons.append(
                 Button(
                     "Reconcile now",
@@ -521,8 +421,6 @@ class ReconcileBanner(Static):
         if mode in {"legacy", "stale_warning"}:
             # Identical action for both — a reconcile_from_fills kick.
             await self._run_reconcile()
-        elif mode == "mismatch":
-            await self._run_accept_mismatch()
 
     async def _handle_secondary(self, mode: str) -> None:
         if mode == "legacy":
@@ -530,13 +428,16 @@ class ReconcileBanner(Static):
         elif mode == "stale_warning":
             # "Manual reconcile" — same underlying action as primary on legacy.
             await self._run_reconcile()
-        elif mode == "mismatch":
-            await self._confirm_and_reset_pair()
 
     # ── Action implementations ─────────────────────────────────────────
 
     async def _run_reconcile(self) -> None:
-        """Call ``ledger.reconcile_from_fills`` and surface the outcome."""
+        """Call ``ledger.reconcile_from_fills`` and surface the outcome.
+
+        Mismatches are auto-adopted inside ``reconcile_from_fills`` (the
+        ledger takes Kalshi's view unconditionally), so only OK/ERROR are
+        surfaced here.
+        """
         if self._engine is None:
             self._toast("Engine unavailable — cannot reconcile.", "error")
             return
@@ -551,57 +452,11 @@ class ReconcileBanner(Static):
 
         if result.outcome is ReconcileOutcome.OK:
             self._toast("Reconcile complete — ledger matches Kalshi fills.", "information")
-        elif result.outcome is ReconcileOutcome.MISMATCH:
-            self._toast(
-                "Reconcile detected a mismatch — review before applying.",
-                "warning",
-            )
         else:  # ERROR
             self._toast(
                 f"Reconcile failed: {result.error or 'unknown error'}",
                 "error",
             )
-
-    async def _run_accept_mismatch(self) -> None:
-        """Apply the pending rebuild. On stale, kick a fresh reconcile (F19)."""
-        if self._engine is None:
-            self._toast("Engine unavailable — cannot accept.", "error")
-            return
-        try:
-            await self._ledger.accept_pending_mismatch(self._engine._persist_games_now)
-        except StaleMismatchError:
-            # F19: the captured diff is stale. Re-run reconcile — it may
-            # resolve cleanly (no diff) or surface a fresh mismatch.
-            self._toast(
-                "Pending diff was stale — running a fresh reconcile.",
-                "warning",
-            )
-            await self._run_reconcile()
-            return
-        except Exception as exc:
-            self._toast(f"Accept failed: {exc}", "error")
-            return
-        self._toast("Kalshi-fills state applied.", "information")
-
-    async def _confirm_and_reset_pair(self) -> None:
-        """Ask the operator to confirm, then call ``ledger.reset_pair``."""
-        confirmed = await self.app.push_screen_wait(
-            ResetPairConfirmModal(self._pair.event_ticker)
-        )
-        if not confirmed:
-            return
-        self._ledger.reset_pair()
-        # Persist the now-zeroed state so a restart does not resurrect it.
-        if self._engine is not None:
-            try:
-                self._engine._persist_active_games()
-            except Exception as exc:
-                self._toast(
-                    f"Reset applied but persist failed: {exc}",
-                    "warning",
-                )
-                return
-        self._toast("Pair reset — ledger zeroed.", "information")
 
     def _show_legacy_diff(self) -> None:
         """Render the stored legacy v1 snapshot vs the current live ledger."""

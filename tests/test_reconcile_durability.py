@@ -1,9 +1,9 @@
-"""Reconcile durability + v11 atomicity tests (spec F11/F13/F16/F18/F19).
+"""Reconcile durability + v11 atomicity tests (spec F11/F13/F18).
 
 Covers the full reconcile state machine around the persist-before-apply
-contract, generation-counter stale-mismatch detection, v11 sync-mutator
-atomicity under single-event-loop asyncio, and the no-async-lock regression
-guard.
+contract, the auto-adopt-on-mismatch semantics (Principle 7 — Kalshi is
+the single source of truth), v11 sync-mutator atomicity under
+single-event-loop asyncio, and the no-async-lock regression guard.
 """
 
 from __future__ import annotations
@@ -20,7 +20,6 @@ from talos.position_ledger import (
     PositionLedger,
     ReconcileOutcome,
     Side,
-    StaleMismatchError,
 )
 from talos.rest_client import KalshiRESTClient
 
@@ -139,12 +138,16 @@ def test_reconcile_persist_failure_leaves_ledger_unchanged() -> None:
     assert ledger._mutation_generation == before_gen
 
 
-# ── 3. F16 mismatch state is not crash-durable ----------------------
+# ── 3. Mismatch is auto-adopted (Principle 7) -----------------------
 
 
-def test_mismatch_state_is_in_session_only() -> None:
+def test_mismatch_auto_adopts_kalshi_fills() -> None:
+    """On detected mismatch, reconcile_from_fills adopts Kalshi's view as
+    authoritative (Principle 7) — no pending state, no operator gate.
+    Persist runs; the loaded values are overwritten with the rebuilt values.
+    """
     ledger = _make_ledger(matched_count_fp100=500)
-    # Rebuild with DIFFERENT state → MISMATCH.
+    # Rebuild with DIFFERENT state → would have been MISMATCH pre-refactor.
     rest = _FakeRest(
         {
             "T-A": [_make_fill("T-A", 700)],
@@ -152,28 +155,33 @@ def test_mismatch_state_is_in_session_only() -> None:
         }
     )
 
+    persisted: list[LedgerSnapshot] = []
+
     def persist_cb(snap: LedgerSnapshot, ticker: str) -> None:
-        pytest.fail("persist_cb must not run on MISMATCH path")
+        persisted.append(snap)
 
-    result = asyncio.run(ledger.reconcile_from_fills(cast(KalshiRESTClient, rest), persist_cb))
-    assert result.outcome == ReconcileOutcome.MISMATCH
-    assert ledger.reconcile_mismatch_pending is True
-    assert ledger._pending_mismatch is not None
-
-    # Serialize the envelope — no reconcile_mismatch_pending, no rebuilt blob.
+    result = asyncio.run(
+        ledger.reconcile_from_fills(cast(KalshiRESTClient, rest), persist_cb)
+    )
+    # No MISMATCH variant exists anymore — auto-adopt returns OK.
+    assert result.outcome == ReconcileOutcome.OK
+    # Kalshi's view is now live.
+    assert ledger.filled_count_fp100(Side.A) == 700
+    assert ledger.filled_count_fp100(Side.B) == 500
+    # Persisted durably (unlike the pre-refactor mismatch path).
+    assert len(persisted) == 1
+    assert persisted[0].filled_count_fp100_a == 700
+    assert persisted[0].filled_count_fp100_b == 500
+    # No pending-mismatch infrastructure survives.
+    assert not hasattr(ledger, "reconcile_mismatch_pending")
+    assert not hasattr(ledger, "_pending_mismatch")
+    assert not hasattr(ledger, "accept_pending_mismatch")
+    # Envelope has no pending fields.
     env = ledger.to_save_dict()
     assert "reconcile_mismatch_pending" not in env
-    assert "_pending_mismatch" not in env
     inner = env["ledger"]
     assert isinstance(inner, dict)
     assert "reconcile_mismatch_pending" not in inner
-    assert "_pending_mismatch" not in inner
-
-    # Reload a fresh ledger from that envelope → mismatch state not preserved.
-    reloaded = PositionLedger("EVT", unit_size=10, ticker_a="T-A", ticker_b="T-B")
-    reloaded.seed_from_saved(env)
-    assert reloaded.reconcile_mismatch_pending is False
-    assert reloaded._pending_mismatch is None
 
 
 # ── 4. Pagination failure → ERROR, no mutation -----------------------
@@ -198,39 +206,14 @@ def test_pagination_failure_preserves_live_state() -> None:
     assert ledger._mutation_generation == before_gen
 
 
-# ── 5. Successful accept + durable persist --------------------------
+# ── 5. Auto-adopt persist failure → ledger unchanged -----------------
 
 
-def test_successful_accept_applies_and_persists() -> None:
-    ledger = _make_ledger(matched_count_fp100=500)
-    # Force mismatch: rebuild shows 700 A, 500 B.
-    rest = _FakeRest(
-        {
-            "T-A": [_make_fill("T-A", 700)],
-            "T-B": [_make_fill("T-B", 500)],
-        }
-    )
-    asyncio.run(ledger.reconcile_from_fills(cast(KalshiRESTClient, rest), lambda s, t: None))
-    assert ledger.reconcile_mismatch_pending is True
-
-    persisted: list[LedgerSnapshot] = []
-
-    def persist_cb(snap: LedgerSnapshot, ticker: str) -> None:
-        persisted.append(snap)
-
-    asyncio.run(ledger.accept_pending_mismatch(persist_cb))
-    assert ledger.reconcile_mismatch_pending is False
-    assert ledger._pending_mismatch is None
-    assert ledger.filled_count_fp100(Side.A) == 700
-    assert ledger.filled_count_fp100(Side.B) == 500
-    assert len(persisted) == 1
-    assert persisted[0].filled_count_fp100_a == 700
-
-
-# ── 6. Stale-mismatch-accept prevention (generation counter) --------
-
-
-def test_stale_mismatch_accept_raises_and_clears_pending() -> None:
+def test_auto_adopt_persist_failure_leaves_ledger_unchanged() -> None:
+    """On a detected mismatch where persist fails, the ledger must not
+    mutate — the pre-reconcile state is retained and the caller sees ERROR.
+    (F13 durable-before-success contract applies to the auto-adopt path.)
+    """
     ledger = _make_ledger(matched_count_fp100=500)
     rest = _FakeRest(
         {
@@ -238,54 +221,25 @@ def test_stale_mismatch_accept_raises_and_clears_pending() -> None:
             "T-B": [_make_fill("T-B", 500)],
         }
     )
-    asyncio.run(ledger.reconcile_from_fills(cast(KalshiRESTClient, rest), lambda s, t: None))
-    assert ledger.reconcile_mismatch_pending is True
-    captured_gen = ledger._pending_mismatch_gen
-
-    # Intervening mutation → generation bumps past captured_gen.
-    ledger.record_fill(Side.A, count=1, price=48)
-    assert ledger._mutation_generation != captured_gen
-
-    def persist_cb(snap: LedgerSnapshot, ticker: str) -> None:
-        pytest.fail("persist_cb must not run on stale-mismatch path")
-
-    with pytest.raises(StaleMismatchError):
-        asyncio.run(ledger.accept_pending_mismatch(persist_cb))
-
-    # Pending state cleared; live mutation intact.
-    assert ledger.reconcile_mismatch_pending is False
-    assert ledger._pending_mismatch is None
-    # record_fill added 1 contract (100 fp100) to the baseline 500.
-    assert ledger.filled_count_fp100(Side.A) == 600
-
-
-# ── 7. Accept persist failure → ledger unchanged, pending retained --
-
-
-def test_accept_persist_failure_retains_pending() -> None:
-    ledger = _make_ledger(matched_count_fp100=500)
-    rest = _FakeRest(
-        {
-            "T-A": [_make_fill("T-A", 700)],
-            "T-B": [_make_fill("T-B", 500)],
-        }
-    )
-    asyncio.run(ledger.reconcile_from_fills(cast(KalshiRESTClient, rest), lambda s, t: None))
     before_a = ledger.filled_count_fp100(Side.A)
+    before_b = ledger.filled_count_fp100(Side.B)
+    before_gen = ledger._mutation_generation
 
     def persist_cb(snap: LedgerSnapshot, ticker: str) -> None:
         raise RuntimeError("disk full")
 
-    with pytest.raises(RuntimeError, match="disk full"):
-        asyncio.run(ledger.accept_pending_mismatch(persist_cb))
-
-    # Ledger unchanged; pending retained so operator can retry.
+    result = asyncio.run(
+        ledger.reconcile_from_fills(cast(KalshiRESTClient, rest), persist_cb)
+    )
+    assert result.outcome == ReconcileOutcome.ERROR
+    assert "disk full" in (result.error or "")
+    # Live state untouched — Kalshi's view not applied because persist failed.
     assert ledger.filled_count_fp100(Side.A) == before_a
-    assert ledger.reconcile_mismatch_pending is True
-    assert ledger._pending_mismatch is not None
+    assert ledger.filled_count_fp100(Side.B) == before_b
+    assert ledger._mutation_generation == before_gen
 
 
-# ── 8. v11 single-event-loop atomicity ------------------------------
+# ── 6. v11 single-event-loop atomicity ------------------------------
 
 
 def test_v11_atomicity_blocks_concurrent_record_fill() -> None:

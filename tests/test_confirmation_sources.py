@@ -209,11 +209,18 @@ class TestReconcileFromFillsClearsFillsAndLegacy:
         assert ledger.stale_resting_unconfirmed is True
 
 
-# ── accept_pending_mismatch: clears fills + legacy -------------------
+# ── Auto-adopt on mismatch: clears fills + legacy -------------------
 
 
-class TestAcceptPendingMismatchClearsFillsAndLegacy:
-    def test_accept_clears_fills_and_legacy_only(self) -> None:
+class TestAutoAdoptOnMismatchClearsFillsAndLegacy:
+    def test_auto_adopt_clears_fills_and_legacy_only(self) -> None:
+        """Single-pass reconcile on a mismatching rebuild: Kalshi's view is
+        adopted, persist runs, and the same flags that clear on a clean
+        reconcile also clear here (stale_fills + legacy_migration).
+        stale_resting_unconfirmed is NOT cleared — the spec rule that
+        resting staleness is only cleared by a successful sync_from_orders
+        applies equally to the auto-adopt path.
+        """
         ledger = _seed_ledger_with_historical_state()
         ledger.stale_resting_unconfirmed = True
 
@@ -256,17 +263,15 @@ class TestAcceptPendingMismatchClearsFillsAndLegacy:
         result = asyncio.run(
             ledger.reconcile_from_fills(cast(KalshiRESTClient, rest), _persist_noop)
         )
-        assert result.outcome == ReconcileOutcome.MISMATCH
-        # Mismatch captured, but no flags cleared yet.
-        assert ledger.stale_fills_unconfirmed is True
-        assert ledger.legacy_migration_pending is True
-        assert ledger.reconcile_mismatch_pending is True
-
-        asyncio.run(ledger.accept_pending_mismatch(_persist_noop))
+        # Auto-adopt returns OK — no MISMATCH variant anymore.
+        assert result.outcome == ReconcileOutcome.OK
+        # Kalshi's view is live.
+        assert ledger.filled_count_fp100(Side.A) == 600
+        assert ledger.filled_count_fp100(Side.B) == 500
+        # Fills + legacy flags cleared in the same pass.
         assert ledger.stale_fills_unconfirmed is False
         assert ledger.legacy_migration_pending is False
-        assert ledger.reconcile_mismatch_pending is False
-        assert ledger.stale_resting_unconfirmed is True  # NOT cleared by accept
+        assert ledger.stale_resting_unconfirmed is True  # NOT cleared by fills reconcile
 
 
 # ── Combined: orders + reconcile → all three clear -------------------
@@ -357,7 +362,6 @@ class TestReadyGateSemantics:
             "stale_fills_unconfirmed",
             "stale_resting_unconfirmed",
             "legacy_migration_pending",
-            "reconcile_mismatch_pending",
         ],
     )
     def test_each_flag_blocks_ready(self, flag: str) -> None:

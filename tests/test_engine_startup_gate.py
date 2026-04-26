@@ -3,13 +3,14 @@
 Tests cover:
 
 1. F31 cancel bypasses the startup gate even with stale_fills_unconfirmed.
-2. F31 cancel during reconcile_mismatch_pending — cancel still works.
+2. F31 cancel during legacy_migration_pending — cancel still works.
 3. F33 stale-first-ID 404 triggers full resync, not blind-clear.
 4. F33 network error on get_order falls through to attempted cancel.
 5. F33 race: get_order returns live, cancel returns 404 — resync.
-6. Auto-reconcile fires after AUTO_RECONCILE_DELAY_S when flag sticks.
+6. Auto-reconcile fires after AUTO_RECONCILE_DELAY_S when fills flag sticks.
 7. Gate times out at STARTUP_SYNC_TIMEOUT_S and notifies error.
-8. legacy_migration_pending triggers immediate error return.
+8. legacy_migration_pending also triggers auto-reconcile (Principle 7 —
+   Kalshi wins unconditionally, no manual operator gate).
 9. Fresh pair with ``_first_orders_sync`` set returns True immediately.
 10. Successful create_order flow after gate clears mid-wait.
 """
@@ -131,17 +132,20 @@ async def test_cancel_bypasses_gate_when_stale_fills_flag_set() -> None:
     assert not any(sev == "error" for _, sev in eng._notifications)
 
 
-# ── 2. F31 cancel during reconcile_mismatch_pending ─────────────────
+# ── 2. F31 cancel during legacy_migration_pending ───────────────────
 
 
 @pytest.mark.asyncio
-async def test_cancel_bypasses_gate_during_reconcile_mismatch() -> None:
-    """Cancel works even when operator-action-required flag is set."""
+async def test_cancel_bypasses_gate_during_legacy_migration() -> None:
+    """Cancel works even when a blocking flag is set — F31 carve-out: the
+    cancel path never runs the startup gate, so any blocking flag state is
+    irrelevant to whether we can cancel. Using ``legacy_migration_pending``
+    as the representative flag (mismatch detection no longer surfaces a
+    separate flag — it auto-adopts in ``reconcile_from_fills``).
+    """
     pair = _make_pair()
     ledger = _make_ledger()
-    ledger.reconcile_mismatch_pending = True
-    # Gate would immediately reject create_order here.
-    assert not await _eng_with_gate(ledger, pair, op="create_order")
+    ledger.legacy_migration_pending = True
 
     rest = AsyncMock()
     rest.get_order.return_value = _mk_order(status="resting")
@@ -151,21 +155,6 @@ async def test_cancel_bypasses_gate_during_reconcile_mismatch() -> None:
     eng = _make_engine_stub(ledger, rest)
     await eng.cancel_order_with_verify("ord-1", pair)
     rest.cancel_order.assert_awaited_once()
-
-
-async def _eng_with_gate(
-    ledger: PositionLedger,
-    pair: ArbPair,
-    op: str = "create_order",
-) -> bool:
-    """Invoke ``_wait_for_ledger_ready`` with a 0.1s override timeout.
-
-    We monkey-patch the module-level constant via a wrapper to keep tests
-    fast; the path we care about (operator-action-required early exit)
-    returns before any sleep.
-    """
-    eng = _make_engine_stub(ledger)
-    return await eng._wait_for_ledger_ready(pair, op)
 
 
 # ── 3. F33: stale-first-ID 404 triggers resync ──────────────────────
@@ -319,27 +308,41 @@ async def test_gate_times_out_and_notifies(monkeypatch: Any) -> None:
     )
 
 
-# ── 8. legacy_migration_pending early exit ──────────────────────────
+# ── 8. legacy_migration_pending triggers auto-reconcile ─────────────
 
 
 @pytest.mark.asyncio
-async def test_legacy_migration_pending_returns_false_immediately() -> None:
+async def test_legacy_migration_pending_triggers_auto_reconcile(
+    monkeypatch: Any,
+) -> None:
+    """legacy_migration_pending no longer blocks operator-side — the gate
+    kicks the same auto-reconcile loop as stale_fills_unconfirmed, and if
+    reconcile adopts Kalshi's fills (Principle 7) the gate clears.
+    """
     pair = _make_pair()
     ledger = _make_ledger()
     ledger.legacy_migration_pending = True
+    ledger._first_orders_sync.set()
+
+    monkeypatch.setattr("talos.engine.STARTUP_SYNC_TIMEOUT_S", 1.0)
+    monkeypatch.setattr("talos.engine.AUTO_RECONCILE_DELAY_S", 0.05)
+
+    reconcile_calls: list[tuple[Any, Any]] = []
+
+    async def _fake_reconcile(rest: Any, persist_cb: Any) -> Any:
+        reconcile_calls.append((rest, persist_cb))
+        # Adopt Kalshi's view → clear the flag.
+        ledger.legacy_migration_pending = False
+        return MagicMock()
+
+    monkeypatch.setattr(ledger, "reconcile_from_fills", _fake_reconcile)
 
     eng = _make_engine_stub(ledger)
-    # Should return without sleeping — verify by wall-clock.
-    loop = asyncio.get_event_loop()
-    start = loop.time()
     ok = await eng._wait_for_ledger_ready(pair, "create_order")
-    elapsed = loop.time() - start
-    assert ok is False
-    assert elapsed < 0.1  # bail immediately
-    assert any(
-        "confirm" in msg.lower() and sev == "error"
-        for msg, sev in eng._notifications
-    )
+    assert ok is True
+    assert len(reconcile_calls) == 1
+    # No operator-facing error notifications were emitted.
+    assert not any(sev == "error" for _, sev in eng._notifications)
 
 
 # ── 9. Fresh pair with _first_orders_sync set returns True ──────────

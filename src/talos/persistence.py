@@ -181,9 +181,9 @@ def snapshot_to_save_dict(
 
     Mirrors :meth:`PositionLedger.to_save_dict` shape. Used by
     :meth:`TradingEngine._persist_games_now` to persist a *proposed*
-    ledger state (produced by ``reconcile_from_fills`` /
-    ``accept_pending_mismatch``) without mutating the live ledger first
-    — required by v11 atomicity (persist-before-apply, F13).
+    ledger state (produced by ``reconcile_from_fills``) without mutating
+    the live ledger first — required by v11 atomicity (persist-before-apply,
+    F13).
 
     ``legacy_v1_snapshot`` is retained verbatim when
     ``snapshot.legacy_migration_pending`` is True. Per Section 7 save-path
