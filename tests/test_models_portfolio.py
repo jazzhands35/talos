@@ -7,7 +7,7 @@ from talos.models.portfolio import Balance, EventPosition, ExchangeStatus, Posit
 
 class TestBalance:
     def test_parse_balance_dollars_format(self) -> None:
-        """Post March 12: balance_dollars/portfolio_value_dollars strings."""
+        """Future-proof: if Kalshi migrates /portfolio/balance to _dollars strings."""
         data = {
             "balance_dollars": "5000.00",
             "portfolio_value_dollars": "7500.00",
@@ -16,22 +16,40 @@ class TestBalance:
         assert b.balance_bps == 50_000_000
         assert b.portfolio_value_bps == 75_000_000
 
+    def test_parse_balance_integer_cents_wire_shape(self) -> None:
+        """Actual Kalshi /portfolio/balance wire shape as of 2026-04-24:
+        integer cents under ``balance`` / ``portfolio_value`` — unmigrated
+        from the _dollars format the rest of portfolio/ uses. This is the
+        regression guard for the bug that surfaced post-13a-2c (the
+        validator silently produced 0/0 because it only matched _dollars).
+        """
+        data = {
+            "balance": 434031,
+            "portfolio_value": 35992,
+            "updated_ts": 1777034248,
+        }
+        b = Balance.model_validate(data)
+        # 434031 cents = $4,340.31 = 43,403,100 bps
+        assert b.balance_bps == 43_403_100
+        assert b.portfolio_value_bps == 3_599_200
+
 
 class TestPosition:
     def test_parse_position_fp_dollars_format(self) -> None:
-        """Post March 12: _fp/_dollars string fields → bps/fp100."""
+        """Post March 12: _fp/_dollars string fields → bps/fp100. resting_orders_count
+        stays integer on the wire (no _fp variant — verified 2026-04-25)."""
         data = {
             "ticker": "KXBTC-26MAR-T50000",
             "position_fp": "10",
             "total_traded_dollars": "0.25",
             "market_exposure_dollars": "6.50",
-            "resting_orders_count_fp": "3",
+            "resting_orders_count": 3,
         }
         p = Position.model_validate(data)
         assert p.position_fp100 == 1000
         assert p.total_traded_bps == 2500
         assert p.market_exposure_bps == 65_000
-        assert p.resting_orders_count_fp100 == 300
+        assert p.resting_orders_count == 3
 
     def test_negative_position(self) -> None:
         data = {
@@ -91,14 +109,14 @@ class TestEventPosition:
         assert ep.realized_pnl_bps == 0
 
     def test_parse_event_position_dollars_fp(self) -> None:
-        """Full enriched response from Kalshi."""
+        """Full enriched response from Kalshi. event_positions[] entries do NOT
+        carry a resting-orders count — verified 2026-04-25 against production."""
         data = {
             "event_ticker": "EVT-1",
             "total_cost_dollars": "12.50",
             "total_cost_shares_fp": "25",
             "event_exposure_dollars": "10.00",
             "realized_pnl_dollars": "3.50",
-            "resting_orders_count_fp": "4",
             "fees_paid_dollars": "0.44",
         }
         ep = EventPosition.model_validate(data)
@@ -106,7 +124,6 @@ class TestEventPosition:
         assert ep.total_cost_shares_fp100 == 2500
         assert ep.event_exposure_bps == 100_000
         assert ep.realized_pnl_bps == 35_000
-        assert ep.resting_orders_count_fp100 == 400
         assert ep.fees_paid_bps == 4400
 
 
@@ -162,7 +179,7 @@ class TestPositionBpsFields:
             "position_fp": "10",
             "total_traded_dollars": "0.25",
             "market_exposure_dollars": "6.50",
-            "resting_orders_count_fp": "3",
+            "resting_orders_count": 3,
             "realized_pnl_dollars": "1.00",
             "fees_paid_dollars": "0.44",
         }
@@ -170,7 +187,7 @@ class TestPositionBpsFields:
         assert p.position_fp100 == 1000
         assert p.total_traded_bps == 2500
         assert p.market_exposure_bps == 65_000
-        assert p.resting_orders_count_fp100 == 300
+        assert p.resting_orders_count == 3
         assert p.realized_pnl_bps == 10_000
         assert p.fees_paid_bps == 4400
 
@@ -194,11 +211,9 @@ class TestPositionBpsFields:
         data = {
             "ticker": "MARJ-MKT",
             "position_fp": "1.89",
-            "resting_orders_count_fp": "0.50",
         }
         p = Position.model_validate(data)
         assert p.position_fp100 == 189
-        assert p.resting_orders_count_fp100 == 50
 
     def test_negative_fractional_position(self) -> None:
         """Negative fractional position retained exactly in fp100."""
@@ -214,7 +229,7 @@ class TestPositionBpsFields:
         assert p.position_fp100 == 0
         assert p.total_traded_bps == 0
         assert p.market_exposure_bps == 0
-        assert p.resting_orders_count_fp100 == 0
+        assert p.resting_orders_count == 0
         assert p.realized_pnl_bps == 0
         assert p.fees_paid_bps == 0
 
@@ -229,7 +244,6 @@ class TestEventPositionBpsFields:
             "total_cost_shares_fp": "25",
             "event_exposure_dollars": "10.00",
             "realized_pnl_dollars": "3.50",
-            "resting_orders_count_fp": "4",
             "fees_paid_dollars": "0.44",
         }
         ep = EventPosition.model_validate(data)
@@ -237,7 +251,6 @@ class TestEventPositionBpsFields:
         assert ep.total_cost_shares_fp100 == 2500
         assert ep.event_exposure_bps == 100_000
         assert ep.realized_pnl_bps == 35_000
-        assert ep.resting_orders_count_fp100 == 400
         assert ep.fees_paid_bps == 4400
 
     def test_subcent_costs_retained_in_bps(self) -> None:
@@ -259,11 +272,9 @@ class TestEventPositionBpsFields:
         data = {
             "event_ticker": "MARJ-EVT",
             "total_cost_shares_fp": "1.89",
-            "resting_orders_count_fp": "2.50",
         }
         ep = EventPosition.model_validate(data)
         assert ep.total_cost_shares_fp100 == 189
-        assert ep.resting_orders_count_fp100 == 250
 
     def test_zero_defaults_when_wire_fields_absent(self) -> None:
         ep = EventPosition.model_validate({"event_ticker": "EVT-1"})
@@ -271,7 +282,6 @@ class TestEventPositionBpsFields:
         assert ep.total_cost_shares_fp100 == 0
         assert ep.event_exposure_bps == 0
         assert ep.realized_pnl_bps == 0
-        assert ep.resting_orders_count_fp100 == 0
         assert ep.fees_paid_bps == 0
 
 

@@ -13,6 +13,8 @@ from typing import TYPE_CHECKING
 import structlog
 
 if TYPE_CHECKING:
+    from collections.abc import Mapping, Sequence
+
     from talos.position_ledger import LedgerSnapshot
 
 logger = structlog.get_logger()
@@ -219,7 +221,9 @@ def snapshot_to_save_dict(
     return envelope
 
 
-def save_games_full(games: list[dict[str, object]], path: Path | None = None) -> bool:
+def save_games_full(
+    games: Sequence[Mapping[str, object]], path: Path | None = None
+) -> bool:
     """Save full game data so startup can skip REST calls.
 
     Wraps the games list in a versioned envelope so future schema

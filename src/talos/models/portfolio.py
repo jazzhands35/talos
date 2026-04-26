@@ -13,12 +13,12 @@ from talos.models._converters import log_unknown_fields
 
 _POSITION_FP_FIELDS = frozenset({
     "position_fp", "total_traded_dollars", "market_exposure_dollars",
-    "resting_orders_count_fp", "realized_pnl_dollars", "fees_paid_dollars",
+    "realized_pnl_dollars", "fees_paid_dollars",
 })
 
 _EVENT_POSITION_FP_FIELDS = frozenset({
     "total_cost_dollars", "event_exposure_dollars", "realized_pnl_dollars",
-    "fees_paid_dollars", "total_cost_shares_fp", "resting_orders_count_fp",
+    "fees_paid_dollars", "total_cost_shares_fp",
 })
 
 _SETTLEMENT_FP_FIELDS = frozenset({
@@ -31,10 +31,17 @@ _SETTLEMENT_FP_FIELDS = frozenset({
 class Balance(BaseModel):
     """Account balance.
 
-    Task 13a-2c (2026-04-23): legacy integer-cents fields removed.
+    CAUTION: Mixed wire formats across Kalshi endpoints.
+    ``/portfolio/balance`` STILL returns integer-cents ``balance`` /
+    ``portfolio_value`` — it was not migrated to the ``_dollars`` string
+    format that the rest of the portfolio endpoints use. Both wire
+    formats are handled here; integer cents is the common case today,
+    ``_dollars`` is honored for forward-compatibility if Kalshi migrates
+    this endpoint later.
+
+    Task 13a-2c (2026-04-23): legacy integer-cents Python fields removed.
     ``balance_bps`` / ``portfolio_value_bps`` are the sole money
-    representation, populated from the ``_dollars`` wire payload via
-    the aggregate-rounded Decimal parser (balance aggregates account-wide).
+    representation.
     """
 
     balance_bps: int = 0
@@ -45,7 +52,16 @@ class Balance(BaseModel):
     def _migrate_fp(cls, data: Any) -> Any:
         if not isinstance(data, dict):
             return data
-        # Balance aggregates account-wide; use aggregate-rounded parser.
+        # Integer-cents wire format (current Kalshi behavior). Promote
+        # via ×100 to bps.
+        if "balance" in data and isinstance(data["balance"], int):
+            data["balance_bps"] = data["balance"] * 100
+            del data["balance"]
+        if "portfolio_value" in data and isinstance(data["portfolio_value"], int):
+            data["portfolio_value_bps"] = data["portfolio_value"] * 100
+            del data["portfolio_value"]
+        # _dollars wire format (forward-compatible — balance aggregates
+        # account-wide, so use the rounding parser).
         for new_bps, wire in [
             ("balance_bps", "balance_dollars"),
             ("portfolio_value_bps", "portfolio_value_dollars"),
@@ -74,7 +90,10 @@ class Position(BaseModel, extra="ignore"):
     market_exposure_bps: int = 0
     realized_pnl_bps: int = 0
     fees_paid_bps: int = 0
-    resting_orders_count_fp100: int = 0
+    # Count of resting orders (number of orders, not contracts). Kalshi returns
+    # this as an integer — verified against production /portfolio/positions
+    # 2026-04-25. There is NO ``_fp`` variant; orders are inherently whole.
+    resting_orders_count: int = 0
 
     @model_validator(mode="before")
     @classmethod
@@ -96,7 +115,6 @@ class Position(BaseModel, extra="ignore"):
         # FP → fp100 (exact).
         for new_fp100, wire in [
             ("position_fp100", "position_fp"),
-            ("resting_orders_count_fp100", "resting_orders_count_fp"),
         ]:
             if wire in data and data[wire] is not None:
                 data[new_fp100] = _fp_to_fp100(data[wire])
@@ -117,7 +135,9 @@ class EventPosition(BaseModel, extra="ignore"):
     realized_pnl_bps: int = 0
     fees_paid_bps: int = 0
     total_cost_shares_fp100: int = 0
-    resting_orders_count_fp100: int = 0
+    # Note: event_positions[] entries do NOT carry a resting-orders count from
+    # Kalshi (verified 2026-04-25). Resting-orders state lives only on
+    # market_positions entries via Position.resting_orders_count.
 
     @model_validator(mode="before")
     @classmethod
@@ -140,7 +160,6 @@ class EventPosition(BaseModel, extra="ignore"):
         # FP → fp100 (exact).
         for new_fp100, wire in [
             ("total_cost_shares_fp100", "total_cost_shares_fp"),
-            ("resting_orders_count_fp100", "resting_orders_count_fp"),
         ]:
             if wire in data and data[wire] is not None:
                 data[new_fp100] = _fp_to_fp100(data[wire])

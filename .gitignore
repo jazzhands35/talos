@@ -95,3 +95,4 @@ icons/export/*
 # One-off scripts (not in tools/)
 tennis_scanner.py
 
+.archived_logs/

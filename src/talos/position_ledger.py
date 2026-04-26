@@ -76,9 +76,8 @@ class LedgerSnapshot:
     overwrites the live ledger fields from the snapshot in a single sync
     block — no await, no interleaving window (v11 atomicity).
 
-    ``stale_*`` flags and ``reconcile_mismatch_pending`` are in-memory only
-    per Section 7 / 8a of the bps/fp100 migration spec — they never travel
-    in a snapshot.
+    ``stale_*`` flags are in-memory only per Section 7 / 8a of the
+    bps/fp100 migration spec — they never travel in a snapshot.
     """
 
     # Side A historical
@@ -109,7 +108,6 @@ class LedgerSnapshot:
 
 class ReconcileOutcome(Enum):
     OK = "ok"
-    MISMATCH = "mismatch"
     ERROR = "error"
 
 
@@ -118,13 +116,6 @@ class ReconcileResult:
     outcome: ReconcileOutcome
     rebuilt: LedgerSnapshot | None = None
     error: str | None = None
-
-
-class StaleMismatchError(Exception):
-    """Raised by :meth:`PositionLedger.accept_pending_mismatch` when the
-    captured mismatch is stale — the ledger mutated between detection and
-    operator click. Operator must re-invoke reconcile to see a fresh diff.
-    """
 
 
 class _SideState:
@@ -209,16 +200,22 @@ class PositionLedger:
         # sync_from_orders filters these out until they disappear from the GET.
         self._recently_cancelled: set[str] = set()
 
+        # Trade IDs already applied to filled_count_fp100 via record_fill_from_ws
+        # or sync_from_fills. Same trade_id can arrive twice (WS retransmit on
+        # reconnect; sync_from_fills overlapping a recent WS message). Idempotent
+        # dedup is mandatory — without it same-ticker pairs would double-count.
+        # Bounded set: trims oldest insertions when over the cap.
+        self._consumed_trade_ids: set[str] = set()
+        self._consumed_trade_ids_max: int = 4096
+
         # ── bps/fp100 migration: staleness + reconcile infrastructure ──
         # In-memory only (never persisted) — always recomputed on load.
         self.stale_fills_unconfirmed: bool = False
         self.stale_resting_unconfirmed: bool = False
-        self.reconcile_mismatch_pending: bool = False
         # Persisted (may carry across restart if operator closes mid-reconcile).
         self.legacy_migration_pending: bool = False
 
         # Monotonically-increasing counter bumped by every sync mutator.
-        # Used by accept_pending_mismatch for stale-rebuild detection (F19).
         # Plain int — sync mutators run atomically under the single event
         # loop, so no lock is required (v11 simplification).
         self._mutation_generation: int = 0
@@ -226,10 +223,6 @@ class PositionLedger:
         # Fresh-pair minimum gate — set by the first sync_from_orders
         # completion (Section 8 startup sequence step 2).
         self._first_orders_sync: asyncio.Event = asyncio.Event()
-
-        # Reconcile state (F16 — in-session only, never persisted).
-        self._pending_mismatch: LedgerSnapshot | None = None
-        self._pending_mismatch_gen: int = -1
 
         # Retained after a v1 load so the next save can embed the blob
         # under the v2 envelope while legacy_migration_pending is True.
@@ -392,8 +385,6 @@ class PositionLedger:
         if self.stale_resting_unconfirmed:
             return False
         if self.legacy_migration_pending:
-            return False
-        if self.reconcile_mismatch_pending:
             return False
         return self._first_orders_sync.is_set()
 
@@ -587,6 +578,54 @@ class PositionLedger:
         self._reconcile_closed(path="fill")
         self._mutation_generation += 1
 
+    def record_fill_from_ws(
+        self,
+        side: Side,
+        *,
+        trade_id: str,
+        count_fp100: int,
+        price_bps: int,
+        fees_bps: int = 0,
+    ) -> bool:
+        """Apply a WS fill to the ledger with idempotent trade_id dedup.
+
+        Returns True if the fill was applied, False if it was a duplicate
+        (WS retransmit on reconnect, or overlap with sync_from_fills).
+
+        This is the SAME-TICKER rescue path. For same-ticker yes/no pairs
+        (sync_from_positions returns net-only and is a no-op for them),
+        this method is the cumulative-truth source for filled_count_fp100.
+
+        See [[brain/decisions]] CLE-TOR runaway diagnosis (2026-04-23).
+        """
+        if not trade_id:
+            # Defensive: never apply a fill we can't dedup. Caller should
+            # ensure trade_id is populated from FillMessage.trade_id.
+            logger.warning(
+                "record_fill_from_ws_missing_trade_id",
+                event_ticker=self.event_ticker,
+                side=side.value,
+            )
+            return False
+        if trade_id in self._consumed_trade_ids:
+            return False
+        self.record_fill_bps(
+            side, count_fp100=count_fp100, price_bps=price_bps, fees_bps=fees_bps
+        )
+        self._consumed_trade_ids.add(trade_id)
+        # Bounded trim. CPython 3.7+ preserves insertion order on dict; we
+        # use a set here, which doesn't guarantee order. Trim by sampling — a
+        # 25% over-trim is fine (we'll accept some re-applies if a very old
+        # trade_id reappears, which never happens in practice on a single
+        # session).
+        if len(self._consumed_trade_ids) > self._consumed_trade_ids_max:
+            excess = len(self._consumed_trade_ids) - (
+                self._consumed_trade_ids_max * 3 // 4
+            )
+            for old in list(self._consumed_trade_ids)[:excess]:
+                self._consumed_trade_ids.discard(old)
+        return True
+
     def record_resting(self, side: Side, order_id: str, count: int, price: int) -> None:
         """Record a new resting order (legacy cents/contracts signature)."""
         self.record_resting_bps(
@@ -684,12 +723,8 @@ class PositionLedger:
     def reset_pair(self) -> None:
         """Clear state after both sides complete. Ready for next pair.
 
-        Bumps ``_mutation_generation`` so any pending reconcile mismatch
-        captured before the reset is correctly flagged as stale on the
-        next ``accept_pending_mismatch`` call (F19 invariant — the
-        mutation counter must advance on EVERY state-changing operation,
-        otherwise an operator clicking Accept after a reset would apply
-        a pre-reset rebuild to a cleared ledger).
+        Bumps ``_mutation_generation`` so any stale-detection logic that
+        samples the counter before the reset sees a fresh value after.
         """
         self._sides[Side.A].reset()
         self._sides[Side.B].reset()
@@ -1159,6 +1194,76 @@ class PositionLedger:
         self._first_orders_sync.set()
         self._mutation_generation += 1
 
+    def sync_from_fills(self, fills: list[Fill]) -> int:
+        """Backstop authoritative-fills sync from ``GET /portfolio/fills``.
+
+        For SAME-TICKER yes/no pairs, ``sync_from_positions`` is a no-op
+        (Kalshi's ``position_fp`` is a signed-net scalar — useless when
+        both yes and no are bought). The ``_on_fill`` WS handler is the
+        primary writer for new fills, but if a WS message is dropped or
+        the bot restarts mid-session, the ledger silently undercounts.
+
+        This method walks every fill in ``fills`` and applies it via
+        :meth:`record_fill_from_ws`, which dedupes by ``trade_id``. WS-
+        already-seen fills are no-ops (returns False); only previously-
+        missed fills increment the ledger.
+
+        ``fills`` items must be :class:`talos.models.order.Fill` (or any
+        object exposing ``trade_id``, ``ticker``, ``side``,
+        ``count_fp100``, ``yes_price_bps``, ``no_price_bps``,
+        ``fee_cost_bps``).
+
+        Returns the number of newly-applied fills (i.e. those not already
+        in ``_consumed_trade_ids``).
+
+        See [[brain/decisions]] CLE-TOR runaway diagnosis (2026-04-23).
+        """
+        applied = 0
+        if self._is_same_ticker:
+            side_map = {self._side_a_str: Side.A, self._side_b_str: Side.B}
+        else:
+            side_map = None
+        ticker_to_side = {self._ticker_a: Side.A, self._ticker_b: Side.B}
+
+        for f in fills:
+            # Side resolution mirrors sync_from_orders' same-ticker / cross-
+            # ticker branch. Skip fills that don't belong to this ledger.
+            if self._is_same_ticker:
+                assert side_map is not None
+                if f.ticker != self._ticker_a:
+                    # Same-ticker: ledger.ticker_a == ticker_b == the one ticker.
+                    continue
+                side = side_map.get(f.side)
+                if side is None:
+                    continue
+            else:
+                side = ticker_to_side.get(f.ticker)
+                if side is None:
+                    continue
+                # Cross-ticker is currently NO+NO arb only (see patterns.md).
+                # Filter on side to mirror sync_from_orders.
+                if f.side != "no":
+                    continue
+
+            price_bps = f.no_price_bps if f.side == "no" else f.yes_price_bps
+            if self.record_fill_from_ws(
+                side,
+                trade_id=f.trade_id,
+                count_fp100=f.count_fp100,
+                price_bps=price_bps,
+                fees_bps=f.fee_cost_bps,
+            ):
+                applied += 1
+
+        if applied > 0:
+            logger.info(
+                "ledger_sync_from_fills_applied",
+                event_ticker=self.event_ticker,
+                applied=applied,
+                total_fills_seen=len(fills),
+            )
+        return applied
+
     def sync_from_positions(
         self,
         position_fills: dict[Side, int],
@@ -1409,8 +1514,7 @@ class PositionLedger:
         Flag clears: ``legacy_migration_pending`` comes from the snapshot.
         The ``stale_*`` flags are cleared here unconditionally under the
         assumption the caller has verified state (this is only invoked
-        from :meth:`reconcile_from_fills` OK or :meth:`accept_pending_mismatch`,
-        both of which mean fills have been confirmed authoritative).
+        from :meth:`reconcile_from_fills` after authoritative fills fetch).
         """
         a = self._sides[Side.A]
         b = self._sides[Side.B]
@@ -1459,10 +1563,12 @@ class PositionLedger:
         ``persist_cb`` raises, live state stays untouched and the result
         is ``ERROR`` (F13 — durable before success).
 
-        On ``MISMATCH``, retains ``_pending_mismatch`` and sets
-        ``reconcile_mismatch_pending`` without calling ``persist_cb``. The
-        mismatch state is in-session only (F16); on restart the operator
-        re-invokes reconcile.
+        On detected mismatch, Kalshi's rebuilt view is adopted as
+        authoritative (Principle 7 — Kalshi is the single source of
+        truth) with a ``reconcile_auto_adopted`` warning log capturing
+        the loaded vs adopted deltas. No pending state, no operator
+        intervention — the ledger mutates and persists just like the
+        clean case.
         """
         # Step 1: fetch. No mutation, no lock.
         try:
@@ -1483,21 +1589,29 @@ class PositionLedger:
         rebuilt = self._rebuild_from_fills(fills_a, fills_b)
 
         # Step 2: mutation phase — single sync block, no await inside.
+        # On any detected mismatch, Kalshi wins (Principle 7). Emit one
+        # warning log capturing what we overwrote, then fall through to
+        # the same apply path as the clean case.
         if self._significantly_differs(rebuilt):
-            # F16 — in-session only, never persisted.
-            self._pending_mismatch = rebuilt
-            self.reconcile_mismatch_pending = True
-            self._pending_mismatch_gen = self._mutation_generation
+            a = self._sides[Side.A]
+            b = self._sides[Side.B]
             logger.warning(
-                "reconcile_mismatch",
+                "reconcile_auto_adopted",
                 event_ticker=self.event_ticker,
                 gen=self._mutation_generation,
-                loaded_count_a=self._sides[Side.A].filled_count_fp100,
-                rebuilt_count_a=rebuilt.filled_count_fp100_a,
-                loaded_count_b=self._sides[Side.B].filled_count_fp100,
-                rebuilt_count_b=rebuilt.filled_count_fp100_b,
+                loaded_count_fp100_a=a.filled_count_fp100,
+                adopted_count_fp100_a=rebuilt.filled_count_fp100_a,
+                loaded_count_fp100_b=b.filled_count_fp100,
+                adopted_count_fp100_b=rebuilt.filled_count_fp100_b,
+                loaded_cost_bps_a=a.filled_total_cost_bps,
+                adopted_cost_bps_a=rebuilt.filled_total_cost_bps_a,
+                loaded_cost_bps_b=b.filled_total_cost_bps,
+                adopted_cost_bps_b=rebuilt.filled_total_cost_bps_b,
+                loaded_fees_bps_a=a.filled_fees_bps,
+                adopted_fees_bps_a=rebuilt.filled_fees_bps_a,
+                loaded_fees_bps_b=b.filled_fees_bps,
+                adopted_fees_bps_b=rebuilt.filled_fees_bps_b,
             )
-            return ReconcileResult(outcome=ReconcileOutcome.MISMATCH, rebuilt=rebuilt)
 
         proposed = self._snapshot_with_rebuild_applied(
             rebuilt,
@@ -1524,57 +1638,6 @@ class PositionLedger:
             gen=self._mutation_generation,
         )
         return ReconcileResult(outcome=ReconcileOutcome.OK, rebuilt=rebuilt)
-
-    async def accept_pending_mismatch(
-        self,
-        persist_cb: Callable[[LedgerSnapshot, str], None],
-    ) -> None:
-        """Explicitly apply a previously-detected fills-rebuild.
-
-        Generation guard: if the ledger mutated between mismatch detection
-        and operator click, raises :class:`StaleMismatchError`. Operator
-        must re-invoke :meth:`reconcile_from_fills` to see a fresh diff (F19).
-
-        If ``persist_cb`` raises, live state is untouched and
-        ``_pending_mismatch`` is retained — operator can retry after
-        resolving the persistence issue.
-        """
-        if not self.reconcile_mismatch_pending or self._pending_mismatch is None:
-            raise RuntimeError("no pending mismatch to accept")
-
-        captured_gen = self._pending_mismatch_gen
-        if self._mutation_generation != captured_gen:
-            # Ledger moved on — discard the stale rebuild and force the
-            # operator to re-invoke reconcile.
-            self._pending_mismatch = None
-            self.reconcile_mismatch_pending = False
-            self._pending_mismatch_gen = -1
-            raise StaleMismatchError(
-                f"pending mismatch is stale "
-                f"(gen {captured_gen} → {self._mutation_generation}) — "
-                f"re-run reconcile to see current diff"
-            )
-
-        rebuilt = self._pending_mismatch
-        proposed = self._snapshot_with_rebuild_applied(
-            rebuilt,
-            clear_fills_stale=True,
-            clear_resting_stale=False,
-            clear_legacy_pending=True,
-        )
-
-        # Durable persist before live apply.
-        persist_cb(proposed, self.event_ticker)
-
-        self._apply_snapshot(proposed)
-        self.reconcile_mismatch_pending = False
-        self._pending_mismatch = None
-        self._pending_mismatch_gen = -1
-        logger.info(
-            "mismatch_accepted_by_operator",
-            event_ticker=self.event_ticker,
-            gen=self._mutation_generation,
-        )
 
 
 def _prorate(total: int, portion: int, denominator: int) -> int:

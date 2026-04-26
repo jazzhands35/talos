@@ -58,18 +58,20 @@ pip install -e ".[dev]"
 
 Run both **test-runner** and **lint-check** in parallel before commits. Use **direct Read/Grep** for quick single-file lookups (faster than agents).
 
-## Mandatory Skills
+## Mandatory Skills & Reviews
 
-These skills MUST be invoked proactively — do not wait for the user to ask.
+These workflows MUST be invoked proactively — do not wait for the user to ask.
 
-| Trigger | Skill | When |
-|---------|-------|------|
-| Any Kalshi API work (REST or WS) | `kalshi-mcp` MCP server (see below) + `kalshi-api-research` | BEFORE writing code |
-| Order placement, position tracking, fees | `safety-audit` | AFTER changes |
-| position_ledger.py, bid_adjuster.py changes | `position-scenarios` | AFTER changes |
+| Trigger | What to do | When |
+|---------|-----------|------|
+| Any Kalshi API work (REST or WS) | Consult the `kalshi-mcp` MCP server (see below) for endpoint shape, field meanings, and gotchas. | BEFORE writing code |
+| Order placement, position tracking, fees | Walk a written safety audit: list each invariant in `brain/principles.md` and explain how the change preserves it. | AFTER changes |
+| `position_ledger.py` / `bid_adjuster.py` changes | Walk a written position-scenario review: enumerate the leg-delta states (cold start, yes ahead by N, no ahead by N, WS-drop window, mid-session restart, dedup overlap) and confirm the change behaves correctly in each. | AFTER changes |
 | Any bug or unexpected behavior | `superpowers:systematic-debugging` | BEFORE proposing fixes |
 | New feature or behavior change | `superpowers:brainstorming` | BEFORE coding |
 | Implementing from a plan | `superpowers:subagent-driven-development` | During implementation |
+
+> Note: the safety-audit / position-scenarios entries used to reference project-specific skills that were never built. The walkthroughs above are the manual equivalent — produce the written analysis in your reply rather than skipping the step. Future option: add real installed skills under `.claude/agents/` and re-link the table.
 
 ## Kalshi API Knowledge (via kalshi-mcp)
 

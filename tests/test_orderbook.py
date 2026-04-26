@@ -1,5 +1,11 @@
 """Tests for OrderBookManager."""
 
+# Tests in this file construct models with legacy wire-shape parameter
+# names that the models' _migrate_fp validators remap to canonical
+# bps/fp100 fields at runtime. Pyright doesn't see validator remapping as
+# part of the constructor signature.
+# pyright: reportCallIssue=false
+
 from __future__ import annotations
 
 import time

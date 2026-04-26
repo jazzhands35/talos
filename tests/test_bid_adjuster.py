@@ -234,34 +234,56 @@ class TestAsyncExecution:
 
 
     @pytest.mark.asyncio
-    async def test_amend_fill_delta_uses_order_not_ledger_aggregate(self):
-        """Fills during approval are detected by comparing the same order's
-        pre-amend vs post-amend fill_count — NOT the side-wide ledger aggregate.
+    async def test_amend_preserves_ws_recorded_fills(self):
+        """Post-2026-04-26 (CLE-TOR fix): the amend path no longer reads fills
+        from the amend response — WS ``_on_fill`` is the single writer.
 
-        Regression: if the side has historical fills from prior orders, comparing
-        against ledger.filled_count() produces a negative delta, silently dropping
-        mid-approval fills.
+        This test verifies the amend path doesn't CLOBBER fills that WS
+        already recorded into the ledger during the approval window. The
+        amend response carries an ``old_order`` snapshot we explicitly
+        discard; only the ``amended_order``'s remaining_count drives the
+        new resting state.
         """
         pair = ArbPair(event_ticker="EVT-1", ticker_a="TK-A", ticker_b="TK-B")
         books = FakeBookManager({"TK-A": 50, "TK-B": 48})
         adjuster = BidAdjuster(book_manager=books, pairs=[pair], unit_size=20)
 
         ledger = adjuster.get_ledger("EVT-1")
-        # Side A has 20 fills (from a PRIOR order, now archived)
+        # Side A has 20 fills (from a prior order, now archived).
         ledger.record_fill(Side.A, count=20, price=50)
-        # Side B has 15 historical fills + 5 resting on current order
+        # Side B starts with 15 historical fills + 5 resting on current order.
         ledger.record_fill(Side.B, count=15, price=47)
         ledger.record_resting(Side.B, order_id="ord-b", count=5, price=47)
 
         proposal = adjuster.evaluate_jump("TK-B", at_top=False)
         assert proposal is not None
 
-        # get_order returns the ORDER's own state: 15 fills on THIS order
+        # Simulate WS having delivered 2 mid-approval fills via _on_fill
+        # before the amend RPC returns. Use record_fill_from_ws so the
+        # trade_ids land in the dedup set — proving they cannot be
+        # double-applied by anything downstream.
+        ledger.record_fill_from_ws(
+            Side.B,
+            trade_id="trade-mid-1",
+            count_fp100=100,  # 1 contract
+            price_bps=4700,
+            fees_bps=300,
+        )
+        ledger.record_fill_from_ws(
+            Side.B,
+            trade_id="trade-mid-2",
+            count_fp100=100,  # 1 contract
+            price_bps=4700,
+            fees_bps=300,
+        )
+        assert ledger.filled_count(Side.B) == 17  # 15 historical + 2 WS
+        assert ledger.resting_count(Side.B) == 3   # 5 - 2 filled-from-resting
+
+        # Amend response: old_order has 17 fills (pre-amend snapshot), new
+        # order has 17 fills + 3 remaining at new price 48. The amend path
+        # must NOT add another 17 fills to the ledger.
         fresh_order = _make_order("ord-b", price=47, fill_count=15, remaining_count=5)
-        # During approval, 2 more fills arrive on this order
         old_order = _make_order("ord-b", price=47, fill_count=17, remaining_count=3)
-        old_order.maker_fees_bps = 1000  # fees accrued on the 2 new fills
-        fresh_order.maker_fees_bps = 400  # fees before approval
         amended_order = _make_order("ord-b", price=48, fill_count=17, remaining_count=3)
 
         rest_client = AsyncMock()
@@ -270,8 +292,9 @@ class TestAsyncExecution:
 
         await adjuster.execute(proposal, rest_client)
 
-        # The 2 mid-approval fills must be recorded despite 15 historical fills
-        assert ledger.filled_count(Side.B) == 17  # 15 + 2
+        # Filled count is unchanged from WS — amend did NOT re-apply.
+        assert ledger.filled_count(Side.B) == 17
+        # Resting state is updated to the amended order's snapshot.
         assert ledger.resting_count(Side.B) == 3
         assert ledger.resting_price(Side.B) == 48
 

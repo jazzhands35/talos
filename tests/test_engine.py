@@ -1,4 +1,17 @@
-"""Tests for TradingEngine."""
+"""Tests for TradingEngine.
+
+Many fixtures here construct ``FillMessage`` / ``UserOrderMessage`` /
+``OrderBookSnapshot`` using the legacy wire-shape parameter names
+(``count``, ``yes_price``, ``no_price``, ``post_position``, ``yes``,
+``no``, ``fill_count``, ``remaining_count``). The models'
+``_migrate_fp`` validators accept those at runtime and remap them to
+canonical bps/fp100 fields — this is intentional production behavior
+that the tests exercise. Pyright doesn't see ``model_validator``
+remapping as part of the constructor signature, so it raises
+``reportCallIssue`` on every legacy-name argument. Suppressed here at
+the file level rather than per-call.
+"""
+# pyright: reportCallIssue=false
 
 from __future__ import annotations
 
@@ -150,7 +163,6 @@ def _mark_all_ledgers_ready(adjuster: BidAdjuster) -> None:
         ledger.stale_fills_unconfirmed = False
         ledger.stale_resting_unconfirmed = False
         ledger.legacy_migration_pending = False
-        ledger.reconcile_mismatch_pending = False
 
 
 def _engine_with_pair() -> tuple[TradingEngine, AsyncMock]:
@@ -240,7 +252,9 @@ class TestPolling:
     @pytest.mark.asyncio
     async def test_refresh_balance_updates_balance(self):
         engine, rest = _engine_with_pair()
-        rest.get_balance.return_value = Balance(balance_bps=5_000_000, portfolio_value_bps=6_000_000)
+        rest.get_balance.return_value = Balance(
+            balance_bps=5_000_000, portfolio_value_bps=6_000_000
+        )
 
         await engine.refresh_balance()
 
@@ -2223,9 +2237,9 @@ class TestReactionQueue:
             order_id="ord-a",
             market_ticker="TK-A",
             side="no",
-            count=3,
-            yes_price=55,
-            post_position=-3,
+            count_fp100=300,
+            yes_price_bps=5500,
+            post_position_fp100=-300,
         )
         engine._on_fill(msg)
         assert not engine._reaction_queue.empty()
@@ -2238,9 +2252,9 @@ class TestReactionQueue:
             order_id="ord-a",
             market_ticker="TK-A",
             side="no",
-            count=3,
-            yes_price=55,
-            post_position=-3,
+            count_fp100=300,
+            yes_price_bps=5500,
+            post_position_fp100=-300,
         )
         engine._on_fill(msg)
         assert "EVT-1" in engine._dirty_events
@@ -2253,9 +2267,9 @@ class TestReactionQueue:
             order_id="ord-a",
             market_ticker="TK-A",
             side="no",
-            count=3,
-            yes_price=55,
-            post_position=-3,
+            count_fp100=300,
+            yes_price_bps=5500,
+            post_position_fp100=-300,
         )
         engine._on_fill(msg)
         assert engine._reaction_queue.empty()
@@ -2509,6 +2523,12 @@ class TestClaimMutualExclusionIntegration:
 
 
 class TestFillDriftDetection:
+    """Drift detection runs AFTER applying the WS fill to the ledger
+    (post-2026-04-26 CLE-TOR fix). post_position is Kalshi's ground truth
+    after this fill — the ledger should match it. Mismatch indicates a
+    missed prior WS message (ledger lower) or a dedup miss (ledger higher).
+    """
+
     def test_on_fill_logs_drift(self, capsys: pytest.CaptureFixture[str]):
         engine, _ = _engine_with_pair()
         # Seed ledger with 5 fills on side A
@@ -2520,14 +2540,16 @@ class TestFillDriftDetection:
             engine._orders_cache, ticker_a="TK-A", ticker_b="TK-B"
         )
 
+        # WS fill of 3 → ledger becomes 5+3=8. Kalshi reports
+        # post_position=-10 → mismatch (Kalshi says 10, we now see 8).
         msg = FillMessage(
             trade_id="fill-1",
             order_id="ord-a",
             market_ticker="TK-A",
             side="no",
-            count=3,
-            yes_price=55,
-            post_position=-8,  # Kalshi says 8, ledger says 5
+            count_fp100=300,
+            yes_price_bps=5500,
+            post_position_fp100=-1000,
         )
         engine._on_fill(msg)
 
@@ -2544,14 +2566,16 @@ class TestFillDriftDetection:
             engine._orders_cache, ticker_a="TK-A", ticker_b="TK-B"
         )
 
+        # WS fill of 1 → ledger becomes 5+1=6. Kalshi reports
+        # post_position=-6 → matches; no drift expected.
         msg = FillMessage(
             trade_id="fill-1",
             order_id="ord-a",
             market_ticker="TK-A",
             side="no",
-            count=1,
-            yes_price=55,
-            post_position=-5,  # Matches ledger
+            count_fp100=100,
+            yes_price_bps=5500,
+            post_position_fp100=-600,
         )
         engine._on_fill(msg)
 

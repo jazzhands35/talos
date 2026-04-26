@@ -30,6 +30,7 @@ def test_enter_automatic_with_timer():
     em.enter_automatic(hours=2.0)
     assert em.mode is Mode.AUTOMATIC
     assert em.auto_stop_at is not None
+    assert em.started_at is not None
     expected = em.started_at + timedelta(hours=2)
     assert abs((em.auto_stop_at - expected).total_seconds()) < 1
 

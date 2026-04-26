@@ -1448,6 +1448,35 @@ class TradingEngine:
             except (KalshiAPIError, KalshiRateLimitError, httpx.HTTPError):
                 logger.warning("positions_sync_failed", exc_info=True)
 
+            # Same-ticker fills backstop. /portfolio/positions only reports
+            # signed-net (yes − no), useless for same-ticker yes+no pairs —
+            # so sync_from_positions is a no-op for them. The WS _on_fill
+            # path is the primary fill writer, but if a WS message was
+            # dropped or the bot restarted mid-session, the ledger drifts.
+            # Pull /portfolio/fills per same-ticker event and reapply via
+            # the trade_id-deduped record_fill_from_ws — already-seen WS
+            # fills are no-ops; only missed ones increment the ledger.
+            # See [[brain/decisions]] CLE-TOR runaway diagnosis (2026-04-23).
+            for pair in self._scanner.pairs:
+                if not pair.is_same_ticker:
+                    continue
+                try:
+                    ledger = self._adjuster.get_ledger(pair.event_ticker)
+                except KeyError:
+                    continue
+                if not ledger.owns_tickers(pair.ticker_a, pair.ticker_b):
+                    continue
+                try:
+                    pair_fills = await self._rest.get_all_fills(ticker=pair.ticker_a)
+                    ledger.sync_from_fills(pair_fills)
+                except (KalshiAPIError, KalshiRateLimitError, httpx.HTTPError):
+                    logger.warning(
+                        "sync_from_fills_failed",
+                        event_ticker=pair.event_ticker,
+                        ticker=pair.ticker_a,
+                        exc_info=True,
+                    )
+
             self._reconcile_stale_positions(pos_map)
 
             self.recompute_positions()
@@ -1755,8 +1784,14 @@ class TradingEngine:
         if event_ticker and self._initial_sync_done:
             self._reaction_queue.put_nowait(event_ticker)
 
-        # ── Post-position drift check (observability only) ──
-        if fill_pair is not None and msg.post_position_fp100 != 0:
+        # ── Apply fill to ledger + post-position drift check ──
+        # For same-ticker pairs this is the only cumulative-truth path:
+        # sync_from_positions is a no-op (position_fp is signed-net, useless
+        # for yes+no on the same ticker), and sync_from_orders is monotonic
+        # but the orders cache gets pruned of completed orders every refresh,
+        # so it can't accumulate fills past one cycle's high-water mark.
+        # See [[brain/decisions]] CLE-TOR runaway diagnosis (2026-04-23).
+        if fill_pair is not None:
             try:
                 ledger = self._adjuster.get_ledger(event_ticker)
                 side: Side | None = None
@@ -1769,17 +1804,40 @@ class TradingEngine:
                     elif msg.market_ticker == fill_pair.ticker_b:
                         side = Side.B
                 if side is not None:
-                    kalshi_pos = abs(msg.post_position_fp100 // ONE_CONTRACT_FP100)
-                    ledger_pos = ledger.filled_count(side)
-                    if kalshi_pos != ledger_pos:
-                        logger.warning(
-                            "ws_fill_position_drift",
-                            event_ticker=event_ticker,
-                            side=side.value,
-                            kalshi_post_position=kalshi_pos,
-                            ledger_filled=ledger_pos,
-                            fill_count=msg.count_fp100 // ONE_CONTRACT_FP100,
-                        )
+                    # Use the side-relevant price. Kalshi WS sends both
+                    # yes_price_bps and no_price_bps (complement) — always
+                    # pick the one matching the buy side so cost basis is
+                    # recorded against what we actually paid.
+                    price_bps = (
+                        msg.no_price_bps if msg.side == "no" else msg.yes_price_bps
+                    )
+                    ledger.record_fill_from_ws(
+                        side,
+                        trade_id=msg.trade_id,
+                        count_fp100=msg.count_fp100,
+                        price_bps=price_bps,
+                        fees_bps=msg.fee_cost_bps,
+                    )
+                    # Drift check runs AFTER the apply. Kalshi's
+                    # post_position_fp100 is the authoritative count after
+                    # this fill; the ledger should now match within
+                    # rounding. Mismatch indicates either a missed prior
+                    # WS message (we'd be lower) or a dedup miss (we'd be
+                    # higher). The sync_from_fills backstop catches the
+                    # former on the next refresh; the dedup is bounded so
+                    # the latter is rare.
+                    if msg.post_position_fp100 != 0:
+                        kalshi_pos = abs(msg.post_position_fp100 // ONE_CONTRACT_FP100)
+                        ledger_pos = ledger.filled_count(side)
+                        if kalshi_pos != ledger_pos:
+                            logger.warning(
+                                "ws_fill_position_drift",
+                                event_ticker=event_ticker,
+                                side=side.value,
+                                kalshi_post_position=kalshi_pos,
+                                ledger_filled=ledger_pos,
+                                fill_count=msg.count_fp100 // ONE_CONTRACT_FP100,
+                            )
             except KeyError:
                 pass
 
@@ -4480,9 +4538,9 @@ class TradingEngine:
 
         Returns True if the ledger clears within
         :data:`STARTUP_SYNC_TIMEOUT_S`. Returns False (with operator
-        notification) if timeout exceeded or the flag requires operator
-        action (``legacy_migration_pending``,
-        ``reconcile_mismatch_pending``).
+        notification) only on timeout — mismatches and legacy-migration
+        pending are resolved automatically by ``reconcile_from_fills``,
+        which adopts Kalshi's fills as authoritative (Principle 7).
 
         Caller pattern::
 
@@ -4502,15 +4560,6 @@ class TradingEngine:
         deadline = time.monotonic() + STARTUP_SYNC_TIMEOUT_S
         reconcile_attempted = False
         while not ledger.ready():
-            if (
-                ledger.legacy_migration_pending
-                or ledger.reconcile_mismatch_pending
-            ):
-                self._notify(
-                    f"Confirm or reconcile {pair.event_ticker} before {op_name}",
-                    "error",
-                )
-                return False
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 self._notify(
@@ -4519,12 +4568,17 @@ class TradingEngine:
                     "error",
                 )
                 return False
-            # Auto-reconcile trigger: if stale_fills_unconfirmed is still
-            # set after AUTO_RECONCILE_DELAY_S, call reconcile_from_fills
-            # to attempt an authoritative rebuild from per-fill data.
+            # Auto-reconcile trigger: if fills staleness or a legacy v1
+            # migration is still pending after AUTO_RECONCILE_DELAY_S,
+            # call reconcile_from_fills to adopt Kalshi's authoritative
+            # per-fill data (auto-adopts on any diff — no operator gate).
             elapsed = STARTUP_SYNC_TIMEOUT_S - remaining
-            if (
+            needs_reconcile = (
                 ledger.stale_fills_unconfirmed
+                or ledger.legacy_migration_pending
+            )
+            if (
+                needs_reconcile
                 and not reconcile_attempted
                 and elapsed >= AUTO_RECONCILE_DELAY_S
             ):

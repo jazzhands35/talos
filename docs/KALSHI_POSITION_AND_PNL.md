@@ -28,9 +28,9 @@ Returns one entry per market you have exposure in. Key fields (post March 12, 20
 | Position | `position_fp` | string (e.g., `"10"`) | **Signed**: positive = net YES, negative = net NO |
 | Total Traded | `total_traded_dollars` | string (e.g., `"0.25"`) | Total dollars traded |
 | Market Exposure | `market_exposure_dollars` | string (e.g., `"6.50"`) | Total dollars at risk |
-| Resting Count | `resting_orders_count_fp` | string (e.g., `"3"`) | Number of resting orders |
+| Resting Count | `resting_orders_count` | integer (e.g., `3`) | Number of resting orders (count of orders, not contracts) |
 
-> **Note:** Legacy integer fields (`position`, `total_traded`, `market_exposure`, `resting_orders_count`) were removed March 12, 2026. Talos's `Position` model converts `_fp`/`_dollars` strings to int cents/int counts via `_migrate_fp` validator.
+> **Note:** Legacy integer fields (`position`, `total_traded`, `market_exposure`) were removed March 12, 2026 in favor of `_fp` / `_dollars` string variants. `resting_orders_count` was NOT removed — it is still returned as an integer (count of orders, which is inherently whole). Verified against production `/portfolio/positions` 2026-04-25: response carries exactly `resting_orders_count` (int), with no `_fp` variant. Talos's `Position` model converts `_fp`/`_dollars` strings to int cents/int counts via `_migrate_fp` validator.
 
 **Position sign convention**: `+100` means you hold 100 YES contracts. `-50` means you hold 50 NO contracts.
 
@@ -277,7 +277,21 @@ Kalshi charges a maker fee on **profit only** (not on return of your stake). The
 |-----------|------|-----------------|-----------------|
 | Full maker | 1.75% | `1 - 0.0175 = 0.9825` | Resting limit orders (you provide liquidity) |
 | Half maker | 0.875% | `1 - 0.00875 = 0.99125` | Crossing orders, or midpoint approximation |
-| No fee | 0% | `1.0` | Raw probability conversion |
+| No fee | 0% | `1.0` | `fee_type` ∈ {`fee_free`, `no_fee`} |
+
+**Verified 2026-04-26** against live `/portfolio/fills` data: per-contract trade fee tracks the quadratic formula at the 1.75% rate within rounding error. Both `fee_type=quadratic` AND `fee_type=quadratic_with_maker_fees` series charge maker fees at this rate (an earlier brain note claimed plain `quadratic` series paid 0 maker — that is incorrect; the running code in `src/talos/fees.py` correctly applies the rate to both, matching the data).
+
+### Per-fill rounding (not currently modeled by Talos)
+
+Per [docs.kalshi.com/getting_started/fee_rounding.md](https://docs.kalshi.com/getting_started/fee_rounding.md), every fill goes through a rounding pipeline AFTER the trade-fee formula:
+
+1. The trade fee from the formula above is **rounded UP to the nearest $0.0001 (centicent)**.
+2. The resulting balance change is **floored toward negative infinity to the nearest $0.01**, generating a "rounding fee" of $0.0000–$0.0099 per fill.
+3. A per-order accumulator tracks the rounding overpayment. **Once accumulated rounding exceeds $0.01, a $0.01 rebate is issued** and the accumulator decrements.
+
+The net charge per fill is `trade_fee + rounding_fee − rebate` (always ≥ $0.00).
+
+**Implication for Talos:** the formula in `src/talos/fees.py` gives the trade-fee component only. For very small fills (count ≪ 1) or fills near 0¢/100¢, the rounding fee can dwarf the trade fee — empirically seen up to **80× the formula prediction** on a 0.01-contract fill. For typical multi-contract fills, the deviation is well under $0.01. Talos avoids the issue in practice by using **actual** `maker_fees` / `fee_cost` values from the API for display and ledger accounting (see [[brain/decisions#2026-03-09 — Quadratic fee model and fill-time charging]]); the formula is used only for pre-placement safety gates.
 
 ### How the Fee Enters the P&L Formula
 

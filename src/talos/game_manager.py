@@ -83,7 +83,7 @@ class CommitResult:
     rejected: list[tuple[dict[str, Any], MarketAdmissionError]] = field(default_factory=list)
 
 
-class MarketPickerNeeded(Exception):
+class MarketPickerNeeded(Exception):  # noqa: N818  # control-flow signal, not an error
     """Raised when a non-sports event has multiple markets needing user selection."""
 
     def __init__(self, event: Event, markets: list[Market]) -> None:
@@ -712,7 +712,9 @@ class GameManager:
                             continue
                         if (market.volume_24h_fp100 or 0) == 0:
                             continue
-                        if self._nonsports_max_days and not _market_closes_within(market, self._nonsports_max_days):
+                        if self._nonsports_max_days and not _market_closes_within(
+                            market, self._nonsports_max_days
+                        ):
                             continue
                         try:
                             p = await self.add_market_as_pair(
@@ -873,7 +875,9 @@ class GameManager:
                 for event in batch:
                     if event.event_ticker in all_active:
                         continue
-                    if self.is_blacklisted(event.event_ticker) or self.is_blacklisted(event.series_ticker):
+                    if self.is_blacklisted(event.event_ticker) or self.is_blacklisted(
+                        event.series_ticker
+                    ):
                         continue
                     active_mkts = [m for m in event.markets if m.status == "active"]
                     if len(active_mkts) != 2:
@@ -899,7 +903,9 @@ class GameManager:
             for event in raw_events:
                 if event.event_ticker in all_active:
                     continue
-                if self.is_blacklisted(event.event_ticker) or self.is_blacklisted(event.series_ticker):
+                if self.is_blacklisted(event.event_ticker) or self.is_blacklisted(
+                    event.series_ticker
+                ):
                     continue
                 if event.series_ticker in _SPORTS_SET:
                     continue

@@ -15,15 +15,12 @@ This document explains how to calculate **CPM** (Contracts Per Minute) and **fil
 Fetch recent trades for the market from Kalshi's trades endpoint:
 
 ```
-GET /trade-api/v2/markets/{market_ticker}/trades?limit=120
+GET /trade-api/v2/markets/trades?ticker={market_ticker}&limit=120
 ```
 
-**Alternative endpoints** (try in order if one doesn't work):
-- `GET /trade-api/v2/markets/trades?market_ticker={ticker}&limit=120`
-- `GET /trade-api/v2/markets/trades?ticker={ticker}&limit=120`
-- `GET /trade-api/v2/trades?market_ticker={ticker}&limit=120`
+This is the canonical form (verified against the kalshi-mcp wisdom layer + live API 2026-04-26). Older Talos code may reference legacy variants like `/trade-api/v2/markets/{market_ticker}/trades` or `?market_ticker={ticker}` — these were defensive fallbacks from when the endpoint shape was less stable. New code should target the canonical form only.
 
-**Response** contains an array of trade objects. The response key may be `trades`, `fills`, `data`, or `results` — check all four.
+**Response** contains a `trades` array. (Earlier doc claimed the key might also be `fills`, `data`, or `results` — that variability is no longer observed and should not be coded around.)
 
 Each trade object has (post March 12, 2026 — legacy integer fields removed):
 

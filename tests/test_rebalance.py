@@ -1,4 +1,13 @@
-"""Tests for rebalance detection and execution (extracted from test_engine.py)."""
+"""Tests for rebalance detection and execution (extracted from test_engine.py).
+
+``OrderBookSnapshot`` fixtures here use the legacy wire-shape parameters
+(``yes=[...]``, ``no=[...]``); the model's ``_migrate_fp`` validator
+remaps them to canonical ``yes_bps_fp100`` / ``no_bps_fp100`` at runtime.
+Pyright can't see validator-level remapping as part of the constructor
+signature. Suppressed here rather than per-call. See the same comment
+in ``tests/test_engine.py``.
+"""
+# pyright: reportCallIssue=false
 
 from __future__ import annotations
 

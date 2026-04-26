@@ -46,7 +46,7 @@ class TestParseKalshiUrl:
 
 class TestGameManager:
     @pytest.fixture()
-    def mock_rest(self) -> KalshiRESTClient:
+    def mock_rest(self) -> MagicMock:
         rest = MagicMock(spec=KalshiRESTClient)
         rest.get_event = AsyncMock()
         rest.get_series = AsyncMock(
@@ -76,7 +76,7 @@ class TestGameManager:
     @pytest.fixture()
     def manager(
         self,
-        mock_rest: KalshiRESTClient,
+        mock_rest: MagicMock,
         mock_feed: MarketFeed,
         mock_scanner: ArbitrageScanner,
     ) -> GameManager:
@@ -99,7 +99,7 @@ class TestGameManager:
     async def test_add_game_fetches_event(
         self,
         manager: GameManager,
-        mock_rest: KalshiRESTClient,
+        mock_rest: MagicMock,
     ) -> None:
         event = self._make_event("EVT-1", ["TICK-A", "TICK-B"])
         mock_rest.get_event.return_value = event  # type: ignore[union-attr]
@@ -109,7 +109,7 @@ class TestGameManager:
     async def test_add_game_registers_pair(
         self,
         manager: GameManager,
-        mock_rest: KalshiRESTClient,
+        mock_rest: MagicMock,
         mock_scanner: ArbitrageScanner,
     ) -> None:
         event = self._make_event("EVT-1", ["TICK-A", "TICK-B"])
@@ -130,7 +130,7 @@ class TestGameManager:
     async def test_add_game_subscribes_both_tickers(
         self,
         manager: GameManager,
-        mock_rest: KalshiRESTClient,
+        mock_rest: MagicMock,
         mock_feed: MarketFeed,
     ) -> None:
         event = self._make_event("EVT-1", ["TICK-A", "TICK-B"])
@@ -143,7 +143,7 @@ class TestGameManager:
     async def test_add_game_rejects_non_binary_event(
         self,
         manager: GameManager,
-        mock_rest: KalshiRESTClient,
+        mock_rest: MagicMock,
     ) -> None:
         event = self._make_event("EVT-1", ["A", "B", "C"])
         mock_rest.get_event.return_value = event  # type: ignore[union-attr]
@@ -153,7 +153,7 @@ class TestGameManager:
     async def test_add_game_returns_pair(
         self,
         manager: GameManager,
-        mock_rest: KalshiRESTClient,
+        mock_rest: MagicMock,
     ) -> None:
         event = self._make_event("EVT-1", ["TICK-A", "TICK-B"])
         mock_rest.get_event.return_value = event  # type: ignore[union-attr]
@@ -165,7 +165,7 @@ class TestGameManager:
     async def test_add_game_from_url(
         self,
         manager: GameManager,
-        mock_rest: KalshiRESTClient,
+        mock_rest: MagicMock,
     ) -> None:
         event = self._make_event("KXNCAAWBGAME-26MAR04STANMIA", ["STAN", "MIA"])
         mock_rest.get_event.return_value = event  # type: ignore[union-attr]
@@ -176,7 +176,7 @@ class TestGameManager:
     async def test_add_games_multiple(
         self,
         manager: GameManager,
-        mock_rest: KalshiRESTClient,
+        mock_rest: MagicMock,
         mock_feed: MarketFeed,
     ) -> None:
         mock_rest.get_event.side_effect = [  # type: ignore[union-attr]
@@ -195,7 +195,7 @@ class TestGameManager:
     async def test_remove_game(
         self,
         manager: GameManager,
-        mock_rest: KalshiRESTClient,
+        mock_rest: MagicMock,
         mock_feed: MarketFeed,
         mock_scanner: ArbitrageScanner,
     ) -> None:
@@ -209,7 +209,7 @@ class TestGameManager:
     async def test_duplicate_add_game_is_noop(
         self,
         manager: GameManager,
-        mock_rest: KalshiRESTClient,
+        mock_rest: MagicMock,
     ) -> None:
         event = self._make_event("EVT-1", ["TICK-A", "TICK-B"])
         mock_rest.get_event.return_value = event  # type: ignore[union-attr]
@@ -221,7 +221,7 @@ class TestGameManager:
     async def test_active_games(
         self,
         manager: GameManager,
-        mock_rest: KalshiRESTClient,
+        mock_rest: MagicMock,
     ) -> None:
         event = self._make_event("EVT-1", ["TICK-A", "TICK-B"])
         mock_rest.get_event.return_value = event  # type: ignore[union-attr]
@@ -232,7 +232,7 @@ class TestGameManager:
     async def test_clear_all_games(
         self,
         manager: GameManager,
-        mock_rest: KalshiRESTClient,
+        mock_rest: MagicMock,
         mock_feed: MarketFeed,
         mock_scanner: ArbitrageScanner,
     ) -> None:
@@ -252,7 +252,7 @@ class TestGameManager:
     async def test_on_change_fires_on_add(
         self,
         manager: GameManager,
-        mock_rest: KalshiRESTClient,
+        mock_rest: MagicMock,
     ) -> None:
         callback = Mock()
         manager.on_change = callback
@@ -264,7 +264,7 @@ class TestGameManager:
     async def test_on_change_fires_on_remove(
         self,
         manager: GameManager,
-        mock_rest: KalshiRESTClient,
+        mock_rest: MagicMock,
     ) -> None:
         event = self._make_event("EVT-1", ["TICK-A", "TICK-B"])
         mock_rest.get_event.return_value = event  # type: ignore[union-attr]
@@ -277,7 +277,7 @@ class TestGameManager:
     async def test_on_change_fires_once_on_clear(
         self,
         manager: GameManager,
-        mock_rest: KalshiRESTClient,
+        mock_rest: MagicMock,
     ) -> None:
         mock_rest.get_event.side_effect = [  # type: ignore[union-attr]
             self._make_event("EVT-1", ["A1", "B1"]),
@@ -293,7 +293,7 @@ class TestGameManager:
     async def test_on_change_not_fired_on_duplicate_add(
         self,
         manager: GameManager,
-        mock_rest: KalshiRESTClient,
+        mock_rest: MagicMock,
     ) -> None:
         event = self._make_event("EVT-1", ["TICK-A", "TICK-B"])
         mock_rest.get_event.return_value = event  # type: ignore[union-attr]
@@ -783,7 +783,7 @@ class TestNonSportsScan:
     """Tests for non-sports scan path in scan_events()."""
 
     @pytest.fixture()
-    def mock_rest(self) -> KalshiRESTClient:
+    def mock_rest(self) -> MagicMock:
         rest = MagicMock(spec=KalshiRESTClient)
         rest.get_event = AsyncMock()  # needed for add_game() in already-monitored test
         rest.get_events = AsyncMock(return_value=[])
@@ -797,7 +797,7 @@ class TestNonSportsScan:
         return rest
 
     @pytest.fixture()
-    def manager(self, mock_rest: KalshiRESTClient) -> GameManager:
+    def manager(self, mock_rest: MagicMock) -> GameManager:
         feed = MagicMock(spec=MarketFeed)
         feed.subscribe = AsyncMock()
         feed.subscribe_bulk = AsyncMock()
@@ -812,7 +812,7 @@ class TestNonSportsScan:
         )
 
     async def test_filters_by_category(
-        self, manager: GameManager, mock_rest: KalshiRESTClient
+        self, manager: GameManager, mock_rest: MagicMock
     ) -> None:
         close = (datetime.now(UTC) + timedelta(days=3)).isoformat()
         mock_rest.get_all_events.return_value = [
@@ -825,7 +825,7 @@ class TestNonSportsScan:
         assert "E2" not in tickers
 
     async def test_filters_by_time_window(
-        self, manager: GameManager, mock_rest: KalshiRESTClient
+        self, manager: GameManager, mock_rest: MagicMock
     ) -> None:
         within = (datetime.now(UTC) + timedelta(days=3)).isoformat()
         beyond = (datetime.now(UTC) + timedelta(days=14)).isoformat()
@@ -839,7 +839,7 @@ class TestNonSportsScan:
         assert "E2" not in tickers
 
     async def test_excludes_sports_series(
-        self, manager: GameManager, mock_rest: KalshiRESTClient
+        self, manager: GameManager, mock_rest: MagicMock
     ) -> None:
         close = (datetime.now(UTC) + timedelta(days=1)).isoformat()
         mock_rest.get_all_events.return_value = [
@@ -849,7 +849,7 @@ class TestNonSportsScan:
         assert len(events) == 0
 
     async def test_excludes_no_active_markets(
-        self, manager: GameManager, mock_rest: KalshiRESTClient
+        self, manager: GameManager, mock_rest: MagicMock
     ) -> None:
         close = (datetime.now(UTC) + timedelta(days=1)).isoformat()
         mock_rest.get_all_events.return_value = [
@@ -859,7 +859,7 @@ class TestNonSportsScan:
         assert len(events) == 0
 
     async def test_excludes_null_close_time(
-        self, manager: GameManager, mock_rest: KalshiRESTClient
+        self, manager: GameManager, mock_rest: MagicMock
     ) -> None:
         mock_rest.get_all_events.return_value = [
             _make_nonsports_event("E1", "KXBTC", "Crypto", None),
@@ -868,7 +868,7 @@ class TestNonSportsScan:
         assert len(events) == 0
 
     async def test_excludes_already_monitored(
-        self, manager: GameManager, mock_rest: KalshiRESTClient
+        self, manager: GameManager, mock_rest: MagicMock
     ) -> None:
         close = (datetime.now(UTC) + timedelta(days=1)).isoformat()
         ev = _make_nonsports_event("E1", "KXBTC", "Crypto", close)
@@ -879,7 +879,7 @@ class TestNonSportsScan:
         assert len(events) == 0
 
     async def test_empty_categories_disables_scan(
-        self, mock_rest: KalshiRESTClient
+        self, mock_rest: MagicMock
     ) -> None:
         feed = MagicMock(spec=MarketFeed)
         scanner = MagicMock(spec=ArbitrageScanner)
@@ -896,7 +896,7 @@ class TestTickerBlacklist:
     """Tests for ticker blacklist filtering."""
 
     @pytest.fixture()
-    def mock_rest(self) -> KalshiRESTClient:
+    def mock_rest(self) -> MagicMock:
         rest = MagicMock(spec=KalshiRESTClient)
         rest.get_event = AsyncMock()
         rest.get_events = AsyncMock(return_value=[])
@@ -910,7 +910,7 @@ class TestTickerBlacklist:
         return rest
 
     @pytest.fixture()
-    def manager(self, mock_rest: KalshiRESTClient) -> GameManager:
+    def manager(self, mock_rest: MagicMock) -> GameManager:
         feed = MagicMock(spec=MarketFeed)
         feed.subscribe = AsyncMock()
         feed.subscribe_bulk = AsyncMock()
@@ -947,7 +947,7 @@ class TestTickerBlacklist:
             await manager.add_game("KXSURV-SAFE-26MAR25")
 
     async def test_scan_excludes_blacklisted(
-        self, manager: GameManager, mock_rest: KalshiRESTClient
+        self, manager: GameManager, mock_rest: MagicMock
     ) -> None:
         close = (datetime.now(UTC) + timedelta(days=1)).isoformat()
         mock_rest.get_all_events.return_value = [
@@ -960,7 +960,7 @@ class TestTickerBlacklist:
         assert "E2" in tickers
 
     async def test_remove_blacklisted_games(
-        self, manager: GameManager, mock_rest: KalshiRESTClient
+        self, manager: GameManager, mock_rest: MagicMock
     ) -> None:
         close = (datetime.now(UTC) + timedelta(days=1)).isoformat()
         ev = _make_nonsports_event("E1", "KXOTHER", "Crypto", close)

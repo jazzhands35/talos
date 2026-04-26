@@ -79,7 +79,8 @@ def _make_engine_stub(
     eng._game_manager.subtitles = {}
     eng._game_manager.volumes_24h = {}
     eng.on_notification = None
-    eng._notifications: list[tuple[str, str]] = []
+    # list[tuple[str, str]] — pyright can't annotate post-hoc instance attrs.
+    eng._notifications = []
 
     def _notify(message: str, severity: str = "information", *, toast: bool = False) -> None:
         eng._notifications.append((message, severity))

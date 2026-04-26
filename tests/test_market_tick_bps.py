@@ -14,7 +14,9 @@ def _make(**overrides) -> Market:
         "status": "open",
     }
     base.update(overrides)
-    return Market(**base)
+    # model_validate handles the dynamic dict shape that **kwargs can't
+    # express to the type checker; runtime behavior is identical.
+    return Market.model_validate(base)
 
 
 def test_defaults_are_cent_only_non_fractional():
@@ -54,7 +56,9 @@ def test_tick_bps_from_structured_price_ranges_sub_cent():
         "event_ticker": "KXTICK-26JAN01",
         "title": "Sub-cent",
         "status": "open",
-        "price_ranges": [{"min_price_dollars": "0.01", "max_price_dollars": "0.99", "tick_dollars": "0.001"}],
+        "price_ranges": [
+            {"min_price_dollars": "0.01", "max_price_dollars": "0.99", "tick_dollars": "0.001"},
+        ],
     })
     assert m.tick_bps() == 10
 
@@ -66,7 +70,9 @@ def test_tick_bps_from_structured_price_ranges_whole_cent():
         "event_ticker": "KXTICK-26JAN01",
         "title": "Cent tick",
         "status": "open",
-        "price_ranges": [{"min_price_dollars": "0.01", "max_price_dollars": "0.99", "tick_dollars": "0.01"}],
+        "price_ranges": [
+            {"min_price_dollars": "0.01", "max_price_dollars": "0.99", "tick_dollars": "0.01"},
+        ],
     })
     assert m.tick_bps() == 100
 

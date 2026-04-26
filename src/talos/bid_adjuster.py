@@ -691,30 +691,17 @@ class BidAdjuster:
         else:
             amend_kwargs["no_price"] = proposal.new_price
 
-        # Single atomic amend call
-        old_order, amended_order = await rest_client.amend_order(  # type: ignore[attr-defined]
+        # Single atomic amend call. ``amend_order`` returns
+        # ``(old_order, amended_order)`` — the first is the canceled
+        # pre-amend snapshot. We don't read its fill counts: any fills
+        # that arrived during the approval window are recorded by the WS
+        # ``_on_fill`` path (engine.py), which is the single writer for
+        # new fills since the 2026-04-26 ledger fix (CLE-TOR runaway
+        # diagnosis). Reading them here too would double-count.
+        _, amended_order = await rest_client.amend_order(  # type: ignore[attr-defined]
             proposal.cancel_order_id,
             **amend_kwargs,
         )
-
-        # Update fills from amend response (handles fills that arrived during approval).
-        # Compare against fresh_order (same order, pre-amend) — NOT the ledger
-        # aggregate, which includes fills from other orders on this side.
-        old_fill_fp100 = old_order.fill_count_fp100
-        fill_delta_fp100 = old_fill_fp100 - fresh_fill_fp100
-        if fill_delta_fp100 > 0:
-            old_price_bps = (
-                old_order.no_price_bps if pair_side == "no" else old_order.yes_price_bps
-            )
-            old_maker_fees_bps = old_order.maker_fees_bps
-            fresh_maker_fees_bps = fresh_order.maker_fees_bps
-            fee_delta_bps = old_maker_fees_bps - fresh_maker_fees_bps
-            ledger.record_fill_bps(
-                adj_side,
-                count_fp100=fill_delta_fp100,
-                price_bps=old_price_bps,
-                fees_bps=max(0, fee_delta_bps),
-            )
 
         # Update ledger from amend response — exact-precision path.
         if pair_side == "no":

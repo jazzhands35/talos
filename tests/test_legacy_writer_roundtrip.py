@@ -8,7 +8,7 @@ from talos.persistence import load_saved_games_full, save_games_full
 
 
 def test_games_full_preserves_source_field(tmp_path: Path):
-    record: dict[str, str | float | None] = {
+    record: dict[str, object] = {
         "event_ticker": "KXFEDMENTION-26APR-YIEL",
         "ticker_a": "KXFEDMENTION-26APR-YIEL",
         "ticker_b": "KXFEDMENTION-26APR-YIEL",

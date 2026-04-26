@@ -14,6 +14,10 @@ class _FakeEngine:
     def __init__(self):
         self.add_pairs_from_selection = AsyncMock(return_value=CommitResult())
         self.remove_pairs_from_selection = AsyncMock(return_value=[])
+        # refresh_volumes is reassigned per-test below (the hurricane-bug
+        # tests verify it's awaited after a successful add). Initialize
+        # here so pyright sees the attribute on the class.
+        self.refresh_volumes = AsyncMock(return_value=None)
 
 
 class _FakeMetadata:

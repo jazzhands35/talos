@@ -4,8 +4,6 @@ from __future__ import annotations
 
 from pathlib import Path
 
-import pytest
-
 from talos.persistence import get_data_dir, set_data_dir
 
 

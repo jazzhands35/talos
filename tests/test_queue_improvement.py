@@ -413,7 +413,7 @@ class TestQueueImprovementExecution:
 
         await engine._execute_queue_improvement(qi)
 
-        engine._rest.amend_order.assert_not_called()
+        engine._rest.amend_order.assert_not_called()  # pyright: ignore[reportAttributeAccessIssue]
         assert any("order changed" in n for n in notifications)
 
     @pytest.mark.asyncio
@@ -450,7 +450,7 @@ class TestQueueImprovementExecution:
 
         await engine._execute_queue_improvement(qi)
 
-        engine._rest.amend_order.assert_not_called()
+        engine._rest.amend_order.assert_not_called()  # pyright: ignore[reportAttributeAccessIssue]
         assert any("unprofitable" in n for n in notifications)
 
 

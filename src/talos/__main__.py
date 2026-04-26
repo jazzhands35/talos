@@ -6,7 +6,7 @@ import os
 import sys
 from io import StringIO
 from pathlib import Path
-from typing import TextIO
+from typing import TextIO, cast
 
 import structlog
 
@@ -43,8 +43,12 @@ def _configure_logging(*, log_path: Path | None = None, stderr: TextIO | None = 
     if log_path is not None:
         log_path.parent.mkdir(parents=True, exist_ok=True)
         _LOG_FILE_HANDLE = log_path.open("a", encoding="utf-8")
-        stream = (
-            _TeeTextIO(stream, _LOG_FILE_HANDLE) if tee_stderr else _LOG_FILE_HANDLE
+        # cast: _TeeTextIO + TextIOWrapper both quack like TextIO at runtime
+        # (write/flush/encoding) — Pyright can't see structural compatibility
+        # without an explicit Protocol subclass.
+        stream = cast(
+            TextIO,
+            _TeeTextIO(stream, _LOG_FILE_HANDLE) if tee_stderr else _LOG_FILE_HANDLE,
         )
 
     structlog.configure(

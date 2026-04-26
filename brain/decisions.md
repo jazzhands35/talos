@@ -116,6 +116,8 @@ Key changes:
 
 **Decision:** Added `GET /portfolio/positions` as second data source (never archives). `sync_from_positions()` patches fill counts when they exceed orders-reported values. Runs after `sync_from_orders` each cycle. Addendum: rewrote to use monotonic fills and sum multiple resting orders (see [[patterns#Monotonic state updates across data sources]]). See [[principles#7. Kalshi Is the Source of Truth — Always]].
 
+**2026-04-26 update:** the `/portfolio/orders` archival behavior described here became universal on **2026-02-19** — completed orders (canceled or fully executed) older than the historical cutoff (`historical.get_historical_cutoff.orders_updated_ts`) no longer appear in `/portfolio/orders` at all. `/historical/orders` is the new source for archived order state. The DEDGAL fix (positions-as-second-source) still works for cross-ticker pairs, but **same-ticker yes/no pairs have no equivalent rescue** — `sync_from_positions` is a no-op for them because `position_fp` is a signed-net scalar (yes − no), useless when both sides are bought. See [[project_cletor_runaway_diagnosis]] for the operational consequence.
+
 ## 2026-03-10 — Verify after every order action
 
 **Context:** Rebalance returned `AMEND_ORDER_NO_OP` (fills resolved the imbalance between proposal and execution). Old code treated this as error and never confirmed the outcome.
