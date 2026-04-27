@@ -1,3 +1,5 @@
+"""Tests that configure_logging tees output to a file in addition to stdout."""
+
 from __future__ import annotations
 
 import io

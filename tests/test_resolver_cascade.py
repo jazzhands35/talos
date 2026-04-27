@@ -1,3 +1,7 @@
+"""Locks the game-status resolver priority order: manual override > milestone > sports GSR. Wrong
+order = wrong exit-only timing.
+"""
+
 from datetime import UTC, datetime
 from typing import Any, cast
 from unittest.mock import MagicMock

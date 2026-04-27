@@ -1,3 +1,7 @@
+"""Locks the add_pairs_from_selection flow on TradingEngine, including rollback on
+resolve/subscribe/persist failure, idempotent retry, and single-batch persistence at the end.
+"""
+
 from contextlib import contextmanager
 from typing import Any, cast
 from unittest.mock import AsyncMock, MagicMock

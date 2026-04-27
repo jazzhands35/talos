@@ -1,3 +1,8 @@
+"""Tests the scanner-tree commit flow: clean adds, removes, winding-down deferral,
+manual-event-start scheduling, schedule-popup integration, and all major failure-path
+preservation guarantees.
+"""
+
 from datetime import UTC, datetime
 from typing import Any, cast
 from unittest.mock import AsyncMock

@@ -1,3 +1,7 @@
+"""Tests TreeScreen tickbox states + interactions: rendering, space-key toggling, monitored vs
+deliberately-unticked vs winding precedence.
+"""
+
 from typing import Any, cast
 from unittest.mock import MagicMock
 

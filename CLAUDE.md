@@ -27,7 +27,9 @@ This applies whenever the request is ambiguous about scope, which file/module is
 pip install -e ".[dev]"
 
 # Tests
-.venv/Scripts/python -m pytest              # all tests
+.venv/Scripts/python -m pytest              # default: skips @pytest.mark.slow (~35s, 1588 tests)
+.venv/Scripts/python -m pytest -m slow      # ONLY slow tests (freeze-diagnosis suite, ~58s)
+.venv/Scripts/python -m pytest -m ""        # full suite, no marker filter (~96s, 1611 tests) — CI default
 .venv/Scripts/python -m pytest tests/test_foo.py  # single file
 .venv/Scripts/python -m pytest -x           # stop on first failure
 .venv/Scripts/python -m pytest -k "test_name"     # run matching tests

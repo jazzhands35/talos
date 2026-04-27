@@ -1,3 +1,7 @@
+"""Tests the milestone-refresh loop: calls the resolver repeatedly and survives transient refresh
+exceptions without dying.
+"""
+
 import asyncio
 from unittest.mock import AsyncMock
 

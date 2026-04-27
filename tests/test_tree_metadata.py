@@ -1,3 +1,7 @@
+"""Tests the TreeMetadataStore wrapper class: manual-event-start, deliberately-unticked lifecycle
+(immediate + pending), persistence roundtrip, and rollback on save failure.
+"""
+
 from datetime import UTC, datetime
 from pathlib import Path
 

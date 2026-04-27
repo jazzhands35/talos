@@ -1,3 +1,7 @@
+"""Tests the wait_for_ready_for_trading startup gate: ready fires when milestones signal, hard cap
+fires after timeout, flag-off mode returns immediately.
+"""
+
 import asyncio
 from typing import Any, cast
 from unittest.mock import MagicMock

@@ -1,3 +1,7 @@
+"""Locks remove_pairs_from_selection on TradingEngine: clean removes, winding-down transitions,
+persistence-failure preservation, force-during-suppress callback handling.
+"""
+
 from contextlib import contextmanager
 from typing import Any, cast
 from unittest.mock import AsyncMock, MagicMock

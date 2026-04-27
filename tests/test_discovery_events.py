@@ -1,3 +1,7 @@
+"""Tests fetch_events caching (TTL respect + refetch after expiry), unknown-series handling, and
+post-cutover volume_24h_fp parsing.
+"""
+
 from datetime import UTC, datetime, timedelta
 from unittest.mock import AsyncMock, patch
 

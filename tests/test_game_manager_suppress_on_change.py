@@ -1,3 +1,7 @@
+"""Tests the suppress_on_change context manager: pauses callback, restores on exit (including on
+exception), nested suppress restores correctly.
+"""
+
 from unittest.mock import MagicMock
 
 from talos.game_manager import GameManager

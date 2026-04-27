@@ -1,3 +1,7 @@
+"""Tests the low-level load_tree_metadata / save_tree_metadata JSON I/O: defaults when missing,
+roundtrip, corrupt-file recovery, partial-file forward-compat backfilling.
+"""
+
 import json
 from pathlib import Path
 
