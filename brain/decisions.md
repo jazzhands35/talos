@@ -480,3 +480,29 @@ Key changes:
 **Decision:** Wrapped the success-path `response.json()` in `try/except (ValueError, UnicodeDecodeError)`, raising `KalshiAPIError` with the raw text. Mirrors the exact pattern already used for error bodies.
 
 **Rationale:** Preserves the typed failure path so the engine's existing `except KalshiAPIError` handlers process it — not just "don't crash" but "crash through the right channel."
+
+## 2026-04-27 — CPM/ETA per-side granularity + test-suite speedup
+
+**Context:** `CPMTracker` was per-ticker only — every trade on a ticker collapsed into one stream. The doc spec at `docs/KALSHI_CPM_AND_ETA.md` had always called for per-(ticker, outcome, book_side, price) granularity, but the implementation never caught up. This blocked the upcoming DRIP/BLIP POC, which needs per-side fill-rate ETA to decide which side is racing.
+
+**Decision (PR #4):**
+- Refactored `CPMTracker._events` from `dict[str, list[(ts, float_qty)]]` → `dict[FlowKey, list[(ts, int_count_fp100)]]`. `FlowKey` is a frozen dataclass `(ticker, outcome, book_side, price_bps)`.
+- Each trade decomposes into TWO flow events using the doc's complement rule: `taker_side == outcome → ASK hit at outcome's price; else → BID hit at the complement price`. Source: structlog `taker_side` field, normalized to `Trade.side` during validation.
+- `eta_minutes` signature is backward-compatible: `(ticker, queue_position, outcome=None, book_side=None, price_bps=None, window_sec=300.0)`. Old callers (`engine.py:2915`, `position_ledger.py:1741-1747`) keep working via aggregate fallback; new callers pass the bucket for per-side ETA.
+- Three-level fallback chain in `eta_minutes`: exact bucket → drop price_bps → drop book_side → return None. Deliberately do NOT fall back to bare-ticker aggregate — after the C1 fix the bare aggregate iterates `outcome=="yes"` only (to avoid double-counting since each trade decomposes into both yes and no buckets), so falling back from a `outcome="no"` query to it would return a yes-side fill rate. Cross-side trap closed.
+- Engine call site at `engine.py:2915` updated to pass `outcome="no", book_side="BID", price_bps=resting_price_bps_val` for per-side stale-position detection. Introduced a separate `resting_price_bps_val = ledger.resting_price_bps(behind_side)` local because `ledger.resting_price()` is the legacy cents accessor (still used by surrounding cents-based logic).
+
+**Test-suite speedup (same PR):** Default dev run dropped from **13:20 → 0:31** (96% reduction) with three surgical fixes:
+1. `_make_engine` test fixture pre-arms `_ready_for_trading` event (engine.py:1340 startup gate); 10 tests dropped from 30s each to 0.01s each.
+2. `scan_series_failed` in `game_manager.py:867-871` logs `error_type + error_msg` instead of `exc_info=True`. With 50+ sports series failing concurrently during a Kalshi outage, serializing 50+ tracebacks to structlog's print sink hit the Windows cp1252 encoding-retry path — `test_scan_handles_api_failure` was 190s. Now 0.01s. Also a modest production win during real outages.
+3. New `slow` pytest marker registered in `pyproject.toml`; default `addopts = "-m 'not slow'"`. `test_freeze_diagnosis.py` (23 tests, ~58s) intentionally simulates hung REST/WS scenarios — opted out of default dev runs but still in CI via `pytest -m ""`.
+
+**Other meta-changes (PR #4 + PR #6):**
+- 20 module docstrings added to test files that lacked them.
+- Deleted `tests/test_tree_screen_skeleton.py` — 19 LOC, 1 test verifying TreeScreen could be instantiated; covered implicitly by `test_tree_screen_render.py` actually rendering.
+- Suppressed pre-existing `reportUnreachable` pyright warning on the defensive `isinstance` check in `engine.add_market_pairs` (intentional runtime guard).
+- CLAUDE.md: cardinal-rule section now explicitly points at the kalshi-mcp server as the mechanism for upholding the rule; Development Commands section reflects the new pytest invocations.
+
+**Rationale:** Per-side ETA unlocks the DRIP/BLIP POC's BLIP threshold (operator-set `BLIP_DELTA_MIN` minutes between behind-side and ahead-side fill ETAs) — see [redesign spec](../docs/superpowers/specs/2026-04-26-drip-staggered-arb-redesign.md) and [DRIP plan](../docs/superpowers/plans/2026-04-26-drip-blip-poc.md). Test speedup is an independent operational win — daily dev iteration was burning 13 minutes per run on what turned out to be ONE shared startup-gate timeout in the test fixture, with another 3 minutes on a structlog traceback explosion specific to the test scenario. Both fixes were single-character or single-line changes once the root cause was found.
+
+**Source-of-truth invariant:** The C1 fix (bare-ticker aggregate iterates yes-only) preserves backward-compat *numerical* semantics for legacy callers — without it, every legacy call would have silently doubled CPM and halved ETA, breaking stale-detection thresholds. Caught by code review before merge; locked by `test_ticker_aggregate_counts_each_trade_once_via_ingest`.
