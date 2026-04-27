@@ -112,6 +112,8 @@ Demo environment by default — production requires explicit opt-in. See `brain/
 
 **Cardinal rule: Kalshi is the single source of truth for positions and resting orders — always, unconditionally, without exception.** Talos must have a 100% accurate picture of what it holds at all times. Every suggestion, safety gate, and action depends on this accuracy. Before any money-touching action, re-fetch from Kalshi. If fresh data is unavailable, do not act. See Principles 7 and 15.
 
+**To uphold this rule, use the `kalshi-mcp` MCP server** for any question about Kalshi endpoint shape, field meaning, or behavior — it's the curated wisdom layer with citations to Kalshi's primary docs and the official fee schedule PDF. Guessing the API or relying on training-data knowledge has historically produced silent correctness bugs in money-touching code; the MCP is how we stay accurate. See the dedicated section below for endpoint-by-endpoint consultation patterns.
+
 ## Current Status
 
 See `brain/architecture.md` for layer completion status.
