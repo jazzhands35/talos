@@ -461,3 +461,79 @@ Applied in: `bid_adjuster.py:evaluate_jump()` — P19 dual-jump tiebreaker. When
 ## Known limitation: position_ledger "no" side filter
 
 `PositionLedger.sync_from_orders()` hardcodes `order.side != "no"` filter for cross-ticker pairs (line 350). Currently safe because all cross-ticker pairs are NO+NO arbs. If cross-ticker YES+NO or YES+YES pairs are ever added, orders on the wrong side would be silently ignored. The same-ticker branch correctly uses `side_map` for disambiguation.
+
+## Pre-arm test-fixture events that gate production startup paths
+
+When a production module guards a path on an `asyncio.Event` that's set by a real-world signal (milestone resolver cascade, WS handshake, lifecycle feed), unit tests that don't wire that signal will block on the gate's hard-cap timeout — multiplied by every test that hits the path.
+
+**Symptom:** a cluster of tests in the slowest-N list all take *exactly* the same number of seconds (e.g. ten tests at 30.0s). The exact-N pattern means a single shared timeout, not ten independent slow operations.
+
+**Fix:** pre-arm the event in the test fixture immediately after construction:
+
+```python
+def _make_engine(**overrides) -> TradingEngine:
+    engine = TradingEngine(...)
+    engine._ready_for_trading.set()  # skip the 30s startup-milestone wait
+    return engine
+```
+
+Tests that genuinely exercise the gate (e.g. `test_engine_startup_gate.py::test_gate_times_out_and_notifies`) construct their own engine with custom-timeout `AutomationConfig` and don't go through the shared fixture. They keep working.
+
+Applied in: `tests/test_engine.py:_make_engine` (5min suite speedup, 2026-04-27).
+
+**General principle:** Production startup gates exist to wait for real-world signals. Tests aren't real-world. The fixture should pre-satisfy whatever gates the tests don't intentionally exercise — or those gates will silently dominate suite runtime.
+
+## Log exception type+msg instead of full traceback when failures fan out
+
+`structlog`'s `logger.warning(..., exc_info=True)` serializes the full traceback. That's fine for one failure. But when a code path fans out N concurrent calls and *all* of them fail simultaneously (Kalshi outage, mass timeout, network partition), serializing N tracebacks at once costs CPU proportional to N × traceback-depth × encoding-retry-path.
+
+On Windows specifically, structlog's `print(message, file=f, flush=True)` sink hits cp1252 encoding retries when traceback frames contain non-Latin-1 characters — turning what should be milliseconds into multi-minute spikes.
+
+**Fix:** capture the exception type and message rather than the full traceback:
+
+```python
+except Exception as exc:
+    logger.warning(
+        "operation_failed",
+        key=key,
+        error_type=type(exc).__name__,
+        error_msg=str(exc),
+    )
+    return fallback
+```
+
+Same diagnostic info for an operator triaging an outage; ~3 orders of magnitude less work per failure.
+
+Applied in: `game_manager.py:scan_series_failed` (190s → 0.01s on `test_scan_handles_api_failure`, 2026-04-27). Production benefit during real Kalshi outages too — fanning out 50+ tracebacks at once was a real CPU spike.
+
+**General principle:** Reserve `exc_info=True` for failures that are *expected to be rare and individually unique*. Use `error_type + error_msg` for failures that fan out from a shared upstream cause where the tracebacks are all redundant.
+
+## Backward-compatible signature evolution: positional anchor + keyword extension
+
+When a public method's signature needs to grow (e.g. `eta_minutes(ticker, queue_position)` gaining a per-bucket variant), keep the original positional signature as the prefix and add the new parameters as keyword-only-defaulting kwargs:
+
+```python
+def eta_minutes(
+    self,
+    ticker: str,
+    queue_position: int,
+    outcome: str | None = None,
+    book_side: str | None = None,
+    price_bps: int | None = None,
+    window_sec: float = 300.0,
+) -> float | None:
+    rate = self.cpm(ticker, outcome, book_side, price_bps, window_sec)
+    if rate is None and price_bps is not None:
+        rate = self.cpm(ticker, outcome, book_side, None, window_sec)
+    if rate is None and book_side is not None:
+        rate = self.cpm(ticker, outcome, None, None, window_sec)
+    if rate is None or rate <= 0:
+        return None
+    return queue_position / rate
+```
+
+Old callers using `eta_minutes(ticker, qp)` keep working (return aggregate); new callers passing the full bucket get per-side ETA. The fallback chain narrows from most-specific to least-specific, with a deliberate stop point that prevents wrong-direction cross-side fallback.
+
+Applied in: `cpm.py:eta_minutes` (2026-04-27 granularity refactor). Avoided a forced flag-day migration of two consumer call sites (`engine.py:2915`, `position_ledger.py:1741-1747`) — one updated to use the new bucket form (`engine.py`), one left on backward-compat (`position_ledger.py`).
+
+**General principle:** When extending a signature consumed by N callers, prefer to keep the original prefix valid + add new params as defaulted kwargs. Forces zero callers to migrate; lets you migrate selectively, prioritizing call sites where the new signature meaningfully improves correctness.
