@@ -1,5 +1,14 @@
 # Kalshi CPM and Fill ETA — How It Works
 
+> **Implementation status (2026-04-26):** `src/talos/cpm.py` matches this
+> doc spec at the per-(ticker, outcome, book_side, price) granularity.
+> Earlier per-ticker-only behavior was fixed in the CPM granularity PR.
+> The fallback chain in `eta_minutes` runs three levels (exact → drop
+> price → drop book_side); we deliberately do NOT fall back further to
+> the bare-ticker aggregate, which would return a yes-side fill rate
+> for a no-side query (the bare aggregate iterates yes-only after the
+> C1 fix to avoid double-counting).
+
 This document explains how to calculate **CPM** (Contracts Per Minute) and **fill ETA** ("up to bat" / "sold out" timers) for resting orders on Kalshi's orderbook. These tell you how fast a price level is trading and how long until your order gets filled.
 
 ## Concepts

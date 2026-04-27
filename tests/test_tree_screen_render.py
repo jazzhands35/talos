@@ -1,3 +1,5 @@
+"""Smoke test: TreeScreen renders categories and series."""
+
 import pytest
 from textual.app import App
 from textual.widgets import Tree

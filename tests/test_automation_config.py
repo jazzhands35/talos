@@ -1,3 +1,8 @@
+"""Regression guard for AutomationConfig defaults and override behavior. Field defaults
+(edge_threshold_cents, stability_seconds, tree_mode, etc.) are load-bearing; partial overrides
+must preserve other defaults.
+"""
+
 from __future__ import annotations
 
 from talos.automation_config import DEFAULT_UNIT_SIZE, AutomationConfig

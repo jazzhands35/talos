@@ -1,3 +1,7 @@
+"""Tests apply_persisted_engine_state on engine startup: restores winding_down / exit_only / active
+states + tolerates missing attrs in older persisted blobs.
+"""
+
 from typing import Any, cast
 from unittest.mock import MagicMock
 

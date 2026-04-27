@@ -1,3 +1,7 @@
+"""Tests for the analyze_stale_recovery debugging tool — parses recovery-event cycles from log
+output.
+"""
+
 from __future__ import annotations
 
 import importlib.util

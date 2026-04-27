@@ -2912,10 +2912,27 @@ class TradingEngine:
                 continue
 
             ticker = pair.ticker_a if behind_side == Side.A else pair.ticker_b
-            eta = self._cpm.eta_minutes(ticker, queue_pos)
+            # Talos's NO+NO arb convention: bids rest on the NO outcome's BID side.
+            # Use per-bucket ETA (post-CPM-granularity-fix) for tighter stale-detection.
+            # `resting_price` above is cents (legacy accessor); CPM expects bps, so use the
+            # exact-precision _bps accessor here without disturbing the cents-based logic below.
+            resting_price_bps_val = ledger.resting_price_bps(behind_side)
+            eta = self._cpm.eta_minutes(
+                ticker,
+                queue_position=queue_pos,
+                outcome="no",
+                book_side="BID",
+                price_bps=resting_price_bps_val,
+            )
             if eta is None:
-                # CPM = 0 means dead market — treat as infinite ETA
-                cpm = self._cpm.cpm(ticker)
+                # CPM = 0 means dead market — treat as infinite ETA. Check the
+                # same per-bucket query for the dead-market signal.
+                cpm = self._cpm.cpm(
+                    ticker,
+                    outcome="no",
+                    book_side="BID",
+                    price_bps=resting_price_bps_val,
+                )
                 if cpm is not None and cpm == 0:
                     eta = float("inf")
                 else:
@@ -3363,12 +3380,15 @@ class TradingEngine:
         from talos.models.market import Event as EventModel
         from talos.models.market import Market as MarketModel
 
-        if not isinstance(event, EventModel):
-            logger.warning(
+        # Defensive runtime guard against UI callers that bypass the typed
+        # signature; pyright correctly notes this is unreachable in well-typed
+        # code, but keep the check for runtime safety.
+        if not isinstance(event, EventModel):  # pyright: ignore[reportUnreachable]
+            logger.warning(  # pyright: ignore[reportUnreachable]
                 "add_market_pairs_bad_event_type",
                 event_type=type(event).__name__,
             )
-            return []
+            return []  # pyright: ignore[reportUnreachable]
         pairs: list[ArbPair] = []
         # Phase 0: collect per-market admission rejections so we can surface
         # a consolidated notification after the loop (separate from the

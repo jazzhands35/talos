@@ -1,3 +1,7 @@
+"""Tests the DiscoveryService bootstrap path: populating categories + series metadata +
+event-counts retry-on-transient-failure.
+"""
+
 from unittest.mock import AsyncMock, patch
 
 import pytest

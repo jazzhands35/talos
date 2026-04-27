@@ -27,7 +27,9 @@ This applies whenever the request is ambiguous about scope, which file/module is
 pip install -e ".[dev]"
 
 # Tests
-.venv/Scripts/python -m pytest              # all tests
+.venv/Scripts/python -m pytest              # default: skips @pytest.mark.slow (~35s, 1588 tests)
+.venv/Scripts/python -m pytest -m slow      # ONLY slow tests (freeze-diagnosis suite, ~58s)
+.venv/Scripts/python -m pytest -m ""        # full suite, no marker filter (~96s, 1611 tests) — CI default
 .venv/Scripts/python -m pytest tests/test_foo.py  # single file
 .venv/Scripts/python -m pytest -x           # stop on first failure
 .venv/Scripts/python -m pytest -k "test_name"     # run matching tests
@@ -111,6 +113,8 @@ Before rebuilding `.exe` files (Talos via `talos.spec`, and any other desktop bo
 Demo environment by default — production requires explicit opt-in. See `brain/principles.md` for all trading rules.
 
 **Cardinal rule: Kalshi is the single source of truth for positions and resting orders — always, unconditionally, without exception.** Talos must have a 100% accurate picture of what it holds at all times. Every suggestion, safety gate, and action depends on this accuracy. Before any money-touching action, re-fetch from Kalshi. If fresh data is unavailable, do not act. See Principles 7 and 15.
+
+**To uphold this rule, use the `kalshi-mcp` MCP server** for any question about Kalshi endpoint shape, field meaning, or behavior — it's the curated wisdom layer with citations to Kalshi's primary docs and the official fee schedule PDF. Guessing the API or relying on training-data knowledge has historically produced silent correctness bugs in money-touching code; the MCP is how we stay accurate. See the dedicated section below for endpoint-by-endpoint consultation patterns.
 
 ## Current Status
 

@@ -1,3 +1,7 @@
+"""Locks the winding-down reconciliation lifecycle: pair removed when flat, stays with inventory,
+sibling-pair handling, failure preservation. Post-CLE-TOR scar tissue.
+"""
+
 from typing import Any, cast
 from unittest.mock import AsyncMock, MagicMock
 

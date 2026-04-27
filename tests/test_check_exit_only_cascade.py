@@ -1,3 +1,7 @@
+"""Locks the exit-only sibling-cascade logic: when one event flips to exit-only via milestone,
+sports GSR, or manual opt-out, sibling pairs in the same event must follow.
+"""
+
 from datetime import UTC, datetime, timedelta
 from typing import Any, cast
 from unittest.mock import MagicMock

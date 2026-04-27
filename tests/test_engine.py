@@ -45,7 +45,12 @@ from talos.top_of_market import TopOfMarketTracker
 
 
 def _make_engine(**overrides) -> TradingEngine:
-    """Build a TradingEngine with mock dependencies."""
+    """Build a TradingEngine with mock dependencies.
+
+    Pre-arms _ready_for_trading so tests don't pay the 30s startup-milestone
+    wait on every refresh_account call. Tests that need to exercise the
+    startup gate explicitly clear the event after construction.
+    """
     books = OrderBookManager()
     scanner = overrides.pop("scanner", ArbitrageScanner(books))
     defaults = dict(
@@ -57,7 +62,9 @@ def _make_engine(**overrides) -> TradingEngine:
         adjuster=overrides.pop("adjuster", BidAdjuster(books, [], unit_size=10)),
     )
     defaults.update(overrides)
-    return TradingEngine(**defaults)
+    engine = TradingEngine(**defaults)
+    engine._ready_for_trading.set()
+    return engine
 
 
 class TestScaffold:
@@ -882,6 +889,7 @@ def _engine_with_automation() -> tuple[TradingEngine, AsyncMock]:
         adjuster=adjuster,
         automation_config=config,
     )
+    engine._ready_for_trading.set()  # skip the 30s startup-milestone wait
     return engine, rest
 
 

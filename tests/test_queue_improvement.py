@@ -9,6 +9,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from talos.bid_adjuster import BidAdjuster
+from talos.cpm import FlowKey
 from talos.engine import TradingEngine
 from talos.game_manager import GameManager
 from talos.game_status import GameStatus, GameStatusResolver
@@ -22,25 +23,53 @@ from talos.position_ledger import Side
 from talos.rest_client import KalshiRESTClient
 from talos.scanner import ArbitrageScanner
 from talos.top_of_market import TopOfMarketTracker
+from talos.units import ONE_CONTRACT_FP100
 
 
-def _seed_cpm(engine: TradingEngine, ticker: str, cpm_value: float) -> None:
-    """Seed the CPM tracker with synthetic trade events producing the given CPM."""
+def _seed_cpm(
+    engine: TradingEngine,
+    ticker: str,
+    cpm_value: float,
+    *,
+    outcome: str = "no",
+    book_side: str = "BID",
+    price_bps: int = 4100,
+) -> None:
+    """Seed the CPM tracker with synthetic trade events producing the given CPM.
+
+    Defaults match how engine.check_queue_stress queries the behind side:
+    outcome="no", book_side="BID", price_bps=4100 (41¢ resting price the
+    tests use). Storage is FlowKey-keyed and units are count_fp100 — both
+    follow the post-bps-migration / post-granularity-refactor cpm.py.
+    """
     now = time.time()
-    # Spread events over 5 minutes (300s) — CPM tracker uses 300s window
-    events: list[tuple[float, float]] = []
+    # Spread events over 5 minutes (300s) — CPM tracker uses 300s window.
+    # Total contracts in window = cpm_value * 5; convert to fp100 and split
+    # across 6 buckets.
+    total_fp100 = int(round(cpm_value * 5 * ONE_CONTRACT_FP100))
+    per_event_fp100 = total_fp100 // 6
+    events: list[tuple[float, int]] = []
     for i in range(6):
-        events.append((now - 300 + i * 50, cpm_value * (300 / 60) / 6))
-    engine._cpm._events[ticker] = events
+        events.append((now - 300 + i * 50, per_event_fp100))
+    key = FlowKey(ticker=ticker, outcome=outcome, book_side=book_side, price_bps=price_bps)
+    engine._cpm._events[key] = events
 
 
-def _seed_cpm_zero(engine: TradingEngine, ticker: str) -> None:
+def _seed_cpm_zero(
+    engine: TradingEngine,
+    ticker: str,
+    *,
+    outcome: str = "no",
+    book_side: str = "BID",
+    price_bps: int = 4100,
+) -> None:
     """Seed the CPM tracker with zero-volume events (dead market)."""
     now = time.time()
-    events: list[tuple[float, float]] = []
+    events: list[tuple[float, int]] = []
     for i in range(6):
-        events.append((now - 300 + i * 50, 0.0))
-    engine._cpm._events[ticker] = events
+        events.append((now - 300 + i * 50, 0))
+    key = FlowKey(ticker=ticker, outcome=outcome, book_side=book_side, price_bps=price_bps)
+    engine._cpm._events[key] = events
 
 
 def _make_pair(

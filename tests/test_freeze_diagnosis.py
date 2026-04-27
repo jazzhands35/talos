@@ -14,6 +14,8 @@ import contextlib
 import time
 from unittest.mock import AsyncMock, MagicMock
 
+import pytest
+
 from talos.automation_config import AutomationConfig
 from talos.bid_adjuster import BidAdjuster
 from talos.engine import TradingEngine
@@ -24,6 +26,12 @@ from talos.orderbook import OrderBookManager
 from talos.scanner import ArbitrageScanner
 from talos.top_of_market import TopOfMarketTracker
 from talos.ui.app import TalosApp
+
+# Every test in this module deliberately simulates slow/hanging REST or WS
+# scenarios to verify Talos doesn't deadlock. They EARN their seconds — but
+# they're not needed on every dev iteration. Skipped by default; run via
+# `pytest -m slow` or `pytest -m ""` (no filter) for the full suite.
+pytestmark = pytest.mark.slow
 
 # ── Helpers ──────────────────────────────────────────────────
 

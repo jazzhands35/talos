@@ -1,3 +1,7 @@
+"""Tests the MilestoneResolver class: atomic index refresh, failure preserves old index, is_healthy
+slack-window logic.
+"""
+
 from datetime import UTC, datetime
 from unittest.mock import AsyncMock, patch
 
