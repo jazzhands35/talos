@@ -63,8 +63,17 @@ def format_cpm(value: float | None, partial: bool = False) -> str:
     return text
 
 
-def format_eta(minutes: float | None, partial: bool = False) -> str:
-    """Format an ETA in minutes for display."""
+def format_eta(
+    minutes: float | None,
+    partial: bool = False,
+    round_hours_after: float | None = None,
+) -> str:
+    """Format an ETA in minutes for display.
+
+    round_hours_after: if set, hours larger than this are rounded to whole
+    hours (e.g. ``round_hours_after=5.0`` → '8h' instead of '8.0h' for
+    long-tail ETAs where decimal precision is meaningless).
+    """
     if minutes is None:
         return "—"
     m = max(0.0, float(minutes))
@@ -72,7 +81,10 @@ def format_eta(minutes: float | None, partial: bool = False) -> str:
         text = "∞"
     elif m >= 60:
         hours = m / 60.0
-        text = f"{hours:.1f}h"
+        if round_hours_after is not None and hours > round_hours_after:
+            text = f"{int(round(hours))}h"
+        else:
+            text = f"{hours:.1f}h"
     else:
         text = f"{max(1, int(round(m)))}m"
     if partial:
@@ -103,12 +115,13 @@ class CPMTracker:
         Decomposition rule (from doc spec):
           taker_side == outcome → ASK hit at outcome's price
           taker_side != outcome → BID hit at outcome's price
+
+        Trades without a recoverable price (1 <= yes_price_bps <= 9_999) are
+        skipped — bucketing them at 0 or 10_000 would pollute flow_count.
         """
         for t in trades:
             if t.trade_id in self._seen:
                 continue
-            self._seen.add(t.trade_id)
-            ts = _parse_iso(t.created_time)
             yes_price_bps = (
                 t.yes_price_bps if t.yes_price_bps is not None else t.price_bps
             )
@@ -117,6 +130,12 @@ class CPMTracker:
                 if t.no_price_bps is not None
                 else (10_000 - yes_price_bps)
             )
+            # Skip trades without a usable price — bucketing at the extremes
+            # would be misleading.
+            if not (1 <= yes_price_bps <= 9_999):
+                continue
+            self._seen.add(t.trade_id)
+            ts = _parse_iso(t.created_time)
 
             # YES-outcome bucket.
             yes_book_side = "ASK" if t.side == "yes" else "BID"
@@ -179,13 +198,24 @@ class CPMTracker:
 
         If outcome/book_side/price_bps are all provided → per-bucket CPM.
         If any are None → aggregate across the unspecified dimensions for
-        that ticker (doc spec's "fallback" behavior).
+        that ticker.
+
+        IMPORTANT: when ALL of outcome/book_side/price_bps are None
+        (bare-ticker aggregate), iteration is restricted to one outcome side
+        because each trade decomposes into a yes-bucket and a no-bucket event
+        with the same count_fp100. Iterating one side counts each trade
+        exactly once. Without this guard, ticker-aggregate would double.
 
         Returns None when no events match.
         """
+        # Bare-ticker aggregate: each trade decomposes into yes+no events with
+        # the same count. Iterate ONE outcome to count each trade exactly once.
+        bare_aggregate = outcome is None and book_side is None and price_bps is None
         matching: list[tuple[float, int]] = []
         for key, events in self._events.items():
             if key.ticker != ticker:
+                continue
+            if bare_aggregate and key.outcome != "yes":
                 continue
             if outcome is not None and key.outcome != outcome:
                 continue
@@ -216,9 +246,12 @@ class CPMTracker:
         window_sec: float = 300.0,
     ) -> bool:
         """True if observed time is shorter than the window (extrapolation flag)."""
+        bare_aggregate = outcome is None and book_side is None and price_bps is None
         matching_ts: list[float] = []
         for key, events in self._events.items():
             if key.ticker != ticker:
+                continue
+            if bare_aggregate and key.outcome != "yes":
                 continue
             if outcome is not None and key.outcome != outcome:
                 continue

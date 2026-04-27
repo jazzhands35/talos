@@ -81,7 +81,9 @@ class TestCPM:
         now = time.time()
         # Seed an arbitrary FlowKey directly in the new shape (int count_fp100).
         # 30 contracts (3000 fp100) over the 5-minute window → CPM > 0.
-        key = FlowKey(ticker="MKT-A", outcome="no", book_side="ASK", price_bps=5000)
+        # Use outcome="yes" so bare-ticker aggregate (which iterates yes-only
+        # to avoid double-counting after the granularity refactor) sees it.
+        key = FlowKey(ticker="MKT-A", outcome="yes", book_side="ASK", price_bps=5000)
         tracker._events[key] = [(now - 60 * i, 1000) for i in range(3)]
         result = tracker.cpm("MKT-A", window_sec=300.0)
         assert result is not None
@@ -95,7 +97,7 @@ class TestCPM:
         tracker = CPMTracker()
         # All trades are old (1 hour ago). Use new shape (int count_fp100).
         old = time.time() - 3600
-        key = FlowKey(ticker="MKT-A", outcome="no", book_side="ASK", price_bps=5000)
+        key = FlowKey(ticker="MKT-A", outcome="yes", book_side="ASK", price_bps=5000)
         tracker._events[key] = [(old, 1000)]
         result = tracker.cpm("MKT-A", window_sec=300.0)
         assert result == 0.0
@@ -104,7 +106,7 @@ class TestCPM:
         tracker = CPMTracker()
         now = time.time()
         # 10 contracts (1000 fp100) just 30 seconds ago.
-        key = FlowKey(ticker="MKT-A", outcome="no", book_side="ASK", price_bps=5000)
+        key = FlowKey(ticker="MKT-A", outcome="yes", book_side="ASK", price_bps=5000)
         tracker._events[key] = [(now - 30, 1000)]
         result = tracker.cpm("MKT-A", window_sec=300.0)
         assert result is not None
@@ -125,7 +127,8 @@ class TestIsPartial:
 
     def test_not_partial_with_long_observation(self) -> None:
         tracker = CPMTracker()
-        key = FlowKey(ticker="MKT-A", outcome="no", book_side="ASK", price_bps=5000)
+        # Bare-ticker aggregate iterates yes-only, so seed yes-side.
+        key = FlowKey(ticker="MKT-A", outcome="yes", book_side="ASK", price_bps=5000)
         tracker._events[key] = [(time.time() - 400, 1000)]
         assert tracker.is_partial("MKT-A", window_sec=300.0) is False
 
@@ -135,7 +138,8 @@ class TestETA:
         tracker = CPMTracker()
         now = time.time()
         # 60 contracts (6000 fp100) in ~5 min → ~12 CPM.
-        key = FlowKey(ticker="MKT-A", outcome="no", book_side="ASK", price_bps=5000)
+        # Bare-ticker eta_minutes uses bare-ticker cpm (yes-only iteration).
+        key = FlowKey(ticker="MKT-A", outcome="yes", book_side="ASK", price_bps=5000)
         tracker._events[key] = [(now - 250, 6000)]
         eta = tracker.eta_minutes("MKT-A", queue_position=24)
         assert eta is not None
@@ -211,7 +215,7 @@ class TestFormatETA:
         assert format_eta(150.0) == "2.5h"
 
     def test_large_hours_rounded(self) -> None:
-        assert format_eta(480.0) == "8.0h"
+        assert format_eta(8 * 60.0, round_hours_after=5.0) == "8h"
 
     def test_infinity(self) -> None:
         assert format_eta(float("inf")) == "∞"
@@ -253,3 +257,76 @@ class TestDecomposition:
         yes_bid_5500 = FlowKey(ticker="KX-TEST", outcome="yes", book_side="BID", price_bps=5500)
         assert tracker.flow_count(no_ask_4500) == 200
         assert tracker.flow_count(yes_bid_5500) == 200
+
+
+def test_ticker_aggregate_counts_each_trade_once_via_ingest():
+    """Bare-ticker aggregate must NOT double-count after the granularity refactor.
+
+    Ingesting one trade with count_fp=3 should yield aggregate flow of 3 contracts,
+    not 6 (which would be the bug if we summed across both yes and no buckets).
+    """
+    tracker = CPMTracker()
+    trade = _make_trade(taker_side="yes", yes_price_dollars="0.55", count_fp="3")
+    tracker.ingest("KX-TEST", [trade])
+    # cpm with all None bucket params = bare-ticker aggregate.
+    rate = tracker.cpm("KX-TEST", window_sec=300.0)
+    assert rate is not None
+    # Each trade decomposes into 2 buckets at 300 fp100 each. The bare-ticker
+    # aggregate restricts to one outcome side → 300 fp100 = 3 contracts (not 6).
+    # Verify by also asserting the per-outcome aggregate equals the bare aggregate:
+    rate_yes = tracker.cpm("KX-TEST", outcome="yes", window_sec=300.0)
+    assert rate_yes is not None
+    assert abs(rate - rate_yes) < 1e-9, (
+        f"bare aggregate {rate} should equal yes-only {rate_yes}"
+    )
+
+
+def test_ticker_aggregate_with_n_trades_scales_linearly():
+    """N trades on the same ticker with count_fp=1 each → aggregate ~ N, not 2N."""
+    tracker = CPMTracker()
+    trades = [
+        _make_trade(
+            trade_id=f"t{i}",
+            taker_side="yes",
+            yes_price_dollars="0.50",
+            count_fp="1",
+        )
+        for i in range(10)
+    ]
+    tracker.ingest("KX-TEST", trades)
+    # Sum of all flow_counts across yes-bucket only = 10 trades * 100 fp100 = 1000.
+    yes_ask_5000 = FlowKey(ticker="KX-TEST", outcome="yes", book_side="ASK", price_bps=5000)
+    no_bid_5000 = FlowKey(ticker="KX-TEST", outcome="no", book_side="BID", price_bps=5000)
+    assert tracker.flow_count(yes_ask_5000) == 1000
+    assert tracker.flow_count(no_bid_5000) == 1000  # decomposition produces both
+    # But bare-ticker aggregate counts only ONE side → 10 contracts, not 20.
+    rate = tracker.cpm("KX-TEST", window_sec=3600.0)
+    assert rate is not None
+    rate_yes = tracker.cpm("KX-TEST", outcome="yes", window_sec=3600.0)
+    assert rate_yes is not None
+    # Bare aggregate must equal the yes-only aggregate (one-side iteration).
+    assert abs(rate - rate_yes) < 1e-9, (
+        f"bare aggregate {rate} should equal yes-only {rate_yes}"
+    )
+
+
+def test_ingest_skips_trade_with_invalid_price():
+    """Trade with price_bps=0 (no recoverable price) is dropped, not bucketed at extremes."""
+    # Build a trade directly with no usable price (bypass model_validate dollar path).
+    bad_trade = Trade(
+        ticker="KX-TEST",
+        trade_id="bad",
+        side="yes",
+        created_time="2026-04-26T00:00:00Z",
+        price_bps=0,
+        count_fp100=100,
+    )
+    tracker = CPMTracker()
+    tracker.ingest("KX-TEST", [bad_trade])
+    # Nothing should be in any bucket at the extremes.
+    yes_at_0 = FlowKey(ticker="KX-TEST", outcome="yes", book_side="ASK", price_bps=0)
+    no_at_10000 = FlowKey(ticker="KX-TEST", outcome="no", book_side="BID", price_bps=10_000)
+    assert tracker.flow_count(yes_at_0) == 0
+    assert tracker.flow_count(no_at_10000) == 0
+    # Not added to _seen — could re-evaluate if price becomes recoverable.
+    assert "bad" not in tracker._seen
