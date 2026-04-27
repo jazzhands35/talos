@@ -19,7 +19,7 @@ from dataclasses import dataclass
 from datetime import datetime
 
 from talos.models.market import Trade
-from talos.units import ONE_CONTRACT_FP100
+from talos.units import ONE_CONTRACT_FP100, ONE_DOLLAR_BPS
 
 
 def _parse_iso(ts: str) -> float:
@@ -128,7 +128,7 @@ class CPMTracker:
             no_price_bps = (
                 t.no_price_bps
                 if t.no_price_bps is not None
-                else (10_000 - yes_price_bps)
+                else (ONE_DOLLAR_BPS - yes_price_bps)
             )
             # Skip trades without a usable price — bucketing at the extremes
             # would be misleading.
