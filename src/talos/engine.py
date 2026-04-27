@@ -2912,10 +2912,27 @@ class TradingEngine:
                 continue
 
             ticker = pair.ticker_a if behind_side == Side.A else pair.ticker_b
-            eta = self._cpm.eta_minutes(ticker, queue_pos)
+            # Talos's NO+NO arb convention: bids rest on the NO outcome's BID side.
+            # Use per-bucket ETA (post-CPM-granularity-fix) for tighter stale-detection.
+            # `resting_price` above is cents (legacy accessor); CPM expects bps, so use the
+            # exact-precision _bps accessor here without disturbing the cents-based logic below.
+            resting_price_bps_val = ledger.resting_price_bps(behind_side)
+            eta = self._cpm.eta_minutes(
+                ticker,
+                queue_position=queue_pos,
+                outcome="no",
+                book_side="BID",
+                price_bps=resting_price_bps_val,
+            )
             if eta is None:
-                # CPM = 0 means dead market — treat as infinite ETA
-                cpm = self._cpm.cpm(ticker)
+                # CPM = 0 means dead market — treat as infinite ETA. Check the
+                # same per-bucket query for the dead-market signal.
+                cpm = self._cpm.cpm(
+                    ticker,
+                    outcome="no",
+                    book_side="BID",
+                    price_bps=resting_price_bps_val,
+                )
                 if cpm is not None and cpm == 0:
                     eta = float("inf")
                 else:
