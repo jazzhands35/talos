@@ -1,13 +1,21 @@
 """Trade flow tracking and CPM/ETA computation.
 
-CPM (Contracts Per Minute) measures how fast a market is trading.
-ETA estimates how long until a resting order fills based on queue position and CPM.
+CPM (Contracts Per Minute) measures how fast a market is trading at a
+specific (outcome, book_side, price) bucket. ETA estimates how long until
+a resting order fills given queue position and CPM.
+
+Granularity per docs/KALSHI_CPM_AND_ETA.md: each trade decomposes into TWO
+flow events using the complement relation. A trade with taker_side==X at
+YES=p produces:
+  - X-outcome  ASK at price-X
+  - !X-outcome BID at price-!X (complement, derived from YES+NO=1)
 """
 
 from __future__ import annotations
 
 import math
 import time
+from dataclasses import dataclass
 from datetime import datetime
 
 from talos.models.market import Trade
@@ -21,6 +29,20 @@ def _parse_iso(ts: str) -> float:
         return dt.timestamp()
     except (ValueError, AttributeError):
         return time.time()
+
+
+@dataclass(frozen=True)
+class FlowKey:
+    """One bucket of trade flow.
+
+    Frozen + hashable so it's a valid dict key. Matches the doc spec's
+    composite key: ``(ticker, outcome, book_side, price)``.
+    """
+
+    ticker: str
+    outcome: str  # "yes" | "no"
+    book_side: str  # "BID" | "ASK"
+    price_bps: int  # 0..10_000
 
 
 def format_cpm(value: float | None, partial: bool = False) -> str:
@@ -50,7 +72,7 @@ def format_eta(minutes: float | None, partial: bool = False) -> str:
         text = "∞"
     elif m >= 60:
         hours = m / 60.0
-        text = f"{int(round(hours))}h" if hours > 5.0 else f"{hours:.1f}h"
+        text = f"{hours:.1f}h"
     else:
         text = f"{max(1, int(round(m)))}m"
     if partial:
@@ -59,74 +81,185 @@ def format_eta(minutes: float | None, partial: bool = False) -> str:
 
 
 class CPMTracker:
-    """Pure state machine that tracks trade flow and computes CPM/ETA per ticker.
+    """Pure state machine that tracks trade flow per (ticker, outcome,
+    book_side, price) and computes CPM/ETA over rolling windows.
 
-    Ingests trades, deduplicates by trade_id, and computes contracts-per-minute
-    over configurable windows.  Follows the doc spec in KALSHI_CPM_AND_ETA.md.
+    Storage is keyed by FlowKey. ``ingest`` decomposes each trade into TWO
+    flow events using the doc spec's taker_side rule.
     """
 
     _MAX_SEEN = 20_000
     _MAX_EVENTS_PER_KEY = 320
 
     def __init__(self) -> None:
-        self._events: dict[str, list[tuple[float, float]]] = {}
+        # FlowKey → list of (timestamp, count_fp100) tuples.
+        self._events: dict[FlowKey, list[tuple[float, int]]] = {}
         self._seen: set[str] = set()
 
     def ingest(self, ticker: str, trades: list[Trade]) -> None:
-        """Add trades, deduplicating by trade_id."""
-        events = self._events.setdefault(ticker, [])
+        """Add trades, deduplicating by trade_id, decomposing each into TWO
+        flow events (yes-side and no-side).
+
+        Decomposition rule (from doc spec):
+          taker_side == outcome → ASK hit at outcome's price
+          taker_side != outcome → BID hit at outcome's price
+        """
         for t in trades:
             if t.trade_id in self._seen:
                 continue
             self._seen.add(t.trade_id)
             ts = _parse_iso(t.created_time)
-            events.append((ts, float(t.count_fp100) / ONE_CONTRACT_FP100))
-        # Cap per-key to avoid unbounded growth
+            yes_price_bps = (
+                t.yes_price_bps if t.yes_price_bps is not None else t.price_bps
+            )
+            no_price_bps = (
+                t.no_price_bps
+                if t.no_price_bps is not None
+                else (10_000 - yes_price_bps)
+            )
+
+            # YES-outcome bucket.
+            yes_book_side = "ASK" if t.side == "yes" else "BID"
+            yes_key = FlowKey(
+                ticker=ticker,
+                outcome="yes",
+                book_side=yes_book_side,
+                price_bps=yes_price_bps,
+            )
+            self._append(yes_key, ts, t.count_fp100)
+
+            # NO-outcome bucket.
+            no_book_side = "ASK" if t.side == "no" else "BID"
+            no_key = FlowKey(
+                ticker=ticker,
+                outcome="no",
+                book_side=no_book_side,
+                price_bps=no_price_bps,
+            )
+            self._append(no_key, ts, t.count_fp100)
+
+        if len(self._seen) > self._MAX_SEEN:
+            self._seen.clear()
+
+    def _append(self, key: FlowKey, ts: float, count_fp100: int) -> None:
+        events = self._events.setdefault(key, [])
+        events.append((ts, count_fp100))
         if len(events) > self._MAX_EVENTS_PER_KEY:
-            self._events[ticker] = events[-self._MAX_EVENTS_PER_KEY :]
+            self._events[key] = events[-self._MAX_EVENTS_PER_KEY :]
 
     def prune(self, max_age: float = 3700.0) -> None:
         """Remove events older than max_age seconds."""
         cutoff = time.time() - max_age
-        for ticker in list(self._events):
-            self._events[ticker] = [(ts, qty) for ts, qty in self._events[ticker] if ts >= cutoff]
-            if not self._events[ticker]:
-                del self._events[ticker]
+        for key in list(self._events):
+            self._events[key] = [(ts, c) for ts, c in self._events[key] if ts >= cutoff]
+            if not self._events[key]:
+                del self._events[key]
         if len(self._seen) > self._MAX_SEEN:
             self._seen.clear()
 
-    def cpm(self, ticker: str, window_sec: float = 300.0) -> float | None:
-        """Contracts per minute over the given window. None if no data."""
-        events = self._events.get(ticker)
+    def flow_count(self, key: FlowKey, max_age: float | None = None) -> int:
+        """Total count_fp100 in a flow bucket. ``max_age`` of None = all events."""
+        events = self._events.get(key)
         if not events:
+            return 0
+        if max_age is None:
+            return sum(c for _, c in events)
+        cutoff = time.time() - max_age
+        return sum(c for ts, c in events if ts >= cutoff)
+
+    def cpm(
+        self,
+        ticker: str,
+        outcome: str | None = None,
+        book_side: str | None = None,
+        price_bps: int | None = None,
+        window_sec: float = 300.0,
+    ) -> float | None:
+        """Contracts per minute over the given window, optionally filtered.
+
+        If outcome/book_side/price_bps are all provided → per-bucket CPM.
+        If any are None → aggregate across the unspecified dimensions for
+        that ticker (doc spec's "fallback" behavior).
+
+        Returns None when no events match.
+        """
+        matching: list[tuple[float, int]] = []
+        for key, events in self._events.items():
+            if key.ticker != ticker:
+                continue
+            if outcome is not None and key.outcome != outcome:
+                continue
+            if book_side is not None and key.book_side != book_side:
+                continue
+            if price_bps is not None and key.price_bps != price_bps:
+                continue
+            matching.extend(events)
+        if not matching:
             return None
         now = time.time()
         cutoff = now - window_sec
-        qty_sum = sum(qty for ts, qty in events if ts >= cutoff)
-        if qty_sum == 0:
+        qty_sum_fp100 = sum(c for ts, c in matching if ts >= cutoff)
+        if qty_sum_fp100 == 0:
             return 0.0
-        # Use actual observed time if less than the full window
-        first_ts = min(ts for ts, _ in events)
+        first_ts = min(ts for ts, _ in matching)
         observed = now - first_ts
         use_sec = min(window_sec, max(1.0, observed))
-        return qty_sum / (use_sec / 60.0)
+        qty_sum_contracts = qty_sum_fp100 / ONE_CONTRACT_FP100
+        return qty_sum_contracts / (use_sec / 60.0)
 
-    def is_partial(self, ticker: str, window_sec: float = 300.0) -> bool:
-        """True if we have less than window_sec of observation data."""
-        events = self._events.get(ticker)
-        if not events:
+    def is_partial(
+        self,
+        ticker: str,
+        outcome: str | None = None,
+        book_side: str | None = None,
+        price_bps: int | None = None,
+        window_sec: float = 300.0,
+    ) -> bool:
+        """True if observed time is shorter than the window (extrapolation flag)."""
+        matching_ts: list[float] = []
+        for key, events in self._events.items():
+            if key.ticker != ticker:
+                continue
+            if outcome is not None and key.outcome != outcome:
+                continue
+            if book_side is not None and key.book_side != book_side:
+                continue
+            if price_bps is not None and key.price_bps != price_bps:
+                continue
+            matching_ts.extend(ts for ts, _ in events)
+        if not matching_ts:
             return True
-        first_ts = min(ts for ts, _ in events)
-        return (time.time() - first_ts) < window_sec
+        return (time.time() - min(matching_ts)) < window_sec
 
-    def eta_minutes(self, ticker: str, queue_position: int) -> float | None:
-        """Estimated minutes until queue_position contracts ahead are filled."""
-        rate = self.cpm(ticker)
+    def eta_minutes(
+        self,
+        ticker: str,
+        queue_position: int,
+        outcome: str | None = None,
+        book_side: str | None = None,
+        price_bps: int | None = None,
+        window_sec: float = 300.0,
+    ) -> float | None:
+        """Estimated minutes until ``queue_position`` contracts ahead of you fill,
+        optionally narrowed to a specific (outcome, book_side, price_bps) bucket.
+
+        BACKWARD-COMPATIBLE: callers passing only (ticker, queue_position) get
+        the ticker-aggregate ETA (matches old behavior). Callers passing the
+        full bucket get per-side ETA. Falls back from per-bucket → per-side
+        aggregate → ticker aggregate when any narrower level has no data.
+        """
+        rate = self.cpm(ticker, outcome, book_side, price_bps, window_sec)
+        if rate is None and price_bps is not None:
+            rate = self.cpm(ticker, outcome, book_side, None, window_sec)
+        if rate is None and book_side is not None:
+            rate = self.cpm(ticker, outcome, None, None, window_sec)
+        if rate is None and outcome is not None:
+            rate = self.cpm(ticker, None, None, None, window_sec)
         if rate is None or rate <= 0:
             return None
         return queue_position / rate
 
     @property
     def tickers(self) -> list[str]:
-        """Tickers with at least one event."""
-        return list(self._events.keys())
+        """Distinct tickers seen at least once."""
+        return list({k.ticker for k in self._events})
