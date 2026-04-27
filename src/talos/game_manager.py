@@ -866,8 +866,19 @@ class GameManager:
                             with_nested_markets=True,
                             limit=200,
                         )
-                    except Exception:
-                        logger.warning("scan_series_failed", series=series, exc_info=True)
+                    except Exception as exc:
+                        # Log type+message rather than a full traceback. With many
+                        # series failing concurrently (e.g. a Kalshi-side outage),
+                        # 50+ tracebacks serialized at once cost ~3 minutes of CPU
+                        # on Windows due to encoding-retry loops. The exception
+                        # type + message is enough to diagnose; if a deeper trace
+                        # is ever needed, raise to a wider catch upstream.
+                        logger.warning(
+                            "scan_series_failed",
+                            series=series,
+                            error_type=type(exc).__name__,
+                            error_msg=str(exc),
+                        )
                         return []
 
             all_results = await asyncio.gather(*(fetch_series(s) for s in SPORTS_SERIES))
