@@ -3380,12 +3380,15 @@ class TradingEngine:
         from talos.models.market import Event as EventModel
         from talos.models.market import Market as MarketModel
 
-        if not isinstance(event, EventModel):
-            logger.warning(
+        # Defensive runtime guard against UI callers that bypass the typed
+        # signature; pyright correctly notes this is unreachable in well-typed
+        # code, but keep the check for runtime safety.
+        if not isinstance(event, EventModel):  # pyright: ignore[reportUnreachable]
+            logger.warning(  # pyright: ignore[reportUnreachable]
                 "add_market_pairs_bad_event_type",
                 event_type=type(event).__name__,
             )
-            return []
+            return []  # pyright: ignore[reportUnreachable]
         pairs: list[ArbPair] = []
         # Phase 0: collect per-market admission rejections so we can surface
         # a consolidated notification after the loop (separate from the
