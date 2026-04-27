@@ -75,6 +75,14 @@ games_full.json
 panel_debug.txt
 test_output*.txt
 all_sports_series.txt
+tree_metadata.json
+talos_startup_dump.txt
+tools/_series_cache.json
+
+# Agent runtime artifacts
+.brainstorm-codex-loop/
+.claude/brainstorm-codex-loop/
+.claude/worktrees/
 
 # Icon design iterations
 icons/*
