@@ -310,6 +310,132 @@ def test_ticker_aggregate_with_n_trades_scales_linearly():
     )
 
 
+def test_per_bucket_isolation_vs_bare_aggregate():
+    """Two trades on opposite outcomes: per-bucket CPM isolates one trade's
+    contribution; bare-ticker aggregate (yes-only after C1 fix) counts each
+    trade exactly once.
+    """
+    import time as _time
+    from unittest.mock import patch
+
+    tracker = CPMTracker()
+    now = _time.time()
+    with patch("talos.cpm.time.time", return_value=now):
+        with patch("talos.cpm._parse_iso", return_value=now - 60):
+            tracker.ingest(
+                "KX-TEST",
+                [
+                    _make_trade(
+                        trade_id="t1",
+                        taker_side="yes",
+                        yes_price_dollars="0.55",
+                        count_fp="6",
+                    ),
+                    _make_trade(
+                        trade_id="t2",
+                        taker_side="no",
+                        yes_price_dollars="0.45",
+                        count_fp="6",
+                    ),
+                ],
+            )
+
+        # Per-bucket: yes-ASK-5500 sees t1's contribution only.
+        # 6 contracts over observed=60s → use_sec=60s → CPM = 6 / 1 min = 6.0.
+        per_bucket = tracker.cpm(
+            "KX-TEST", "yes", "ASK", 5500, window_sec=300.0
+        )
+        assert per_bucket is not None
+        assert abs(per_bucket - 6.0) < 0.01
+
+        # Bare-ticker aggregate (yes-only after C1 fix): yes-ASK-5500 (t1, 6)
+        # + yes-BID-5500 (t2, 6) = 12 contracts / 1 min = 12.0.
+        aggregate = tracker.cpm("KX-TEST", window_sec=300.0)
+        assert aggregate is not None
+        assert abs(aggregate - 12.0) < 0.01
+
+
+def test_eta_minutes_fallback_chain():
+    """eta_minutes broadens its CPM source when narrower buckets have no data.
+
+    Chain: (outcome, book_side, price_bps)
+         -> (outcome, book_side, None)    # drop price
+         -> (outcome, None, None)         # drop book_side
+         -> (None, None, None)            # drop outcome (ticker aggregate)
+    """
+    import time as _time
+    from unittest.mock import patch
+
+    tracker = CPMTracker()
+    now = _time.time()
+    with patch("talos.cpm.time.time", return_value=now):
+        with patch("talos.cpm._parse_iso", return_value=now - 60):
+            # Single trade: produces yes-ASK-5500 and no-BID-4500, each 6 contracts.
+            tracker.ingest(
+                "KX-TEST",
+                [
+                    _make_trade(
+                        trade_id="t1",
+                        taker_side="yes",
+                        yes_price_dollars="0.55",
+                        count_fp="6",
+                    ),
+                ],
+            )
+
+        # Exact bucket has data: per-bucket CPM applies.
+        # 6 contracts / 1 min = 6 cpm → ETA = 12 / 6 = 2 min.
+        eta_exact = tracker.eta_minutes(
+            "KX-TEST",
+            queue_position=12,
+            outcome="yes",
+            book_side="ASK",
+            price_bps=5500,
+            window_sec=300.0,
+        )
+        assert eta_exact is not None
+        assert abs(eta_exact - 2.0) < 0.01
+
+        # Different price on same outcome+book_side: per-bucket empty →
+        # fall back to (yes, ASK, *) which sees yes-ASK-5500.
+        eta_drop_price = tracker.eta_minutes(
+            "KX-TEST",
+            queue_position=12,
+            outcome="yes",
+            book_side="ASK",
+            price_bps=5400,
+            window_sec=300.0,
+        )
+        assert eta_drop_price is not None
+        assert abs(eta_drop_price - 2.0) < 0.01
+
+        # yes-BID at 5500 has no data; (yes, BID, *) is empty (only yes-ASK exists).
+        # Falls through to (yes, *, *) which sees yes-ASK-5500.
+        eta_drop_book = tracker.eta_minutes(
+            "KX-TEST",
+            queue_position=12,
+            outcome="yes",
+            book_side="BID",
+            price_bps=5500,
+            window_sec=300.0,
+        )
+        assert eta_drop_book is not None
+        assert abs(eta_drop_book - 2.0) < 0.01
+
+        # no-ASK at 9999 has no data; (no, ASK, *) empty; (no, *, *) sees
+        # no-BID-4500 → 6 cpm → ETA = 12 / 6 = 2 min.
+        eta_drop_outcome = tracker.eta_minutes(
+            "KX-TEST",
+            queue_position=12,
+            outcome="no",
+            book_side="ASK",
+            price_bps=9999,
+            window_sec=300.0,
+        )
+        assert eta_drop_outcome is not None
+        assert abs(eta_drop_outcome - 2.0) < 0.01
+
+
 def test_ingest_skips_trade_with_invalid_price():
     """Trade with price_bps=0 (no recoverable price) is dropped, not bucketed at extremes."""
     # Build a trade directly with no usable price (bypass model_validate dollar path).
