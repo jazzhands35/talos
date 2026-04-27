@@ -278,16 +278,25 @@ class CPMTracker:
 
         BACKWARD-COMPATIBLE: callers passing only (ticker, queue_position) get
         the ticker-aggregate ETA (matches old behavior). Callers passing the
-        full bucket get per-side ETA. Falls back from per-bucket → per-side
-        aggregate → ticker aggregate when any narrower level has no data.
+        full bucket get per-side ETA.
+
+        Fallback chain (when narrower buckets have no data):
+          1. Exact (outcome, book_side, price_bps)
+          2. Drop price_bps  → (outcome, book_side, None)
+          3. Drop book_side  → (outcome, None, None)
+          → return None if still no data
+
+        We do NOT fall back further by dropping outcome. The bare-ticker
+        aggregate iterates only over outcome=="yes" (per the C1 fix to stop
+        double-counting), so falling back from an outcome="no" query to it
+        would return a yes-side fill rate — the wrong direction. Returning
+        None when the per-outcome aggregate is empty is the honest answer.
         """
         rate = self.cpm(ticker, outcome, book_side, price_bps, window_sec)
         if rate is None and price_bps is not None:
             rate = self.cpm(ticker, outcome, book_side, None, window_sec)
         if rate is None and book_side is not None:
             rate = self.cpm(ticker, outcome, None, None, window_sec)
-        if rate is None and outcome is not None:
-            rate = self.cpm(ticker, None, None, None, window_sec)
         if rate is None or rate <= 0:
             return None
         return queue_position / rate

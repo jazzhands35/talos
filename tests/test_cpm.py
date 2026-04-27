@@ -355,13 +355,14 @@ def test_per_bucket_isolation_vs_bare_aggregate():
         assert abs(aggregate - 12.0) < 0.01
 
 
-def test_eta_minutes_fallback_chain():
+def test_eta_minutes_three_level_fallback_chain():
     """eta_minutes broadens its CPM source when narrower buckets have no data.
 
-    Chain: (outcome, book_side, price_bps)
-         -> (outcome, book_side, None)    # drop price
-         -> (outcome, None, None)         # drop book_side
-         -> (None, None, None)            # drop outcome (ticker aggregate)
+    Three-level chain:
+      Level 1: exact (outcome, book_side, price_bps)
+      Level 2: drop price → (outcome, book_side, None)
+      Level 3: drop book_side → (outcome, None, None)
+      → return None if no data at level 3
     """
     import time as _time
     from unittest.mock import patch
@@ -422,9 +423,12 @@ def test_eta_minutes_fallback_chain():
         assert eta_drop_book is not None
         assert abs(eta_drop_book - 2.0) < 0.01
 
-        # no-ASK at 9999 has no data; (no, ASK, *) empty; (no, *, *) sees
-        # no-BID-4500 → 6 cpm → ETA = 12 / 6 = 2 min.
-        eta_drop_outcome = tracker.eta_minutes(
+        # no-ASK at 9999 has no data; (no, ASK, *) is also empty (only
+        # no-BID exists from the inverse decomposition). Level 3 drops
+        # book_side → (no, *, *) sees no-BID-4500 → 6 cpm → ETA = 2 min.
+        # This is still a Level-3 lookup on the NO outcome, NOT a fallback
+        # to the bare-ticker aggregate (we don't have a Level 4).
+        eta_no_outcome_finds_data_via_no_side_aggregate = tracker.eta_minutes(
             "KX-TEST",
             queue_position=12,
             outcome="no",
@@ -432,8 +436,30 @@ def test_eta_minutes_fallback_chain():
             price_bps=9999,
             window_sec=300.0,
         )
-        assert eta_drop_outcome is not None
-        assert abs(eta_drop_outcome - 2.0) < 0.01
+        assert eta_no_outcome_finds_data_via_no_side_aggregate is not None
+        assert abs(eta_no_outcome_finds_data_via_no_side_aggregate - 2.0) < 0.01
+
+
+def test_eta_minutes_returns_none_when_outcome_has_no_data():
+    """If the per-outcome aggregate is empty, eta_minutes returns None
+    rather than falling back to the bare-ticker aggregate (which is
+    yes-only and would give a wrong-direction number for a no-side query).
+
+    This codifies the Level-4-removal decision: we don't have a level 4.
+    """
+    tracker = CPMTracker()
+    # Synthetic state: only YES-side events. (Real ingest can't produce this
+    # because every trade creates both yes and no buckets, but a test bench can.)
+    yes_key = FlowKey(ticker="KX-TEST", outcome="yes", book_side="ASK", price_bps=5500)
+    tracker._events[yes_key] = [(time.time() - 60, 600)]  # 6 contracts in fp100
+    tracker._seen.add("synthetic_t1")
+
+    # Query the NO outcome — Level 1, 2, and 3 all empty for "no".
+    eta = tracker.eta_minutes(
+        "KX-TEST", queue_position=12, outcome="no", book_side="BID", price_bps=4500
+    )
+    # Must return None — NOT a number derived from yes-side flow.
+    assert eta is None
 
 
 def test_ingest_skips_trade_with_invalid_price():
