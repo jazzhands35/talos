@@ -22,6 +22,14 @@ def per_side_max_ahead(
     Non-DRIP events return the standard 'room left in the current unit',
     falling back to a full unit when filled_in_unit == 0.
 
+    Boundary behavior: when ``filled_in_unit % unit_size == 0`` (the unit
+    is exactly complete), this returns ``unit_size`` — the next unit's
+    worth of resting room opens immediately.  This intentionally differs
+    from ``PositionLedger.unit_remaining(side)``, which returns 0 in the
+    same state because it answers a different question ("how many more
+    contracts to complete THIS unit?").  Callers wanting the
+    unit-completion semantics should use ``unit_remaining`` directly.
+
     The catch-up exception (max(this, fill_gap)) lives in the call sites
     so it stays uniform across strategies.
     """

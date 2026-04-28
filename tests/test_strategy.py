@@ -35,13 +35,14 @@ def test_subtracts_filled_in_unit_for_standard_strategy() -> None:
     assert per_side_max_ahead(ledger, Side.A, None) == 2
 
 
-def test_clamps_to_zero_when_unit_is_full() -> None:
+def test_full_unit_opens_next_unit_room() -> None:
     ledger = _ledger(unit_size=5)
     ledger.record_fill_from_ws(
         Side.A, trade_id="t1", count_fp100=500, price_bps=5000, fees_bps=0
     )
 
-    # filled_in_unit % 5 == 0 → returns full unit (5), not 0
+    # Unit is exactly complete (5 fills, unit_size=5) → next unit's worth
+    # of resting room opens immediately.
     assert per_side_max_ahead(ledger, Side.A, None) == 5
 
 
