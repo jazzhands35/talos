@@ -18,12 +18,14 @@ from __future__ import annotations
 import asyncio
 import time
 from datetime import UTC
+from typing import Any, cast
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
 from talos.automation_config import AutomationConfig
 from talos.bid_adjuster import BidAdjuster
+from talos.drip import DripConfig, PlaceOrder
 from talos.engine import TradingEngine
 from talos.game_manager import GameManager
 from talos.market_feed import MarketFeed
@@ -380,6 +382,32 @@ class TestPolling:
         await engine.refresh_trades()
 
         assert engine._cpm.cpm("TK-A") is not None
+
+    @pytest.mark.asyncio
+    async def test_flow_metrics_for_markets_fetches_scan_tickers(self):
+        engine = _make_engine()
+        rest = cast(Any, engine._rest)
+        from datetime import datetime
+
+        from talos.models.market import Trade
+
+        recent = datetime.now(UTC).isoformat()
+        rest.get_trades.return_value = [
+            Trade(
+                trade_id="t1",
+                ticker="TK-A",
+                count_fp100=5_000,
+                price_bps=4500,
+                side="no",
+                created_time=recent,
+            ),
+        ]
+
+        metrics = await engine.flow_metrics_for_markets(["TK-A"])
+
+        assert "TK-A" in metrics
+        assert metrics["TK-A"].trade_count == 1
+        assert metrics["TK-A"].volume_contracts == 50
 
     @pytest.mark.asyncio
     async def test_refresh_account_prunes_queue_cache(self):
@@ -1548,7 +1576,15 @@ class TestOnOrderUpdate:
         )
         engine._on_order_update(msg)  # Should not raise
 
-    def test_resyncs_ledger_on_update(self):
+    def test_resyncs_ledger_resting_state_on_update(self):
+        """WS user_orders update reconciles resting state via sync_from_orders.
+
+        Note: as of 2026-04-27 this handler intentionally does NOT update
+        filled_count — the WS fill channel is the unique writer to avoid
+        double-counting against the additive record_fill_from_ws path.
+        See test_does_not_double_count_with_ws_fill_channel below and
+        the position_ledger 2026-04-27 KXGOLDCARDS regression test.
+        """
         engine, _ = _engine_with_pair()
         order_a = _make_order("TK-A", order_id="ord-a", fill_count=0, remaining_count=10)
         engine._orders_cache = [order_a]
@@ -1564,7 +1600,54 @@ class TestOnOrderUpdate:
             no_price=45,
         )
         engine._on_order_update(msg)
-        assert ledger.filled_count(Side.A) == 5
+        # Resting state was reconciled (5 still resting at no=45)
+        assert ledger.resting_count(Side.A) == 5
+        assert ledger.resting_price(Side.A) == 45
+        # Filled count NOT touched by the user_orders handler — the WS
+        # fill channel is the authoritative writer.
+        assert ledger.filled_count(Side.A) == 0
+
+    def test_does_not_double_count_with_ws_fill_channel(self):
+        """Replay 2026-04-27 22:24:33 KXGOLDCARDS-26-B0.0 sequence.
+
+        Both WS channels fire for the same trade. Order-update arrives
+        first (most common ordering), reporting cumulative fill_count=1.
+        Then the fill event arrives. With the bug, the ledger went to 2.
+        With the fix, it stays at 1 — sync_from_orders(with_fills=False)
+        is a resting-only operation, and record_fill_from_ws is the sole
+        additive path (deduped by trade_id).
+        """
+        engine, _ = _engine_with_pair()
+        order_a = _make_order("TK-A", order_id="ord-a", fill_count=0, remaining_count=1)
+        engine._orders_cache = [order_a]
+        ledger = engine._adjuster.get_ledger("EVT-1")
+
+        # ── 1. WS user_orders fires first: order went resting → executed
+        order_msg = UserOrderMessage(
+            order_id="ord-a",
+            ticker="TK-A",
+            side="no",
+            status="executed",
+            fill_count=1,
+            remaining_count=0,
+            no_price=45,
+        )
+        engine._on_order_update(order_msg)
+        assert ledger.filled_count(Side.A) == 0  # not touched
+
+        # ── 2. WS fill fires next with the actual fill event
+        fill_msg = FillMessage(
+            trade_id="trade-xyz",
+            order_id="ord-a",
+            market_ticker="TK-A",
+            side="no",
+            count=1,
+            yes_price=55,
+            post_position=-1,
+        )
+        engine._on_fill(fill_msg)
+        # Exactly one contract counted, NOT two.
+        assert ledger.filled_count(Side.A) == 1
 
 
 class TestOnFill:
@@ -1580,6 +1663,151 @@ class TestOnFill:
             post_position=-3,
         )
         engine._on_fill(msg)  # Should not raise
+
+    def test_drip_fill_routes_to_controller(self):
+        engine, _ = _engine_with_pair()
+        engine.enable_drip("EVT-1", DripConfig())
+
+        msg = FillMessage(
+            trade_id="fill-1",
+            order_id="ord-a",
+            market_ticker="TK-A",
+            side="no",
+            count=1,
+            yes_price=55,
+            post_position=-1,
+        )
+        engine._on_fill(msg)
+
+        controller = engine._drip_controllers["EVT-1"]
+        assert controller.filled_a_fp100 == 100
+        assert controller.filled_b_fp100 == 0
+
+    def test_drip_matched_pair_queues_replenishment(self):
+        engine, _ = _engine_with_pair()
+        engine.enable_drip("EVT-1", DripConfig())
+
+        engine._on_fill(
+            FillMessage(
+                trade_id="fill-1",
+                order_id="ord-a",
+                market_ticker="TK-A",
+                side="no",
+                count=1,
+                yes_price=55,
+                post_position=-1,
+            )
+        )
+        engine._on_fill(
+            FillMessage(
+                trade_id="fill-2",
+                order_id="ord-b",
+                market_ticker="TK-B",
+                side="no",
+                count=1,
+                yes_price=52,
+                post_position=-1,
+            )
+        )
+
+        actions = engine._drip_pending_actions["EVT-1"]
+        places = [action for action in actions if isinstance(action, PlaceOrder)]
+        assert {place.side for place in places} == {"A", "B"}
+
+
+class TestDripPersistence:
+    """DRIP toggle + DripConfig must survive restart via games_full.json."""
+
+    def test_drip_save_dict_returns_none_when_disabled(self):
+        engine, _ = _engine_with_pair()
+        assert engine.drip_save_dict("EVT-1") is None
+
+    def test_drip_save_dict_returns_config_when_enabled(self):
+        engine, _ = _engine_with_pair()
+        engine.enable_drip(
+            "EVT-1",
+            DripConfig(drip_size=2, max_drips=1, blip_delta_min=12.5),
+        )
+        payload = engine.drip_save_dict("EVT-1")
+        assert payload == {
+            "drip_size": 2,
+            "max_drips": 1,
+            "blip_delta_min": 12.5,
+        }
+
+    def test_restore_drip_from_saved_populates_state(self):
+        engine, _ = _engine_with_pair()
+        ok = engine.restore_drip_from_saved(
+            "EVT-1",
+            {"drip_size": 1, "max_drips": 1, "blip_delta_min": 7.5},
+        )
+        assert ok is True
+        assert engine.is_drip("EVT-1")
+        config = engine.get_drip_config("EVT-1")
+        assert config is not None
+        assert config.drip_size == 1
+        assert config.blip_delta_min == 7.5
+        assert "EVT-1" in engine._drip_controllers
+
+    def test_restore_drip_from_saved_skips_exit_only(self):
+        engine, _ = _engine_with_pair()
+        engine._exit_only_events.add("EVT-1")
+        ok = engine.restore_drip_from_saved(
+            "EVT-1",
+            {"drip_size": 1, "max_drips": 1, "blip_delta_min": 5.0},
+        )
+        assert ok is False
+        assert not engine.is_drip("EVT-1")
+
+    def test_restore_drip_from_saved_returns_false_on_non_dict(self):
+        engine, _ = _engine_with_pair()
+        assert engine.restore_drip_from_saved("EVT-1", None) is False
+        assert engine.restore_drip_from_saved("EVT-1", "not-a-dict") is False
+        assert engine.restore_drip_from_saved("EVT-1", []) is False
+        assert not engine.is_drip("EVT-1")
+
+    def test_restore_drip_from_saved_returns_false_on_invalid_config(self):
+        engine, _ = _engine_with_pair()
+        # drip_size must be >= 1 — DripConfig.__post_init__ raises ValueError
+        ok = engine.restore_drip_from_saved(
+            "EVT-1",
+            {"drip_size": 0, "max_drips": 1, "blip_delta_min": 5.0},
+        )
+        assert ok is False
+        assert not engine.is_drip("EVT-1")
+
+    def test_drip_round_trip_preserves_config(self):
+        """Save → restore on a fresh engine reproduces the original toggle."""
+        engine_a, _ = _engine_with_pair()
+        engine_a.enable_drip(
+            "EVT-1",
+            DripConfig(drip_size=1, max_drips=1, blip_delta_min=20.0),
+        )
+        snapshot = engine_a.drip_save_dict("EVT-1")
+        assert snapshot is not None
+
+        # Fresh engine — simulates restart.
+        engine_b, _ = _engine_with_pair()
+        assert not engine_b.is_drip("EVT-1")
+        ok = engine_b.restore_drip_from_saved("EVT-1", snapshot)
+        assert ok is True
+        assert engine_b.is_drip("EVT-1")
+        assert engine_b.get_drip_config("EVT-1") == engine_a.get_drip_config("EVT-1")
+
+    def test_restored_drip_does_not_emit_drip_on_toast(self):
+        """Restore is quiet — operator already knew DRIP was on pre-restart."""
+        engine, _ = _engine_with_pair()
+        toasts: list[str] = []
+        engine.on_notification = (
+            lambda msg, sev="information", toast=False: toasts.append(msg)
+            if toast
+            else None
+        )
+        engine.restore_drip_from_saved(
+            "EVT-1",
+            {"drip_size": 1, "max_drips": 1, "blip_delta_min": 5.0},
+        )
+        assert not any("DRIP ON" in t for t in toasts)
 
 
 class TestLifecycleFiltering:
@@ -1891,6 +2119,51 @@ class TestReconcileWithKalshi:
         engine._reconcile_with_kalshi(orders, {})
         errors = [msg for msg, sev in notes if sev == "error"]
         assert len(errors) == 2  # One per side
+
+    def test_overcommit_uses_drip_cap_not_unit_size(self) -> None:
+        """Reconcile enforces DRIP cap, not unit_size, for DRIP events.
+
+        Standard unit_size=10 would NOT flag 5 resting as an overcommit.
+        DRIP cap=1 must flag it.
+        """
+        engine, _ = _engine_with_pair()
+        engine.enable_drip("EVT-1", DripConfig(drip_size=1, max_drips=1))
+        notes = self._notify_collector(engine)
+
+        # 5 resting on side A, 0 fills → unit cap (10) would allow this,
+        # but DRIP cap (max_ahead_per_side=1) must trigger overcommit.
+        orders = [
+            _make_order("TK-A", order_id="ord-a", fill_count=0, remaining_count=5),
+        ]
+        engine._reconcile_with_kalshi(orders, {})
+
+        errors = [msg for msg, sev in notes if sev == "error"]
+        assert any("OVERCOMMIT" in msg for msg in errors), (
+            f"Expected overcommit error with DRIP cap=1, got: {notes}"
+        )
+        # Message must reference "drip cap", not "unit"
+        overcommit_msgs = [msg for msg in errors if "OVERCOMMIT" in msg]
+        assert all("drip cap" in msg for msg in overcommit_msgs), (
+            f"Expected 'drip cap' in message, got: {overcommit_msgs}"
+        )
+        # Event must be flagged for priority resolution
+        assert "EVT-1" in engine._overcommit_events
+
+    def test_no_overcommit_within_drip_cap(self) -> None:
+        """Reconcile does NOT flag overcommit when resting <= DRIP cap."""
+        engine, _ = _engine_with_pair()
+        engine.enable_drip("EVT-1", DripConfig(drip_size=1, max_drips=1))
+        notes = self._notify_collector(engine)
+
+        # Exactly 1 resting — at the DRIP cap, not over it.
+        orders = [
+            _make_order("TK-A", order_id="ord-a", fill_count=0, remaining_count=1),
+        ]
+        engine._reconcile_with_kalshi(orders, {})
+
+        errors = [msg for msg, sev in notes if sev == "error"]
+        assert not any("OVERCOMMIT" in msg for msg in errors)
+        assert "EVT-1" not in engine._overcommit_events
 
 
 class TestAutoRebalance:

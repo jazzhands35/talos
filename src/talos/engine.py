@@ -2440,6 +2440,11 @@ class TradingEngine:
                 filled_in_unit = auth_fills[side] % ledger.unit_size
                 other_side = Side.B if side == Side.A else Side.A
                 fill_gap = max(0, auth_fills[other_side] - auth_fills[side])
+                # Reads drip_config.max_ahead_per_side directly rather than
+                # routing through per_side_max_ahead(ledger, ...) because the
+                # helper would derive filled_in_unit from ledger.filled_count,
+                # which may lag auth_fills here. auth_fills is the
+                # multi-source max and is what reconcile must trust.
                 drip_config = self._drip_events.get(pair.event_ticker)
                 if drip_config is not None:
                     base_allowed = drip_config.max_ahead_per_side
@@ -2447,10 +2452,14 @@ class TradingEngine:
                     base_allowed = ledger.unit_size - filled_in_unit
                 allowed = max(base_allowed, fill_gap)
                 if kalshi_resting[side] > allowed:
+                    if drip_config is not None:
+                        cap_label = f"drip cap {drip_config.max_ahead_per_side}"
+                    else:
+                        cap_label = f"unit {ledger.unit_size}"
                     msg = (
                         f"OVERCOMMIT {name} {sl}: "
                         f"{filled_in_unit} filled + {kalshi_resting[side]} resting "
-                        f"= {filled_in_unit + kalshi_resting[side]} > unit {ledger.unit_size}"
+                        f"= {filled_in_unit + kalshi_resting[side]} > {cap_label}"
                     )
                     logger.error(
                         "reconcile_overcommit",
@@ -2459,6 +2468,10 @@ class TradingEngine:
                         filled_in_unit=filled_in_unit,
                         kalshi_resting=kalshi_resting[side],
                         unit_size=ledger.unit_size,
+                        from_drip=drip_config is not None,
+                        drip_cap=(
+                            drip_config.max_ahead_per_side if drip_config is not None else None
+                        ),
                     )
                     self._notify(msg, "error", toast=True)
                     # Ensure check_imbalances processes this event next cycle
