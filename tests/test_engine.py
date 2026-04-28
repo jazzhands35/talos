@@ -25,7 +25,7 @@ import pytest
 
 from talos.automation_config import AutomationConfig
 from talos.bid_adjuster import BidAdjuster
-from talos.drip import DripConfig, PlaceOrder
+from talos.drip import DripConfig
 from talos.engine import TradingEngine
 from talos.game_manager import GameManager
 from talos.market_feed import MarketFeed
@@ -1664,57 +1664,6 @@ class TestOnFill:
         )
         engine._on_fill(msg)  # Should not raise
 
-    def test_drip_fill_routes_to_controller(self):
-        engine, _ = _engine_with_pair()
-        engine.enable_drip("EVT-1", DripConfig())
-
-        msg = FillMessage(
-            trade_id="fill-1",
-            order_id="ord-a",
-            market_ticker="TK-A",
-            side="no",
-            count=1,
-            yes_price=55,
-            post_position=-1,
-        )
-        engine._on_fill(msg)
-
-        controller = engine._drip_controllers["EVT-1"]
-        assert controller.filled_a_fp100 == 100
-        assert controller.filled_b_fp100 == 0
-
-    def test_drip_matched_pair_queues_replenishment(self):
-        engine, _ = _engine_with_pair()
-        engine.enable_drip("EVT-1", DripConfig())
-
-        engine._on_fill(
-            FillMessage(
-                trade_id="fill-1",
-                order_id="ord-a",
-                market_ticker="TK-A",
-                side="no",
-                count=1,
-                yes_price=55,
-                post_position=-1,
-            )
-        )
-        engine._on_fill(
-            FillMessage(
-                trade_id="fill-2",
-                order_id="ord-b",
-                market_ticker="TK-B",
-                side="no",
-                count=1,
-                yes_price=52,
-                post_position=-1,
-            )
-        )
-
-        actions = engine._drip_pending_actions["EVT-1"]
-        places = [action for action in actions if isinstance(action, PlaceOrder)]
-        assert {place.side for place in places} == {"A", "B"}
-
-
 class TestDripPersistence:
     """DRIP toggle + DripConfig must survive restart via games_full.json."""
 
@@ -1747,7 +1696,7 @@ class TestDripPersistence:
         assert config is not None
         assert config.drip_size == 1
         assert config.blip_delta_min == 7.5
-        assert "EVT-1" in engine._drip_controllers
+        assert engine.is_drip("EVT-1")
 
     def test_restore_drip_from_saved_skips_exit_only(self):
         engine, _ = _engine_with_pair()

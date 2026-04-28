@@ -32,9 +32,11 @@ from talos.tree_metadata import TreeMetadataStore
 from talos.ui.event_review import EventReviewScreen
 from talos.ui.proposal_panel import ProposalPanel
 from talos.ui.screens import (
+    ActionMenuScreen,
     AddGamesScreen,
     AutoAcceptScreen,
     BidScreen,
+    DripConfigScreen,
     MarketPickerScreen,
     ScanScreen,
     SettlementHistoryScreen,
@@ -65,27 +67,31 @@ class TalosApp(App):
     TITLE = "TALOS"
     BINDINGS = [
         ("a", "add_games", "Add Games"),
-        ("d", "remove_game", "Remove Game"),
-        ("x", "clear_games", "Clear All"),
-        ("u", "set_unit_size", "Unit Size"),
-        ("s", "toggle_suggestions", "Suggestions"),
-        ("y", "approve_proposal", "Approve"),
-        ("n", "reject_proposal", "Reject"),
-        ("f", "toggle_auto_accept", "Auto-Accept"),
-        ("p", "show_proposals", "Proposals"),
+        ("delete", "remove_game", "Remove Game"),
+        ("d", "toggle_drip", "DRIP"),
         ("e", "toggle_exit_only", "Exit-Only"),
         ("E", "exit_all", "Exit All"),
         ("c", "scan", "Scan"),
-        ("o", "open_in_browser", "Open"),
         ("r", "review_event", "Review"),
-        ("h", "settlement_history", "History"),
-        ("l", "copy_activity_log", "Copy Log"),
-        ("b", "blacklist_ticker", "Blacklist"),
-        ("B", "edit_blacklist", "Edit Blacklist"),
-        ("m", "toggle_scan_mode", "Mode"),
-        ("v", "toggle_view", "View"),
-        ("t", "push_tree_screen", "Tree"),
+        ("m", "open_action_menu", "Menu"),
         ("q", "quit", "Quit"),
+    ]
+    ACTION_MENU_ITEMS = [
+        ("clear_games", "Clear All Games", "Remove every monitored event"),
+        ("set_unit_size", "Set Unit Size", "Default order size"),
+        ("toggle_suggestions", "Toggle Suggestions", "Proposal generation"),
+        ("toggle_auto_accept", "Toggle Auto-Accept", "Automatic execution mode"),
+        ("show_proposals", "Show Proposals", "Pending approval panel"),
+        ("approve_proposal", "Approve Proposal", "First pending proposal"),
+        ("reject_proposal", "Reject Proposal", "First pending proposal"),
+        ("open_in_browser", "Open on Kalshi", "Selected event"),
+        ("settlement_history", "Settlement History", "Recent settled markets"),
+        ("copy_activity_log", "Copy Activity Log", "Clipboard"),
+        ("blacklist_ticker", "Blacklist Selected", "Selected series or ticker"),
+        ("edit_blacklist", "Edit Blacklist", "All blacklist entries"),
+        ("toggle_scan_mode", "Toggle Scan Mode", "Sports / non-sports"),
+        ("toggle_view", "Toggle Table View", "Full / compact columns"),
+        ("push_tree_screen", "Open Tree Screen", "Event selection surface"),
     ]
 
     def __init__(
@@ -384,6 +390,66 @@ class TalosApp(App):
         if panel.display:
             panel.refresh_proposals()
             panel.focus()
+
+    def action_open_action_menu(self) -> None:
+        """Open the command menu for lower-frequency actions."""
+        self.push_screen(
+            ActionMenuScreen(self.ACTION_MENU_ITEMS),
+            callback=self._on_action_menu_selected,
+        )
+
+    def _on_action_menu_selected(self, result: str | None) -> None:
+        if result is None:
+            return
+        handler = getattr(self, f"action_{result}", None)
+        if handler is None or not callable(handler):
+            self.notify(f"Unknown action: {result}", severity="warning")
+            return
+        handler()
+
+    def action_toggle_drip(self) -> None:
+        """Toggle DRIP/BLIP on the highlighted event."""
+        if self._engine is None:
+            return
+        table = self.query_one(OpportunitiesTable)
+        if table.cursor_row is None or table.row_count == 0:
+            return
+        try:
+            cell_key = table.coordinate_to_cell_key(table.cursor_coordinate)
+            event_ticker = _event_ticker_from_row_key(str(cell_key.row_key.value))
+        except CellDoesNotExist:
+            return
+        if not event_ticker:
+            return
+
+        if self._engine.is_drip(event_ticker):
+            self._disable_drip(event_ticker)
+            return
+
+        self.push_screen(
+            DripConfigScreen(),
+            callback=lambda config: self._on_drip_config(event_ticker, config),
+        )
+
+    def _on_drip_config(self, event_ticker: str, config: object) -> None:
+        from talos.drip import DripConfig
+
+        if not isinstance(config, DripConfig):
+            return
+        self._enable_drip(event_ticker, config)
+
+    @work(thread=False)
+    async def _enable_drip(self, event_ticker: str, config: object) -> None:
+        from talos.drip import DripConfig
+
+        if self._engine is None or not isinstance(config, DripConfig):
+            return
+        self._engine.enable_drip(event_ticker, config)
+
+    @work(thread=False)
+    async def _disable_drip(self, event_ticker: str) -> None:
+        if self._engine is not None:
+            await self._engine.disable_drip(event_ticker)
 
     def on_proposal_panel_approved(self, event: ProposalPanel.Approved) -> None:
         """Handle operator approving a proposal."""
@@ -796,8 +862,15 @@ class TalosApp(App):
 
         if not isinstance(e, MarketPickerNeeded) or self._engine is None:
             return
+        flow_metrics = await self._engine.flow_metrics_for_markets(
+            [m.ticker for m in e.markets]
+        )
         selected = await self.push_screen_wait(
-            MarketPickerScreen(e.markets, event_title=e.event.title or e.event.event_ticker)
+            MarketPickerScreen(
+                e.markets,
+                event_title=e.event.title or e.event.event_ticker,
+                flow_metrics=flow_metrics,
+            )
         )
         if selected:
             pairs = await self._engine.add_market_pairs(e.event, selected)
@@ -840,7 +913,15 @@ class TalosApp(App):
             return
 
         self.notify(f"Found {len(events)} {mode_label} events")
-        selected = await self.push_screen_wait(ScanScreen(events))
+        flow_metrics = await self._engine.flow_metrics_for_markets(
+            [
+                market.ticker
+                for event in events
+                for market in event.markets
+                if market.status == "active"
+            ]
+        )
+        selected = await self.push_screen_wait(ScanScreen(events, flow_metrics=flow_metrics))
         selected_tickers = set(selected) if selected else set()
 
         # Log scan to data collector
