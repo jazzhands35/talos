@@ -157,3 +157,40 @@ class DripController:
         if _eta_delta(eta_ahead, eta_behind) > self.config.blip_delta_min:
             return [BlipAction(ahead, order_id)]
         return [NoOp("blip_below_threshold")]
+
+
+def evaluate_blip(
+    config: DripConfig,
+    *,
+    eta_a_min: float | None,
+    eta_b_min: float | None,
+    front_a_id: str | None,
+    front_b_id: str | None,
+) -> Action:
+    """BLIP ahead side when ETA_behind - ETA_ahead exceeds threshold.
+
+    Pure function — fill tracking lives in the standard PositionLedger;
+    this function only consumes ETA + front-order signals. Returns a single
+    Action (not a list).
+    """
+    ahead = _identify_ahead_side(eta_a_min, eta_b_min)
+    if ahead is None:
+        return NoOp("no_eta_signal")
+
+    if ahead == "A":
+        eta_ahead = eta_a_min
+        eta_behind = eta_b_min
+        order_id = front_a_id
+    else:
+        eta_ahead = eta_b_min
+        eta_behind = eta_a_min
+        order_id = front_b_id
+
+    if eta_ahead is None:
+        return NoOp("no_ahead_eta")
+    if order_id is None:
+        return NoOp("no_front_order")
+
+    if _eta_delta(eta_ahead, eta_behind) > config.blip_delta_min:
+        return BlipAction(ahead, order_id)
+    return NoOp("blip_below_threshold")
