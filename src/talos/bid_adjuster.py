@@ -12,7 +12,7 @@ from collections.abc import Callable
 
 import structlog
 
-from talos.automation_config import DEFAULT_UNIT_SIZE
+from talos.automation_config import DEFAULT_UNIT_SIZE, AutomationConfig
 from talos.data_collector import DataCollector
 from talos.drip import DripConfig
 from talos.errors import KalshiAPIError
@@ -48,11 +48,14 @@ class BidAdjuster:
         data_collector: DataCollector | None = None,
         *,
         drip_config_lookup: Callable[[str], DripConfig | None] | None = None,
+        automation_config: AutomationConfig | None = None,
     ) -> None:
         self._books = book_manager
         self._unit_size = unit_size
         self._data_collector = data_collector
         self._drip_config_lookup = drip_config_lookup
+        # Read fresh on each evaluate_jump so runtime threshold tuning takes effect.
+        self._auto_config = automation_config or AutomationConfig()
 
         # Ticker → list of (pair, side) — list handles same-ticker pairs
         self._ticker_map: dict[str, list[tuple[ArbPair, Side]]] = {}
@@ -377,21 +380,43 @@ class BidAdjuster:
         # Float-cent views for log fields and human-readable reason strings.
         this_effective = this_effective_bps / ONE_CENT_BPS
         other_effective = other_effective_bps / ONE_CENT_BPS
-        if other_effective_bps > 0 and this_effective_bps + other_effective_bps >= ONE_DOLLAR_BPS:
-            # No fills on either side → withdraw both orders entirely.
-            # With fills → hold and wait for market to return (P16).
-            if ledger.filled_count(Side.A) == 0 and ledger.filled_count(Side.B) == 0:
+        # Asymmetric-threshold gate: conservative on entry, opportunistic on exit,
+        # never lock a loss. The state of the legs at jump time decides which gate
+        # applies — balanced (we can still walk away) uses the entry threshold,
+        # single-stranded (we're committed) uses a zero floor.
+        filled_a = ledger.filled_count(Side.A)
+        filled_b = ledger.filled_count(Side.B)
+        is_balanced = filled_a == filled_b
+        chase_profit_bps = ONE_DOLLAR_BPS - this_effective_bps - other_effective_bps
+        entry_threshold_bps = int(round(self._auto_config.edge_threshold_cents * ONE_CENT_BPS))
+        if is_balanced:
+            chase_passes_gate = chase_profit_bps >= entry_threshold_bps
+            gate_label = "entry"
+            gate_threshold_cents = entry_threshold_bps / ONE_CENT_BPS
+        else:
+            chase_passes_gate = chase_profit_bps > 0
+            gate_label = "exit"
+            gate_threshold_cents = 0.0
+        chase_profit_cents = chase_profit_bps / ONE_CENT_BPS
+
+        if other_effective_bps > 0 and not chase_passes_gate:
+            # Balanced + chase below entry threshold → withdraw both. Holding here
+            # would let the at-top side fill us into a single-stranded state under
+            # the looser exit gate, locking us into a trade we never would have
+            # entered fresh. Withdrawing preserves the right to walk away.
+            if is_balanced:
                 logger.info(
                     "jump_withdraw",
                     ticker=ticker,
                     new_price=new_price,
-                    effective_sum=this_effective + other_effective,
+                    chase_profit_cents=chase_profit_cents,
+                    gate=gate_label,
+                    gate_threshold_cents=gate_threshold_cents,
                 )
                 withdraw_reason = (
-                    f"no fills — withdraw both sides, "
-                    f"following to {new_price}c not profitable "
-                    f"({this_effective:.1f}+{other_effective:.1f}"
-                    f"={this_effective + other_effective:.1f} >= 100)"
+                    f"balanced ({filled_a}={filled_b}) — withdraw both sides, "
+                    f"chase to {new_price}c yields {chase_profit_cents:.1f}c"
+                    f" < {gate_label} threshold {gate_threshold_cents:.1f}c"
                 )
                 self._log_decision(
                     event_ticker=pair.event_ticker,
@@ -417,17 +442,20 @@ class BidAdjuster:
                         f"A: {ledger.format_position(Side.A)} | B: {ledger.format_position(Side.B)}"
                     ),
                 )
+            # Single-stranded + chase not profitable → hold, wait for market.
+            # We must complete the unit eventually; chasing into a loss is worse
+            # than waiting for the market to return.
             logger.info(
                 "jump_not_profitable",
                 ticker=ticker,
                 new_price=new_price,
-                effective_sum=this_effective + other_effective,
+                chase_profit_cents=chase_profit_cents,
+                gate=gate_label,
             )
             hold_reason = (
                 f"stay at {ledger.resting_price(adj_side)}c — "
-                f"following to {new_price}c not profitable "
-                f"({this_effective:.1f}+{other_effective:.1f}"
-                f"={this_effective + other_effective:.1f} >= 100)"
+                f"single-stranded ({filled_a}!={filled_b}), chase to {new_price}c"
+                f" yields {chase_profit_cents:.1f}c — not profitable"
             )
             self._log_decision(
                 event_ticker=pair.event_ticker,

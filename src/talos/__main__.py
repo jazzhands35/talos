@@ -298,15 +298,23 @@ def main() -> None:
 
     _db_dir = get_data_dir()
     data_collector = DataCollector(_db_dir / "talos_data.db")
-    adjuster = BidAdjuster(books, [], unit_size=unit_size, data_collector=data_collector)
+    # Tree mode is always on in production — see AutomationConfig.tree_mode.
+    # The launch-path env var was removed so double-clicking Talos.exe gets
+    # the same behavior as launching via talos.bat / talos_exe.bat.
+    # Constructed before BidAdjuster so the asymmetric-threshold gate can
+    # read edge_threshold_cents (entry-vs-exit gate selection).
+    auto_config = AutomationConfig()
+    adjuster = BidAdjuster(
+        books,
+        [],
+        unit_size=unit_size,
+        data_collector=data_collector,
+        automation_config=auto_config,
+    )
     portfolio_feed = PortfolioFeed(ws_client=ws)
     ticker_feed = TickerFeed(ws_client=ws)
     lifecycle_feed = LifecycleFeed(ws_client=ws)
     position_feed = PositionFeed(ws_client=ws)
-    # Tree mode is always on in production — see AutomationConfig.tree_mode.
-    # The launch-path env var was removed so double-clicking Talos.exe gets
-    # the same behavior as launching via talos.bat / talos_exe.bat.
-    auto_config = AutomationConfig()
 
     # Tree-mode collaborators (only constructed when tree_mode is enabled).
     # DiscoveryService is kept on the app (not the engine) since only TreeScreen

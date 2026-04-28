@@ -62,7 +62,7 @@ class TestDecisionLogic:
         assert "not profitable" in proposal.reason
 
     def test_unprofitable_no_fills_returns_withdraw(self):
-        """When arb is unprofitable and neither side has fills, propose withdrawal."""
+        """Balanced (0=0) + unprofitable chase → withdraw both."""
         ledger = self.adjuster.get_ledger("EVT-1")
         ledger.record_resting(Side.A, order_id="ord-a", count=10, price=48)
         ledger.record_resting(Side.B, order_id="ord-b", count=10, price=47)
@@ -72,10 +72,40 @@ class TestDecisionLogic:
         proposal = self.adjuster.evaluate_jump("TK-B", at_top=False)
         assert proposal is not None
         assert proposal.action == "withdraw"
-        assert "no fills" in proposal.reason
+        assert "balanced" in proposal.reason
+
+    def test_balanced_chase_below_entry_threshold_returns_withdraw(self):
+        """Balanced fills (n>0) + chase profitable but below entry threshold → withdraw both.
+
+        This is the row-49 case. Holding here would let the at-top side fill
+        the working order and leave us single-stranded under the lower exit
+        gate at a worse expected position. Withdrawing preserves balance.
+        """
+        from talos.automation_config import AutomationConfig
+
+        # Reconstruct adjuster with explicit entry threshold (1¢ default).
+        adjuster = BidAdjuster(
+            book_manager=self.books,
+            pairs=[self.pair],
+            unit_size=10,
+            automation_config=AutomationConfig(edge_threshold_cents=1.0),
+        )
+        ledger = adjuster.get_ledger("EVT-1")
+        # 3 filled + 1 resting on each side — the balanced row-49 shape.
+        ledger.record_fill(Side.A, count=3, price=50)
+        ledger.record_fill(Side.B, count=3, price=48)
+        ledger.record_resting(Side.A, order_id="ord-a", count=1, price=50)
+        ledger.record_resting(Side.B, order_id="ord-b", count=1, price=48)
+        # B jumped to 49 — chase yields ~0.2c (below 1c entry threshold)
+        self.books._prices["TK-B"] = 49
+        proposal = adjuster.evaluate_jump("TK-B", at_top=False)
+        assert proposal is not None
+        assert proposal.action == "withdraw"
+        assert "balanced" in proposal.reason
+        assert "entry threshold" in proposal.reason
 
     def test_unprofitable_with_fills_returns_hold(self):
-        """When arb is unprofitable but has fills, hold position."""
+        """Single-stranded + chase below zero floor → hold (wait for market)."""
         ledger = self.adjuster.get_ledger("EVT-1")
         ledger.record_fill(Side.A, count=5, price=48)
         ledger.record_resting(Side.A, order_id="ord-a", count=5, price=48)
@@ -86,6 +116,32 @@ class TestDecisionLogic:
         assert proposal is not None
         assert proposal.action == "hold"
         assert "not profitable" in proposal.reason
+
+    def test_single_stranded_chase_subthreshold_but_positive_chases(self):
+        """Single-stranded + chase below entry threshold but still profitable → chase.
+
+        Exit gate is positivity, not the entry threshold. We're committed; finishing
+        at any positive edge beats staying stuck.
+        """
+        from talos.automation_config import AutomationConfig
+
+        adjuster = BidAdjuster(
+            book_manager=self.books,
+            pairs=[self.pair],
+            unit_size=10,
+            automation_config=AutomationConfig(edge_threshold_cents=1.0),
+        )
+        ledger = adjuster.get_ledger("EVT-1")
+        # A fully filled (single-stranded), B working its last unit at 47, jumped to 48.
+        ledger.record_fill(Side.A, count=10, price=50)
+        ledger.record_fill(Side.B, count=9, price=48)
+        ledger.record_resting(Side.B, order_id="ord-b", count=1, price=47)
+        # Chase to 48: fee_adjusted_cost(48)+fee_adjusted_cost(50)≈99.785 → ~0.2c profit.
+        # Below 1c entry threshold but >0 → exit gate passes → chase.
+        proposal = adjuster.evaluate_jump("TK-B", at_top=False)
+        assert proposal is not None
+        assert proposal.action == "follow_jump"
+        assert proposal.new_price == 48
 
     def test_back_at_top_no_proposal(self):
         ledger = self.adjuster.get_ledger("EVT-1")
