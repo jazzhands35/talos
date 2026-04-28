@@ -403,3 +403,48 @@ class TestEvaluateJumpOpenScope:
         assert result.action == "follow_jump", (
             f"Expected 'follow_jump' but got '{result.action}': {result.reason}"
         )
+
+
+class TestPostCancelSafetyDripCap:
+    """_check_post_cancel_safety routes through per_side_max_ahead."""
+
+    def _make_adjuster(self, drip_config_lookup=None) -> BidAdjuster:
+        pair = ArbPair(event_ticker="EVT", ticker_a="TK-A", ticker_b="TK-B")
+        books = FakeBookManager({"TK-A": 50, "TK-B": 48})
+        return BidAdjuster(
+            book_manager=books,
+            pairs=[pair],
+            unit_size=5,
+            drip_config_lookup=drip_config_lookup,
+        )
+
+    def test_post_cancel_safety_uses_drip_cap_when_lookup_returns_config(self):
+        from talos.drip import DripConfig
+        from talos.position_ledger import PositionLedger
+
+        drip_config = DripConfig(drip_size=1, max_drips=1)
+        adjuster = self._make_adjuster(
+            drip_config_lookup=lambda evt: drip_config if evt == "EVT" else None
+        )
+        ledger = PositionLedger(event_ticker="EVT", unit_size=5)
+
+        # 2 contracts > drip cap of 1 → blocked even though within unit_size of 5.
+        ok, reason = adjuster._check_post_cancel_safety(
+            ledger, Side.A, new_count=2, new_price=50
+        )
+        assert ok is False
+        assert "drip cap" in reason
+
+    def test_post_cancel_safety_uses_unit_when_no_drip_config(self):
+        from talos.position_ledger import PositionLedger
+
+        adjuster = self._make_adjuster(drip_config_lookup=None)
+        ledger = PositionLedger(event_ticker="EVT", unit_size=5)
+
+        # 2 contracts is within unit cap of 5 → first check passes.
+        # Either ok=True or ok=False with a profitability reason (NOT a unit/cap reason).
+        ok, reason = adjuster._check_post_cancel_safety(
+            ledger, Side.A, new_count=2, new_price=50
+        )
+        if not ok:
+            assert "unit" not in reason and "cap" not in reason

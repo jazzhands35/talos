@@ -8,16 +8,20 @@ See brain/principles.md Principles 15-19 for safety invariants.
 
 from __future__ import annotations
 
+from collections.abc import Callable
+
 import structlog
 
 from talos.automation_config import DEFAULT_UNIT_SIZE
 from talos.data_collector import DataCollector
+from talos.drip import DripConfig
 from talos.errors import KalshiAPIError
 from talos.fees import MAKER_FEE_RATE, fee_adjusted_cost_bps
 from talos.models.adjustment import ProposedAdjustment
 from talos.models.strategy import ArbPair
 from talos.orderbook import OrderBookManager
 from talos.position_ledger import PositionLedger, Side
+from talos.strategy import per_side_max_ahead
 from talos.units import (
     ONE_CENT_BPS,
     ONE_CONTRACT_FP100,
@@ -42,10 +46,13 @@ class BidAdjuster:
         pairs: list[ArbPair],
         unit_size: int = DEFAULT_UNIT_SIZE,
         data_collector: DataCollector | None = None,
+        *,
+        drip_config_lookup: Callable[[str], DripConfig | None] | None = None,
     ) -> None:
         self._books = book_manager
         self._unit_size = unit_size
         self._data_collector = data_collector
+        self._drip_config_lookup = drip_config_lookup
 
         # Ticker → list of (pair, side) — list handles same-ticker pairs
         self._ticker_map: dict[str, list[tuple[ArbPair, Side]]] = {}
@@ -737,6 +744,12 @@ class BidAdjuster:
 
     # ── Internal helpers ────────────────────────────────────────────
 
+    def _drip_config_for(self, event_ticker: str) -> DripConfig | None:
+        """Look up the DRIP config for an event via the registered callback."""
+        if self._drip_config_lookup is None:
+            return None
+        return self._drip_config_lookup(event_ticker)
+
     def _fee_rate_for(self, event_ticker: str) -> float:
         """Look up the fee rate for a pair by event ticker."""
         for entries in self._ticker_map.values():
@@ -758,13 +771,13 @@ class BidAdjuster:
         profitability math runs in bps and rounds back to whole cents for the
         per-contract fee formula.
         """
-        # Simulate post-cancel state (use fills in current unit, not total)
-        filled_in_unit = ledger.filled_count(side) % ledger.unit_size
-        if filled_in_unit + new_count > ledger.unit_size:
+        drip_config = self._drip_config_for(ledger.event_ticker)
+        max_ahead = per_side_max_ahead(ledger, side, drip_config)
+        if new_count > max_ahead:
+            scope = "drip cap" if drip_config is not None else "unit"
             return (
                 False,
-                f"would exceed unit after cancel: filled_in_unit={filled_in_unit} + "
-                f"new={new_count} > {ledger.unit_size}",
+                f"would exceed {scope} after cancel: new={new_count} > {max_ahead}",
             )
         # Check profitability (open-unit scoped — same as is_placement_safe P18)
         other_side = side.other

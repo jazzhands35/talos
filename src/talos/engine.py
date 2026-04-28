@@ -176,6 +176,7 @@ class TradingEngine:
         self._order_placed_at: dict[str, float] = {}  # order_id -> monotonic timestamp
         self._exit_only_events: set[str] = set()  # events in exit-only mode
         self._drip_events: dict[str, DripConfig] = {}
+        self._adjuster._drip_config_lookup = lambda evt: self._drip_events.get(evt)
         self._drip_controllers: dict[str, DripController] = {}
         self._drip_pending_actions: dict[str, list[Action]] = {}
         self._drip_blip_last_at: dict[tuple[str, str], float] = {}
