@@ -1,7 +1,7 @@
 """Strategy seam — per-side sizing dispatch for the standard pipeline.
 
 Today: standard strategy (uses ledger.unit_size) and DRIP (uses
-DripConfig.per_side_contract_cap). Future strategies plug in by extending
+DripConfig.max_ahead_per_side). Future strategies plug in by extending
 ``per_side_max_ahead`` with a new config branch.
 """
 
@@ -34,7 +34,7 @@ def per_side_max_ahead(
     so it stays uniform across strategies.
     """
     if drip_config is not None:
-        return drip_config.per_side_contract_cap
+        return drip_config.max_ahead_per_side
 
     filled_in_unit = ledger.filled_count(side) % ledger.unit_size
     return ledger.unit_size - filled_in_unit

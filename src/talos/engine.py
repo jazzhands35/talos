@@ -22,7 +22,8 @@ if TYPE_CHECKING:
 
 from talos.automation_config import AutomationConfig
 from talos.bid_adjuster import BidAdjuster
-from talos.cpm import CPMTracker
+from talos.cpm import CPMTracker, FlowMetrics
+from talos.drip import Action, BlipAction, DripConfig, DripController, NoOp, PlaceOrder
 from talos.errors import KalshiAPIError, KalshiNotFoundError, KalshiRateLimitError
 from talos.fees import MAKER_FEE_RATE, fee_adjusted_cost_bps, fee_adjusted_edge_bps
 from talos.game_manager import (
@@ -34,7 +35,7 @@ from talos.game_manager import (
 from talos.game_status import GameStatusResolver
 from talos.lifecycle_feed import LifecycleFeed
 from talos.market_feed import MarketFeed
-from talos.models.market import Event, Market
+from talos.models.market import Event, Market, Trade
 from talos.models.order import Order
 from talos.models.portfolio import EventPosition, Position, Settlement
 from talos.models.position import EventPositionSummary
@@ -74,6 +75,7 @@ if TYPE_CHECKING:
 logger = structlog.get_logger()
 _STALE_BOOK_RECOVERY_COOLDOWN_S = 120.0
 _EVENT_CLAIM_STALE_S = 60.0  # force-release stale per-event claims after this
+_DRIP_BLIP_COOLDOWN_S = 60.0
 
 # Section 8 startup safety gate — how long to block a risk-increasing op
 # while waiting for the ledger's confirmation flags to clear, and how long
@@ -173,6 +175,10 @@ class TradingEngine:
         self._settled_markets: dict[str, dict[str, str]] = {}  # event_ticker -> {ticker: result}
         self._order_placed_at: dict[str, float] = {}  # order_id -> monotonic timestamp
         self._exit_only_events: set[str] = set()  # events in exit-only mode
+        self._drip_events: dict[str, DripConfig] = {}
+        self._drip_controllers: dict[str, DripController] = {}
+        self._drip_pending_actions: dict[str, list[Action]] = {}
+        self._drip_blip_last_at: dict[tuple[str, str], float] = {}
         self._winding_down: set[str] = set()  # pairs removed-while-inventory-present
         self._event_fully_removed_listeners: list = []
         self._game_started_events: set[str] = set()  # events where game is live/final
@@ -460,6 +466,51 @@ class TradingEngine:
         """Delegate event discovery to the game manager."""
         return await self._game_manager.scan_events(scan_mode=scan_mode)
 
+    async def flow_metrics_for_markets(
+        self,
+        tickers: list[str],
+    ) -> dict[str, FlowMetrics]:
+        """Fetch recent trades and return one-hour frequency/flow metrics."""
+        unique_tickers = sorted({t for t in tickers if t})
+        if not unique_tickers:
+            return {}
+
+        sem = asyncio.Semaphore(5)
+
+        async def _fetch(ticker: str) -> tuple[str, list[Trade]] | None:
+            async with sem:
+                try:
+                    trades = await self._rest.get_trades(ticker, limit=100)
+                    return ticker, trades
+                except Exception:
+                    logger.warning("trade_fetch_failed", ticker=ticker, exc_info=True)
+                    return None
+
+        try:
+            results = await asyncio.wait_for(
+                asyncio.gather(*(_fetch(ticker) for ticker in unique_tickers)),
+                timeout=30.0,
+            )
+        except TimeoutError:
+            logger.warning(
+                "flow_metrics_fetch_timeout",
+                ticker_count=len(unique_tickers),
+            )
+            return {}
+
+        for result in results:
+            if result is None:
+                continue
+            ticker, trades = result
+            self._cpm.ingest(ticker, trades)
+
+        self._cpm.prune()
+        return {
+            ticker: metrics
+            for ticker in unique_tickers
+            if (metrics := self._cpm.flow_metrics(ticker)) is not None
+        }
+
     async def refresh_volumes(self) -> None:
         """Refresh per-market 24h volume for monitored events."""
         await self._game_manager.refresh_volumes()
@@ -494,6 +545,140 @@ class TradingEngine:
         await self._enforce_exit_only(event_ticker)
 
     # ── Exit-only mode ────────────────────────────────────────────
+
+    def is_drip(self, event_ticker: str) -> bool:
+        return event_ticker in self._drip_events
+
+    def get_drip_config(self, event_ticker: str) -> DripConfig | None:
+        return self._drip_events.get(event_ticker)
+
+    def enable_drip(self, event_ticker: str, config: DripConfig) -> bool:
+        """Enable DRIP/BLIP for an event. Returns True when enabled."""
+        if event_ticker in self._exit_only_events:
+            self._notify("DRIP blocked: event is in exit-only mode", "warning", toast=True)
+            return False
+        if config.max_drips != 1:
+            self._notify("DRIP POC supports MAX_DRIPS=1 only", "warning", toast=True)
+            return False
+
+        self._drip_events[event_ticker] = config
+        self._drip_controllers.setdefault(event_ticker, DripController(config))
+        self._enforce_drip_sync(event_ticker)
+        logger.info(
+            "drip_enabled",
+            event_ticker=event_ticker,
+            drip_size=config.drip_size,
+            max_drips=config.max_drips,
+            blip_delta_min=config.blip_delta_min,
+        )
+        self._notify(f"DRIP ON: {self._display_name(event_ticker)}", "warning", toast=True)
+        return True
+
+    def drip_save_dict(self, event_ticker: str) -> dict[str, object] | None:
+        """Return a serializable snapshot of DRIP config for the event.
+
+        Returns ``None`` when DRIP is not enabled. Symmetric with
+        :meth:`restore_drip_from_saved`. Mirrors the ledger.to_save_dict
+        pattern so ``__main__._persist_games`` can attach the snapshot
+        as ``entry["drip"]`` next to ``entry["ledger"]``.
+
+        Only the ``DripConfig`` is persisted (toggle + parameters).
+        Controller runtime state (drip counters, BLIP cooldowns, in-
+        flight pending actions) intentionally does NOT survive restart —
+        the controller bootstraps from config and replays from the next
+        WS fill stream.
+        """
+        config = self._drip_events.get(event_ticker)
+        if config is None:
+            return None
+        return {
+            "drip_size": config.drip_size,
+            "max_drips": config.max_drips,
+            "blip_delta_min": config.blip_delta_min,
+        }
+
+    def restore_drip_from_saved(
+        self,
+        event_ticker: str,
+        data: object,
+    ) -> bool:
+        """Quietly restore DRIP config for ``event_ticker`` from a saved snapshot.
+
+        Returns True when the config is restored, False otherwise (no payload,
+        malformed payload, pair already in exit-only, or a config-validation
+        error). Does NOT call ``_enforce_drip_sync`` or post a toast — the
+        normal ``refresh_account`` cycle will pick up the restored event
+        in ``self._drip_events`` and drive DRIP via ``_drive_drip``.
+
+        Caller (engine startup restore loop) must invoke this AFTER
+        engine_state restore + Phase-0 admission quarantine, so an
+        exit_only event isn't silently re-enabled with DRIP attached.
+        """
+        if not isinstance(data, dict):
+            return False
+        if event_ticker in self._exit_only_events:
+            logger.info(
+                "drip_restore_skipped_exit_only",
+                event_ticker=event_ticker,
+            )
+            return False
+        try:
+            config = DripConfig(
+                drip_size=int(data.get("drip_size", 1)),
+                max_drips=int(data.get("max_drips", 1)),
+                blip_delta_min=float(data.get("blip_delta_min", 5.0)),
+            )
+        except (TypeError, ValueError) as exc:
+            logger.warning(
+                "drip_restore_failed",
+                event_ticker=event_ticker,
+                error=str(exc),
+            )
+            return False
+        self._drip_events[event_ticker] = config
+        self._drip_controllers.setdefault(event_ticker, DripController(config))
+        logger.info(
+            "drip_restored",
+            event_ticker=event_ticker,
+            drip_size=config.drip_size,
+            max_drips=config.max_drips,
+            blip_delta_min=config.blip_delta_min,
+        )
+        return True
+
+    async def disable_drip(self, event_ticker: str) -> bool:
+        """Disable DRIP and cancel resting DRIP orders for the event."""
+        if event_ticker not in self._drip_events:
+            return False
+        self._drip_events.pop(event_ticker, None)
+        self._drip_controllers.pop(event_ticker, None)
+        self._drip_pending_actions.pop(event_ticker, None)
+        self._drip_blip_last_at = {
+            key: value for key, value in self._drip_blip_last_at.items() if key[0] != event_ticker
+        }
+
+        pair = self.find_pair(event_ticker)
+        if pair is not None:
+            with contextlib.suppress(KeyError):
+                ledger = self._adjuster.get_ledger(event_ticker)
+                for side in (Side.A, Side.B):
+                    order_id = ledger.resting_order_id(side)
+                    if order_id is not None:
+                        await self.cancel_order_with_verify(order_id, pair)
+
+        logger.info("drip_disabled", event_ticker=event_ticker)
+        self._notify(f"DRIP OFF: {self._display_name(event_ticker)}", toast=True)
+        return True
+
+    async def enforce_drip(self, event_ticker: str) -> None:
+        """Execute initial DRIP placement for an enabled event."""
+        await self._drive_drip(event_ticker)
+
+    def _enforce_drip_sync(self, event_ticker: str) -> None:
+        """Expire normal proposals for a DRIP-owned event."""
+        for proposal in list(self._proposal_queue.pending()):
+            if proposal.key.event_ticker == event_ticker:
+                self._proposal_queue.reject(proposal.key)
 
     def is_exit_only(self, event_ticker: str) -> bool:
         return event_ticker in self._exit_only_events
@@ -1198,6 +1383,14 @@ class TradingEngine:
                             event_ticker=pair.event_ticker,
                             exc_info=True,
                         )
+                    # Restore DRIP config AFTER engine_state + admission
+                    # quarantine so an exit_only event is never silently
+                    # re-armed. Controllers are reconstructed from config;
+                    # the next refresh_account cycle drives them via
+                    # _drive_drip — no manual placement here.
+                    saved_drip = data.get("drip")
+                    if saved_drip is not None:
+                        self.restore_drip_from_saved(pair.event_ticker, saved_drip)
                     pairs.append(pair)
                     cached_tickers.add(pair.event_ticker)
                 except Exception:
@@ -1528,6 +1721,8 @@ class TradingEngine:
             if self._auto_config.tree_mode:
                 await self._reconcile_winding_down()
             await self._enforce_all_exit_only()
+            for event_ticker in list(self._drip_events):
+                await self._drive_drip(event_ticker)
 
             # Persist ledger fill state so restarts don't lose fills
             # (critical for same-ticker pairs where sync_from_positions is unavailable)
@@ -1653,7 +1848,12 @@ class TradingEngine:
                                 self._reaction_queue.put_nowait(p.event_ticker)
                                 break
 
-                # Re-sync the affected pair's ledger and mark dirty
+                # Re-sync the affected pair's ledger and mark dirty.
+                # WS user_orders only updates resting state — the WS fill
+                # channel is the unique writer for filled_count. Periodic
+                # refresh_account keeps the full sync as the dropped-WS-
+                # fill recovery backstop. See 2026-04-27 KXGOLDCARDS
+                # double-write diagnosis.
                 for pair in self._scanner.pairs:
                     if msg.ticker in (pair.ticker_a, pair.ticker_b):
                         self._dirty_events.add(pair.event_ticker)
@@ -1663,6 +1863,7 @@ class TradingEngine:
                                 self._orders_cache,
                                 ticker_a=pair.ticker_a,
                                 ticker_b=pair.ticker_b,
+                                with_fills=False,
                             )
                         except KeyError:
                             pass
@@ -1729,7 +1930,7 @@ class TradingEngine:
                 ticker=msg.ticker,
                 status=msg.status,
             )
-            # Sync the affected pair
+            # Sync the affected pair (resting only — see above).
             for pair in self._scanner.pairs:
                 if msg.ticker in (pair.ticker_a, pair.ticker_b):
                     try:
@@ -1738,6 +1939,7 @@ class TradingEngine:
                             self._orders_cache,
                             ticker_a=pair.ticker_a,
                             ticker_b=pair.ticker_b,
+                            with_fills=False,
                         )
                     except KeyError:
                         pass
@@ -1818,6 +2020,18 @@ class TradingEngine:
                         price_bps=price_bps,
                         fees_bps=msg.fee_cost_bps,
                     )
+                    if self.is_drip(event_ticker):
+                        controller = self._drip_controllers.get(event_ticker)
+                        if controller is not None:
+                            drip_side = "A" if side == Side.A else "B"
+                            actions = controller.record_fill(
+                                drip_side,
+                                msg.count_fp100,
+                                trade_id=msg.trade_id,
+                            )
+                            self._drip_pending_actions.setdefault(event_ticker, []).extend(
+                                actions
+                            )
                     # Drift check runs AFTER the apply. Kalshi's
                     # post_position_fp100 is the authoritative count after
                     # this fill; the ledger should now match within
@@ -2355,6 +2569,8 @@ class TradingEngine:
         ``trigger`` labels the origin for the replay timeline.
         """
         evt_ticker = self._adjuster.resolve_event(ticker)
+        if evt_ticker and self.is_drip(evt_ticker):
+            return
         exit_only = self.is_exit_only(evt_ticker) if evt_ticker else False
         proposal = self._adjuster.evaluate_jump(
             ticker, at_top, exit_only=exit_only, side=side, trigger=trigger
@@ -2441,6 +2657,8 @@ class TradingEngine:
         Extracts the per-pair logic from reevaluate_jumps() — same behavior,
         single event scope.
         """
+        if self.is_drip(event_ticker):
+            return
         pending_keys = {p.key for p in self._proposal_queue.pending()}
         has_withdraw = any(
             k.event_ticker == event_ticker and k.kind == "withdraw" for k in pending_keys
@@ -2493,6 +2711,8 @@ class TradingEngine:
         refresh_account every 30s). This scope limitation is intentional —
         the WS path covers safety-critical reactions only.
         """
+        if self.is_drip(event_ticker):
+            return
         try:
             ledger = self._adjuster.get_ledger(event_ticker)
         except KeyError:
@@ -2564,6 +2784,8 @@ class TradingEngine:
         """
         pending_keys = {p.key for p in self._proposal_queue.pending()}
         for pair in self._scanner.pairs:
+            if self.is_drip(pair.event_ticker):
+                continue
             # Skip if a withdraw proposal already covers this event
             has_withdraw = any(
                 k.event_ticker == pair.event_ticker and k.kind == "withdraw" for k in pending_keys
@@ -2646,6 +2868,8 @@ class TradingEngine:
 
         executed_this_cycle: set[str] = set()
         for pair in pairs_ordered:
+            if self.is_drip(pair.event_ticker):
+                continue
             if pair.event_ticker in executed_this_cycle:
                 continue
             if not full_sweep and pair.event_ticker not in dirty:
@@ -2839,11 +3063,234 @@ class TradingEngine:
                 pending_keys,
                 display_name=self._display_name(pair.event_ticker),
                 exit_only=self.is_exit_only(pair.event_ticker),
+                drip=self.is_drip(pair.event_ticker),
                 pair_volume_24h=pair_volume,
             )
             if proposal is not None:
                 self._proposal_queue.add(proposal)
                 pending_keys.add(proposal.key)
+
+    async def _drive_drip(self, event_ticker: str) -> None:
+        """Drive DRIP seed, fill-replenish, and BLIP actions for one event."""
+        config = self._drip_events.get(event_ticker)
+        controller = self._drip_controllers.get(event_ticker)
+        pair = self.find_pair(event_ticker)
+        if config is None or controller is None or pair is None:
+            return
+
+        if not self._initial_sync_done:
+            logger.info("drip_skip_no_initial_sync", event_ticker=event_ticker)
+            return
+
+        try:
+            ledger = self._adjuster.get_ledger(event_ticker)
+        except KeyError:
+            return
+
+        pending = self._drip_pending_actions.pop(event_ticker, [])
+        for action in pending:
+            await self._execute_drip_action(event_ticker, pair, action)
+
+        filled_a = ledger.filled_count(Side.A)
+        filled_b = ledger.filled_count(Side.B)
+        seed_actions: list[Action] = []
+        # Catch-up is intentionally serialized: one drip at a time on the
+        # behind side, gated on resting==0. The `max_drips` cap is therefore
+        # NOT an accelerator during imbalance recovery — it only caps
+        # simultaneously-resting orders in steady-state. Closing a large
+        # pre-existing gap (e.g., 20 contracts behind) takes ~N sequential
+        # fills. Deferred parallelization is a known future enhancement —
+        # see brain/decisions.md "2026-04-27 — DRIP catch-up stays
+        # one-at-a-time until ledger trust is proven" for the rationale
+        # (in-session ledger drift incidents make accelerated catch-up
+        # unsafe until `filled_count(side)` is provably trustworthy).
+        if filled_a <= filled_b and ledger.resting_count(Side.A) == 0:
+            seed_actions.append(PlaceOrder("A", config.drip_size * ONE_CONTRACT_FP100))
+        if filled_b <= filled_a and ledger.resting_count(Side.B) == 0:
+            seed_actions.append(PlaceOrder("B", config.drip_size * ONE_CONTRACT_FP100))
+        for action in seed_actions:
+            await self._execute_drip_action(event_ticker, pair, action)
+
+        eta_a, front_a = self._drip_eta_and_front(event_ticker, pair, Side.A)
+        eta_b, front_b = self._drip_eta_and_front(event_ticker, pair, Side.B)
+        for action in controller.evaluate_blip(
+            eta_a_min=eta_a,
+            eta_b_min=eta_b,
+            front_a_id=front_a,
+            front_b_id=front_b,
+        ):
+            await self._execute_drip_action(event_ticker, pair, action)
+
+    def _drip_eta_and_front(
+        self,
+        event_ticker: str,
+        pair: ArbPair,
+        side: Side,
+    ) -> tuple[float | None, str | None]:
+        """Return per-side ETA and front order id for BLIP evaluation."""
+        try:
+            ledger = self._adjuster.get_ledger(event_ticker)
+        except KeyError:
+            return (None, None)
+
+        order_id = ledger.resting_order_id(side)
+        if order_id is None:
+            return (None, None)
+
+        queue_pos = self._queue_cache.get(order_id)
+        if queue_pos is None:
+            return (None, order_id)
+
+        ticker = pair.ticker_a if side == Side.A else pair.ticker_b
+        price_bps = ledger.resting_price_bps(side)
+        eta = self._cpm.eta_minutes(
+            ticker,
+            queue_position=queue_pos,
+            outcome="no",
+            book_side="BID",
+            price_bps=price_bps,
+        )
+        return (eta, order_id)
+
+    async def _execute_drip_action(
+        self,
+        event_ticker: str,
+        pair: ArbPair,
+        action: Action,
+    ) -> None:
+        if isinstance(action, NoOp):
+            return
+        if isinstance(action, PlaceOrder):
+            await self._drip_place_bid(event_ticker, pair, action)
+            return
+        if isinstance(action, BlipAction):
+            key = (event_ticker, action.side)
+            now = time.monotonic()
+            last = self._drip_blip_last_at.get(key)
+            if last is not None and now - last < _DRIP_BLIP_COOLDOWN_S:
+                logger.info(
+                    "drip_blip_skip_cooldown",
+                    event_ticker=event_ticker,
+                    side=action.side,
+                )
+                return
+
+            side = Side.A if action.side == "A" else Side.B
+            try:
+                ledger = self._adjuster.get_ledger(event_ticker)
+            except KeyError:
+                return
+            price_bps = ledger.resting_price_bps(side)
+            await self.cancel_order_with_verify(action.order_id, pair)
+            self._drip_blip_last_at[key] = now
+            drip_size_fp100 = (
+                self._drip_events[event_ticker].drip_size * ONE_CONTRACT_FP100
+            )
+            await self._drip_place_bid(
+                event_ticker,
+                pair,
+                PlaceOrder(action.side, drip_size_fp100),
+                price_bps=price_bps,
+            )
+            logger.info(
+                "drip_blip_executed",
+                event_ticker=event_ticker,
+                side=action.side,
+                order_id=action.order_id,
+            )
+
+    async def _drip_place_bid(
+        self,
+        event_ticker: str,
+        pair: ArbPair,
+        action: PlaceOrder,
+        *,
+        price_bps: int | None = None,
+    ) -> None:
+        """Place one DRIP bid through the standard order API."""
+        if event_ticker not in self._drip_events:
+            return
+        if not await self._wait_for_ledger_ready(pair, "drip"):
+            return
+
+        try:
+            ledger = self._adjuster.get_ledger(event_ticker)
+        except KeyError:
+            return
+
+        side = Side.A if action.side == "A" else Side.B
+        config = self._drip_events[event_ticker]
+        if ledger.resting_count(side) >= config.max_ahead_per_side:
+            return
+
+        if price_bps is None or price_bps <= 0:
+            price_bps = self._drip_current_price_bps(pair, side)
+        if price_bps <= 0:
+            logger.warning("drip_place_skip_no_price", event_ticker=event_ticker, side=side.value)
+            return
+
+        other_side = side.other
+        other_price_bps = ledger.resting_price_bps(other_side)
+        if other_price_bps <= 0:
+            other_price_bps = self._drip_current_price_bps(pair, other_side)
+        if (
+            other_price_bps > 0
+            and fee_adjusted_cost_bps(price_bps, rate=pair.fee_rate)
+            + fee_adjusted_cost_bps(other_price_bps, rate=pair.fee_rate)
+            >= ONE_DOLLAR_BPS
+        ):
+            logger.info(
+                "drip_place_skip_unprofitable",
+                event_ticker=event_ticker,
+                side=side.value,
+                price_bps=price_bps,
+                other_price_bps=other_price_bps,
+            )
+            return
+
+        qty = action.drip_size_fp100 // ONE_CONTRACT_FP100
+        price_cents = bps_to_cents_round(price_bps)
+        ok, reason = ledger.is_placement_safe(side, qty, price_cents, rate=pair.fee_rate)
+        if not ok and "unit" in reason.lower():
+            self._notify(
+                f"DRIP BLOCKED {self._display_name(event_ticker)} ({side.value}): {reason}",
+                "warning",
+                toast=True,
+            )
+            return
+
+        ticker = pair.ticker_a if side == Side.A else pair.ticker_b
+        pair_side = pair.side_a if side == Side.A else pair.side_b
+        order = await self._rest.create_order(
+            ticker=ticker,
+            action="buy",
+            side=pair_side,
+            yes_price_bps=price_bps if pair_side == "yes" else None,
+            no_price_bps=price_bps if pair_side == "no" else None,
+            count_fp100=action.drip_size_fp100,
+            post_only=True,
+        )
+        ledger.record_placement_bps(
+            side,
+            order_id=order.order_id,
+            count_fp100=order.remaining_count_fp100,
+            price_bps=price_bps,
+        )
+        self._orders_cache.append(order)
+        self._order_placed_at[order.order_id] = time.monotonic()
+        self._notify(
+            f"DRIP {self._display_name(event_ticker)} {side.value}: "
+            f"{qty} @ {price_cents}c",
+            "information",
+        )
+
+    def _drip_current_price_bps(self, pair: ArbPair, side: Side) -> int:
+        opp = self._scanner.all_snapshots.get(pair.event_ticker)
+        if opp is None:
+            return 0
+        if side == Side.A:
+            return opp.no_a_bps if opp.no_a_bps else opp.no_a * ONE_CENT_BPS
+        return opp.no_b_bps if opp.no_b_bps else opp.no_b * ONE_CENT_BPS
 
     def check_queue_stress(self) -> None:
         """Detect resting orders stuck deep in queue and propose 1c improvements.
@@ -2861,7 +3308,7 @@ class TradingEngine:
             event_ticker = pair.event_ticker
 
             # Skip exit-only events
-            if event_ticker in self._exit_only_events:
+            if event_ticker in self._exit_only_events or self.is_drip(event_ticker):
                 continue
 
             # Skip if a proposal already exists for this event
@@ -3069,6 +3516,13 @@ class TradingEngine:
                 f"Bid BLOCKED {label}: exit-only mode (press E to disable)", "error", toast=True
             )
             logger.error("bid_blocked_exit_only", event_ticker=evt_for_bid)
+            return
+        if evt_for_bid and self.is_drip(evt_for_bid):
+            label = self._display_name(evt_for_bid)
+            self._notify(
+                f"Bid BLOCKED {label}: DRIP owns this event", "error", toast=True
+            )
+            logger.error("bid_blocked_drip", event_ticker=evt_for_bid)
             return
 
         # Block on paused markets
@@ -4830,6 +5284,24 @@ class TradingEngine:
         total_a = filled_a + resting_a
         total_b = filled_b + resting_b
 
+        if self.is_drip(event_ticker):
+            pair = self.find_pair(event_ticker)
+            if pair is None:
+                return "DRIP"
+            eta_a, _ = self._drip_eta_and_front(event_ticker, pair, Side.A)
+            eta_b, _ = self._drip_eta_and_front(event_ticker, pair, Side.B)
+            if eta_a is not None and eta_b is None:
+                return "DRIP +inf B"
+            if eta_b is not None and eta_a is None:
+                return "DRIP +inf A"
+            if eta_a is not None and eta_b is not None and eta_a != eta_b:
+                if eta_a < eta_b:
+                    return f"DRIP +{eta_b - eta_a:.1f}m B"
+                return f"DRIP +{eta_a - eta_b:.1f}m A"
+            if resting_a > 0 or resting_b > 0:
+                return "DRIP"
+            return "DRIP seed"
+
         # Exit-only status takes priority
         if self.is_exit_only(event_ticker):
             if filled_a == filled_b and resting_a == 0 and resting_b == 0:
@@ -4944,6 +5416,8 @@ class TradingEngine:
         """Diagnose why the proposer isn't suggesting for this event."""
         if self.is_exit_only(event_ticker):
             return "EXIT"
+        if self.is_drip(event_ticker):
+            return "DRIP"
 
         if not self._auto_config.enabled:
             return "Sug. off"
