@@ -2,6 +2,20 @@
 
 Record significant technical decisions here.
 
+## 2026-04-27 — DRIP catch-up stays one-at-a-time until ledger trust is proven
+
+**Context:** When DRIP is enabled on a ticker that already has an imbalanced position (e.g., side A = 0 contracts, side B = 20 contracts — either from a mistake, from transitioning a non-DRIP ticker into DRIP, or from any other prior trading), `_drive_drip`'s seed logic places **one** drip-sized order at a time on the behind side, gated on `resting_count(side) == 0`. The `max_drips` cap (which sets `per_side_contract_cap = drip_size * max_drips`) is irrelevant during catch-up — the serialization condition keeps resting at 0 or 1 throughout. Closing a 20-contract gap with `drip_size=1` therefore takes ~20 sequential fills instead of being parallelized up to `max_drips`.
+
+A natural future enhancement is to let catch-up exceed `max_drips` (or otherwise place multiple drips concurrently up to a separate "catch-up cap") so imbalances close faster.
+
+**Decision:** **Defer that enhancement.** Keep `_drive_drip`'s seed logic strictly one-at-a-time. Document the deferral here so it isn't re-litigated as an oversight, and so a future PR can land it intentionally rather than as a side effect of someone "improving" the seed logic.
+
+**Rationale:** The accelerator only behaves correctly if "how far behind is each side?" is a *trustworthy* number. The CLE-TOR runaway (5c45274, 2026-04-23) and the KXGOLDCARDS double-write (PR fix, 2026-04-27) are both in-session ledger-correctness incidents where Talos's view of `filled_count(side)` diverged from Kalshi's truth — by enough to drive bad decisions. KXGOLDCARDS specifically over-counted by 1 contract per fill, permanent for the session, with no API correction path for same-ticker pairs. Until the ledger-correctness story is more thoroughly stress-tested (no `ws_fill_position_drift` warnings observed across a multi-week window, audit script clean across all 46+ active pairs), accelerated catch-up could *amplify* a misread instead of recovering from one — e.g., placing 15 unwanted contracts because the ledger thinks A is 20 behind when reality is 5. One-at-a-time keeps the worst-case overshoot bounded to `drip_size`.
+
+**Re-examine when:** the drift detector at [engine.py `_on_fill`](../src/talos/engine.py) has gone quiet for a sustained window AND the [drift_report.py diagnostic](../scripts/drift_report.py) shows zero per-pair drift across a representative sample of restarts. At that point the design question becomes "what's the right catch-up cap and acceleration shape?" — separate from the deferral itself. Tracked by the pointer comment in `_drive_drip`.
+
+
+
 ## 2026-03-03 — Pure state + async orchestrator split
 
 Split into pure state machine + async orchestrator. See [[patterns#Pure state + async orchestrator split]] and [[principles#13. Test Purity Drives Architecture]].
@@ -506,3 +520,28 @@ Key changes:
 **Rationale:** Per-side ETA unlocks the DRIP/BLIP POC's BLIP threshold (operator-set `BLIP_DELTA_MIN` minutes between behind-side and ahead-side fill ETAs) — see [redesign spec](../docs/superpowers/specs/2026-04-26-drip-staggered-arb-redesign.md) and [DRIP plan](../docs/superpowers/plans/2026-04-26-drip-blip-poc.md). Test speedup is an independent operational win — daily dev iteration was burning 13 minutes per run on what turned out to be ONE shared startup-gate timeout in the test fixture, with another 3 minutes on a structlog traceback explosion specific to the test scenario. Both fixes were single-character or single-line changes once the root cause was found.
 
 **Source-of-truth invariant:** The C1 fix (bare-ticker aggregate iterates yes-only) preserves backward-compat *numerical* semantics for legacy callers — without it, every legacy call would have silently doubled CPM and halved ETA, breaking stale-detection thresholds. Caught by code review before merge; locked by `test_ticker_aggregate_counts_each_trade_once_via_ingest`.
+
+## 2026-04-28 — DRIP redesigned as insertion-strategy parameter
+
+Replaced the parallel DRIP pipeline (DripController + `_drive_drip`
+owning seed/replenish/place + 7 `is_drip` gates blocking the standard
+pipeline) with a single `per_side_max_ahead(ledger, side, drip_config)`
+helper routed through every per-side cap site (rebalance overcommit,
+top-up, post-cancel safety, reconcile, proposer qty). DRIP events now
+flow through the standard pipeline; `_drive_drip` is BLIP-only.
+
+Snap-to-cap on toggle handled by adding the event to `_dirty_events`;
+the next `check_imbalances` cycle calls `compute_overcommit_reduction`,
+which reads the new cap via the helper and cancels surplus resting
+down to it.
+
+`DripController` class removed; `evaluate_blip` is a free function in
+`drip.py`. `DripConfig.per_side_contract_cap` renamed to
+`max_ahead_per_side` for cross-strategy consistency.
+
+Frozen-row symptom from 2026-04-28 (KXTRUMP-…-PELO row 143) resolved:
+under the new model, the standard pipeline's catch-up exception
+covers the queue-bumped behind-side independent of ETA-gap signals.
+
+**Spec:** `docs/superpowers/specs/2026-04-28-drip-redesign-design.md`
+**Plan:** `docs/superpowers/plans/2026-04-28-drip-redesign-plan.md`
