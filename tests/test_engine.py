@@ -1809,6 +1809,136 @@ class TestDripToggleDirty:
         )
 
 
+class TestExecuteBlip:
+    """_execute_blip end-to-end: cancel-then-replace, cooldown stamping, failure handling."""
+
+    @pytest.mark.asyncio
+    async def test_cancels_then_replaces_and_stamps_cooldown(self) -> None:
+        """BLIP execution must cancel the existing order, place a replacement,
+        then stamp the cooldown so subsequent BLIPs within 60 s are suppressed."""
+        from talos.drip import BlipAction
+
+        engine, _ = _engine_with_pair()
+        engine.enable_drip("EVT-1", DripConfig(drip_size=1, max_drips=1))
+
+        pair = engine._scanner.pairs[0]
+        ledger = engine._adjuster.get_ledger("EVT-1")
+        # Arm the ledger with a resting order on side A so _execute_blip has
+        # a price and count to work with.
+        ledger.record_placement_bps(
+            Side.A, order_id="ord-old", count_fp100=100, price_bps=4500
+        )
+
+        cancel_calls: list[str] = []
+
+        async def fake_cancel(order_id: str, pair: object) -> None:
+            cancel_calls.append(order_id)
+
+        engine.cancel_order_with_verify = fake_cancel  # type: ignore[method-assign]
+
+        create_calls: list[dict] = []
+
+        async def fake_create(**kwargs: object) -> Order:
+            create_calls.append(dict(kwargs))
+            return _make_order("TK-A", order_id="ord-new", remaining_count=1)
+
+        engine._rest.create_order = fake_create  # type: ignore[assignment]
+
+        action = BlipAction(side="A", order_id="ord-old")
+        await engine._execute_blip("EVT-1", pair, action)
+
+        assert cancel_calls == ["ord-old"], "cancel must fire once"
+        assert len(create_calls) == 1, "create_order must fire once"
+        assert ("EVT-1", "A") in engine._drip_blip_last_at, "cooldown must be stamped"
+
+    @pytest.mark.asyncio
+    async def test_cooldown_suppresses_second_call(self) -> None:
+        """A second _execute_blip call within 60 s must be a no-op."""
+        from talos.drip import BlipAction
+
+        engine, _ = _engine_with_pair()
+        engine.enable_drip("EVT-1", DripConfig(drip_size=1, max_drips=1))
+
+        pair = engine._scanner.pairs[0]
+        ledger = engine._adjuster.get_ledger("EVT-1")
+        ledger.record_placement_bps(
+            Side.A, order_id="ord-old", count_fp100=100, price_bps=4500
+        )
+
+        cancel_calls: list[str] = []
+
+        async def fake_cancel(order_id: str, pair: object) -> None:
+            cancel_calls.append(order_id)
+
+        engine.cancel_order_with_verify = fake_cancel  # type: ignore[method-assign]
+
+        async def fake_create(**kwargs: object) -> Order:
+            return _make_order("TK-A", order_id="ord-new", remaining_count=1)
+
+        engine._rest.create_order = fake_create  # type: ignore[assignment]
+
+        action = BlipAction(side="A", order_id="ord-old")
+        await engine._execute_blip("EVT-1", pair, action)
+        assert len(cancel_calls) == 1
+
+        # Immediately call again — cooldown should suppress both mocks.
+        cancel_calls.clear()
+        create_called = False
+
+        async def fake_cancel2(order_id: str, pair: object) -> None:
+            cancel_calls.append(order_id)
+
+        async def fake_create2(**kwargs: object) -> Order:
+            nonlocal create_called
+            create_called = True
+            return _make_order("TK-A", order_id="ord-new2", remaining_count=1)
+
+        engine.cancel_order_with_verify = fake_cancel2  # type: ignore[method-assign]
+        engine._rest.create_order = fake_create2  # type: ignore[assignment]
+
+        await engine._execute_blip("EVT-1", pair, action)
+        assert cancel_calls == [], "cooldown must suppress second cancel"
+        assert not create_called, "cooldown must suppress second create_order"
+
+    @pytest.mark.asyncio
+    async def test_cooldown_not_stamped_when_create_order_fails(self) -> None:
+        """If create_order raises, the cooldown must NOT be stamped so the next
+        BLIP cycle can retry immediately.  The event must be marked dirty."""
+        from talos.drip import BlipAction
+
+        engine, _ = _engine_with_pair()
+        engine.enable_drip("EVT-1", DripConfig(drip_size=1, max_drips=1))
+
+        pair = engine._scanner.pairs[0]
+        ledger = engine._adjuster.get_ledger("EVT-1")
+        ledger.record_placement_bps(
+            Side.A, order_id="ord-old", count_fp100=100, price_bps=4500
+        )
+
+        async def fake_cancel(order_id: str, pair: object) -> None:
+            pass
+
+        engine.cancel_order_with_verify = fake_cancel  # type: ignore[method-assign]
+
+        async def failing_create(**kwargs: object) -> Order:
+            raise RuntimeError("rate limit")
+
+        engine._rest.create_order = failing_create  # type: ignore[assignment]
+
+        engine._dirty_events.discard("EVT-1")  # ensure clean slate
+
+        action = BlipAction(side="A", order_id="ord-old")
+        with pytest.raises(RuntimeError, match="rate limit"):
+            await engine._execute_blip("EVT-1", pair, action)
+
+        assert ("EVT-1", "A") not in engine._drip_blip_last_at, (
+            "cooldown must not be stamped after failed create_order"
+        )
+        assert "EVT-1" in engine._dirty_events, (
+            "event must be marked dirty so standard pipeline re-covers ASAP"
+        )
+
+
 class TestLifecycleFiltering:
     """Lifecycle notifications should only fire for tracked markets."""
 

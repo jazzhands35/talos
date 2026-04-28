@@ -3157,19 +3157,39 @@ class TradingEngine:
             return
 
         await self.cancel_order_with_verify(action.order_id, pair)
-        self._drip_blip_last_at[key] = now
+        # NOTE: cooldown is stamped AFTER create_order succeeds (see below).
+        # If create_order raises, the cancel already executed (side is naked),
+        # but we skip the cooldown stamp so the next BLIP cycle can retry
+        # immediately rather than being blocked for 60 s.
 
         ticker = pair.ticker_a if side == Side.A else pair.ticker_b
         pair_side = pair.side_a if side == Side.A else pair.side_b
-        order = await self._rest.create_order(
-            ticker=ticker,
-            action="buy",
-            side=pair_side,
-            yes_price_bps=price_bps if pair_side == "yes" else None,
-            no_price_bps=price_bps if pair_side == "no" else None,
-            count_fp100=resting_count_fp100,
-            post_only=True,
-        )
+        try:
+            order = await self._rest.create_order(
+                ticker=ticker,
+                action="buy",
+                side=pair_side,
+                yes_price_bps=price_bps if pair_side == "yes" else None,
+                no_price_bps=price_bps if pair_side == "no" else None,
+                count_fp100=resting_count_fp100,
+                post_only=True,
+            )
+        except Exception as exc:
+            # The cancel already executed — the side is now naked.  Mark the
+            # event dirty so the standard pipeline re-covers it ASAP, and skip
+            # the cooldown stamp so a future BLIP attempt is not artificially
+            # delayed.
+            logger.warning(
+                "drip_blip_replace_failed",
+                event_ticker=event_ticker,
+                side=action.side,
+                old_order_id=action.order_id,
+                error=str(exc),
+            )
+            self._dirty_events.add(event_ticker)
+            raise
+
+        self._drip_blip_last_at[key] = now
         ledger.record_placement_bps(
             side,
             order_id=order.order_id,
