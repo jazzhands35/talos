@@ -1794,24 +1794,16 @@ class TradingEngine:
 
                 # Monotonic update — WS can never decrease fills.
                 order.status = msg.status
-                order.fill_count_fp100 = max(
-                    order.fill_count_fp100, msg.fill_count_fp100
-                )
+                order.fill_count_fp100 = max(order.fill_count_fp100, msg.fill_count_fp100)
                 order.remaining_count_fp100 = msg.remaining_count_fp100
-                order.maker_fill_cost_bps = max(
-                    order.maker_fill_cost_bps, msg.maker_fill_cost_bps
-                )
-                order.taker_fill_cost_bps = max(
-                    order.taker_fill_cost_bps, msg.taker_fill_cost_bps
-                )
+                order.maker_fill_cost_bps = max(order.maker_fill_cost_bps, msg.maker_fill_cost_bps)
+                order.taker_fill_cost_bps = max(order.taker_fill_cost_bps, msg.taker_fill_cost_bps)
                 order.maker_fees_bps = max(order.maker_fees_bps, msg.maker_fees_bps)
 
                 new_fills_fp100 = order.fill_count_fp100 - old_fill_count_fp100
                 new_fills = new_fills_fp100 // ONE_CONTRACT_FP100
                 if new_fills_fp100 > 0:
-                    price_bps = (
-                        msg.no_price_bps if msg.side == "no" else msg.yes_price_bps
-                    )
+                    price_bps = msg.no_price_bps if msg.side == "no" else msg.yes_price_bps
                     price = bps_to_cents_round(price_bps)
                     self._notify(
                         f"WS fill: {new_fills} @ {price}¢ on {msg.ticker}",
@@ -1861,9 +1853,7 @@ class TradingEngine:
                             break
                     # DB schema is integer cents / whole contracts; round from
                     # bps/fp100 for the log insert.
-                    ws_price_bps = (
-                        msg.no_price_bps if msg.side == "no" else msg.yes_price_bps
-                    )
+                    ws_price_bps = msg.no_price_bps if msg.side == "no" else msg.yes_price_bps
                     self._data_collector.log_order(
                         event_ticker=event_ticker,
                         order_id=msg.order_id,
@@ -1871,9 +1861,8 @@ class TradingEngine:
                         side=msg.side,
                         status=msg.status,
                         price=bps_to_cents_round(ws_price_bps),
-                        initial_count=(
-                            msg.fill_count_fp100 + msg.remaining_count_fp100
-                        ) // ONE_CONTRACT_FP100,
+                        initial_count=(msg.fill_count_fp100 + msg.remaining_count_fp100)
+                        // ONE_CONTRACT_FP100,
                         fill_count=msg.fill_count_fp100 // ONE_CONTRACT_FP100,
                         remaining_count=msg.remaining_count_fp100 // ONE_CONTRACT_FP100,
                         maker_fill_cost=bps_to_cents_round(msg.maker_fill_cost_bps),
@@ -1928,11 +1917,7 @@ class TradingEngine:
             self._tracker.update_orders(self._orders_cache, self._scanner.pairs)
             self.recompute_positions()
             # Enqueue reaction if new order arrived with fills
-            if (
-                new_order.fill_count_fp100 > 0
-                and self._initial_sync_done
-                and ws_pair is not None
-            ):
+            if new_order.fill_count_fp100 > 0 and self._initial_sync_done and ws_pair is not None:
                 self._reaction_queue.put_nowait(ws_pair.event_ticker)
 
     def _on_fill(self, msg: FillMessage) -> None:
@@ -1992,9 +1977,7 @@ class TradingEngine:
                     # yes_price_bps and no_price_bps (complement) — always
                     # pick the one matching the buy side so cost basis is
                     # recorded against what we actually paid.
-                    price_bps = (
-                        msg.no_price_bps if msg.side == "no" else msg.yes_price_bps
-                    )
+                    price_bps = msg.no_price_bps if msg.side == "no" else msg.yes_price_bps
                     ledger.record_fill_from_ws(
                         side,
                         trade_id=msg.trade_id,
@@ -2203,11 +2186,7 @@ class TradingEngine:
             revenue_bps += filled_b_fp100 * ONE_DOLLAR_BPS // ONE_CONTRACT_FP100
 
         total_pnl_bps = (
-            revenue_bps
-            - total_cost_a_bps
-            - total_cost_b_bps
-            - total_fees_a_bps
-            - total_fees_b_bps
+            revenue_bps - total_cost_a_bps - total_cost_b_bps - total_fees_a_bps - total_fees_b_bps
         )
 
         # Round bps → cents at the DB-schema boundary.
@@ -2941,9 +2920,7 @@ class TradingEngine:
                             ticker = pair.ticker_a if side == Side.A else pair.ticker_b
                             # Section 8 startup gate — block risk-
                             # increasing placement until ledger confirmed.
-                            if not await self._wait_for_ledger_ready(
-                                pair, "top-up"
-                            ):
+                            if not await self._wait_for_ledger_ready(pair, "top-up"):
                                 continue
                             group = await _create_order_group(
                                 self._rest, pair.event_ticker, side.value, qty
@@ -3049,6 +3026,7 @@ class TradingEngine:
                 display_name=self._display_name(pair.event_ticker),
                 exit_only=self.is_exit_only(pair.event_ticker),
                 pair_volume_24h=pair_volume,
+                drip_config=self._drip_events.get(pair.event_ticker),
             )
             if proposal is not None:
                 self._proposal_queue.add(proposal)
@@ -3340,10 +3318,7 @@ class TradingEngine:
             # Safety gate #2: no spread crossing
             kalshi_side = pair.side_a if behind_side == Side.A else pair.side_b
             ask_level = self._feed.book_manager.best_ask(ticker, side=kalshi_side)
-            if (
-                ask_level is not None
-                and improved_price >= ask_level.price_bps // ONE_CENT_BPS
-            ):
+            if ask_level is not None and improved_price >= ask_level.price_bps // ONE_CENT_BPS:
                 continue
 
             # Build proposal
@@ -3581,9 +3556,7 @@ class TradingEngine:
             # Log to data collector (schema is integer cents / whole contracts).
             if self._data_collector is not None:
                 for order in (order_a, order_b):
-                    price_bps = (
-                        order.no_price_bps if order.side == "no" else order.yes_price_bps
-                    )
+                    price_bps = order.no_price_bps if order.side == "no" else order.yes_price_bps
                     self._data_collector.log_order(
                         event_ticker=pair.api_event_ticker,
                         order_id=order.order_id,
@@ -3789,8 +3762,7 @@ class TradingEngine:
         if rejected_tickers:
             reasons = "\n".join(f"  - {t}: {r}" for t, r in rejected_tickers)
             self._notify(
-                f"Rejected {len(rejected_tickers)} market(s) by admission "
-                f"guard:\n{reasons}",
+                f"Rejected {len(rejected_tickers)} market(s) by admission guard:\n{reasons}",
                 "error",
                 toast=True,
             )
@@ -3840,9 +3812,7 @@ class TradingEngine:
         # subscribes, and duplicate _resolve_batch wiring. The retry
         # contract that the round-1 toast advertises ("adds become
         # no-ops on retry") only holds if we genuinely no-op here.
-        pre_existing_event_tickers: set[str] = set(
-            self._game_manager._games.keys()
-        )
+        pre_existing_event_tickers: set[str] = set(self._game_manager._games.keys())
         added_to_adjuster: list[ArbPair] = []
         subscribed_tickers: list[str] = []
 
@@ -4361,9 +4331,7 @@ class TradingEngine:
         # `removed` (clean removal completed) and `not_found` (pair already
         # gone — idempotency case) are terminal.
         terminal_statuses = {"removed", "not_found"}
-        terminal_pts = {
-            o.pair_ticker for o in outcomes if o.status in terminal_statuses
-        }
+        terminal_pts = {o.pair_ticker for o in outcomes if o.status in terminal_statuses}
         for pt in terminal_pts:
             self._winding_down.discard(pt)
 
@@ -4737,10 +4705,7 @@ class TradingEngine:
 
         # Re-check: no spread crossing
         ask_level = self._feed.book_manager.best_ask(qi.ticker, side=qi.kalshi_side)
-        if (
-            ask_level is not None
-            and qi.improved_price >= ask_level.price_bps // ONE_CENT_BPS
-        ):
+        if ask_level is not None and qi.improved_price >= ask_level.price_bps // ONE_CENT_BPS:
             self._notify(
                 f"Queue improve BLOCKED: {name} {qi.improved_price}c would cross spread",
                 "warning",
@@ -4775,16 +4740,12 @@ class TradingEngine:
 
             # Update fills from amend response (exact-precision via bps/fp100
             # siblings of the ledger accessors + Order fields).
-            fill_delta_fp100 = (
-                old_order.fill_count_fp100 - ledger.filled_count_fp100(side)
-            )
+            fill_delta_fp100 = old_order.fill_count_fp100 - ledger.filled_count_fp100(side)
             if fill_delta_fp100 > 0:
                 old_price_bps = (
                     old_order.no_price_bps if old_order.side == "no" else old_order.yes_price_bps
                 )
-                fee_delta_bps = (
-                    _order_maker_fees_bps(old_order) - ledger.filled_fees_bps(side)
-                )
+                fee_delta_bps = _order_maker_fees_bps(old_order) - ledger.filled_fees_bps(side)
                 ledger.record_fill_bps(
                     side,
                     count_fp100=fill_delta_fp100,
@@ -4911,9 +4872,7 @@ class TradingEngine:
 
     # ── Section 8 startup safety gate ────────────────────────────────
 
-    async def _wait_for_ledger_ready(
-        self, pair: ArbPair, op_name: str
-    ) -> bool:
+    async def _wait_for_ledger_ready(self, pair: ArbPair, op_name: str) -> bool:
         """Block risk-increasing ops until the ledger is confirmed.
 
         Returns True if the ledger clears within
@@ -4943,8 +4902,7 @@ class TradingEngine:
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 self._notify(
-                    f"Confirmation pending for {pair.event_ticker} "
-                    f"— {op_name} blocked",
+                    f"Confirmation pending for {pair.event_ticker} — {op_name} blocked",
                     "error",
                 )
                 return False
@@ -4953,20 +4911,11 @@ class TradingEngine:
             # call reconcile_from_fills to adopt Kalshi's authoritative
             # per-fill data (auto-adopts on any diff — no operator gate).
             elapsed = STARTUP_SYNC_TIMEOUT_S - remaining
-            needs_reconcile = (
-                ledger.stale_fills_unconfirmed
-                or ledger.legacy_migration_pending
-            )
-            if (
-                needs_reconcile
-                and not reconcile_attempted
-                and elapsed >= AUTO_RECONCILE_DELAY_S
-            ):
+            needs_reconcile = ledger.stale_fills_unconfirmed or ledger.legacy_migration_pending
+            if needs_reconcile and not reconcile_attempted and elapsed >= AUTO_RECONCILE_DELAY_S:
                 reconcile_attempted = True
                 try:
-                    await ledger.reconcile_from_fills(
-                        self._rest, self._persist_games_now
-                    )
+                    await ledger.reconcile_from_fills(self._rest, self._persist_games_now)
                 except Exception:
                     logger.exception(
                         "auto_reconcile_failed",
@@ -5001,9 +4950,7 @@ class TradingEngine:
         from talos.persistence_errors import PersistenceError
 
         try:
-            save_games(
-                [p.event_ticker for p in self._game_manager.active_games]
-            )
+            save_games([p.event_ticker for p in self._game_manager.active_games])
             games_data: list[dict[str, object]] = []
             for p in self._game_manager.active_games:
                 entry: dict[str, object] = {
@@ -5015,9 +4962,7 @@ class TradingEngine:
                     "close_time": p.close_time,
                     "expected_expiration_time": p.expected_expiration_time,
                     "label": self._game_manager.labels.get(p.event_ticker, ""),
-                    "sub_title": self._game_manager.subtitles.get(
-                        p.event_ticker, ""
-                    ),
+                    "sub_title": self._game_manager.subtitles.get(p.event_ticker, ""),
                     "side_a": p.side_a,
                     "side_b": p.side_b,
                     "kalshi_event_ticker": p.kalshi_event_ticker,
@@ -5049,20 +4994,15 @@ class TradingEngine:
                 games_data.append(entry)
             ok = save_games_full(games_data)
             if not ok:
-                raise PersistenceError(
-                    "save_games_full() returned failure"
-                )
+                raise PersistenceError("save_games_full() returned failure")
         except PersistenceError:
             raise
         except Exception as exc:
             raise PersistenceError(
-                f"persistence-path failure during _persist_games_now: "
-                f"{type(exc).__name__}: {exc}"
+                f"persistence-path failure during _persist_games_now: {type(exc).__name__}: {exc}"
             ) from exc
 
-    async def cancel_order_with_verify(
-        self, order_id: str, pair: ArbPair
-    ) -> None:
+    async def cancel_order_with_verify(self, order_id: str, pair: ArbPair) -> None:
         """Fail-safe cancel. Always allowed regardless of ``ledger.ready()``.
 
         F33: a 404 on a single ``order_id`` does NOT prove the side has
@@ -5133,15 +5073,11 @@ class TradingEngine:
         except KeyError:
             return
         try:
-            orders_a = await self._rest.get_orders(
-                ticker=pair.ticker_a, status="resting"
-            )
+            orders_a = await self._rest.get_orders(ticker=pair.ticker_a, status="resting")
             orders_b = (
                 []
                 if pair.is_same_ticker
-                else await self._rest.get_orders(
-                    ticker=pair.ticker_b, status="resting"
-                )
+                else await self._rest.get_orders(ticker=pair.ticker_b, status="resting")
             )
         except (KalshiAPIError, httpx.HTTPError):
             logger.warning(
@@ -5151,9 +5087,7 @@ class TradingEngine:
             )
             return
         orders = list(orders_a) + list(orders_b)
-        ledger.sync_from_orders(
-            orders, ticker_a=pair.ticker_a, ticker_b=pair.ticker_b
-        )
+        ledger.sync_from_orders(orders, ticker_a=pair.ticker_a, ticker_b=pair.ticker_b)
 
     # ── Internal helpers ─────────────────────────────────────────────
 

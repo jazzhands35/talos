@@ -13,9 +13,11 @@ import structlog
 
 from talos.automation_config import AutomationConfig
 from talos.data_collector import DataCollector
+from talos.drip import DripConfig
 from talos.models.proposal import Proposal, ProposalKey, ProposedBid
 from talos.models.strategy import ArbPair, Opportunity
 from talos.position_ledger import PositionLedger, Side
+from talos.strategy import per_side_max_ahead
 from talos.units import ONE_CENT_BPS
 
 logger = structlog.get_logger()
@@ -96,6 +98,7 @@ class OpportunityProposer:
         display_name: str = "",
         exit_only: bool = False,
         pair_volume_24h: int | None = None,
+        drip_config: DripConfig | None = None,
     ) -> Proposal | None:
         """Return a bid proposal if all gates pass, None otherwise."""
         if now is None:
@@ -212,8 +215,7 @@ class OpportunityProposer:
                 self._emit(
                     event,
                     "block_rejection_cooldown",
-                    f"in cooldown {elapsed:.0f}s / "
-                    f"{self._config.rejection_cooldown_seconds:.0f}s",
+                    f"in cooldown {elapsed:.0f}s / {self._config.rejection_cooldown_seconds:.0f}s",
                     fee_edge=opportunity.fee_edge,
                 )
                 return None
@@ -253,8 +255,7 @@ class OpportunityProposer:
                 self._emit(
                     event,
                     "wait_stability",
-                    f"stable {stable_for:.0f}s / "
-                    f"{self._config.stability_seconds:.0f}s",
+                    f"stable {stable_for:.0f}s / {self._config.stability_seconds:.0f}s",
                     fee_edge=opportunity.fee_edge,
                 )
                 return None
@@ -263,18 +264,18 @@ class OpportunityProposer:
             stable_for = 0.0
 
         # All gates passed — build proposal
-        # Qty = remaining capacity minus what's already resting.
+        # Qty = remaining capacity bounded by the strategy cap.
         # After a unit_size change, existing fills/resting are a partial unit.
         # Exception: re-entry after both sides complete → start a fresh full unit.
         if ledger.both_sides_complete() and ledger.filled_count(Side.A) == ledger.filled_count(
             Side.B
         ):
-            qty = ledger.unit_size
+            base_qty = ledger.unit_size
         else:
             need_a = ledger.unit_remaining(Side.A) - ledger.resting_count(Side.A)
             need_b = ledger.unit_remaining(Side.B) - ledger.resting_count(Side.B)
-            qty = min(need_a, need_b)
-            if qty <= 0:
+            base_qty = min(need_a, need_b)
+            if base_qty <= 0:
                 self._emit(
                     event,
                     "block_no_qty",
@@ -283,6 +284,18 @@ class OpportunityProposer:
                 )
                 return None
 
+        cap_a = per_side_max_ahead(ledger, Side.A, drip_config) - ledger.resting_count(Side.A)
+        cap_b = per_side_max_ahead(ledger, Side.B, drip_config) - ledger.resting_count(Side.B)
+        qty = min(base_qty, max(0, cap_a), max(0, cap_b))
+        if qty <= 0:
+            self._emit(
+                event,
+                "block_strategy_cap",
+                f"strategy cap leaves no room: cap_a={cap_a} cap_b={cap_b}",
+                fee_edge=opportunity.fee_edge,
+            )
+            return None
+
         # Gate 6: profitability — pair placements use the two NEW prices
         # (not new vs historical avg, which blocks re-entry after market moves).
         # P16 unit gating still checked per-side. Internal math in bps space
@@ -290,22 +303,13 @@ class OpportunityProposer:
         # exact-precision siblings (pre-migration fixture).
         from talos.fees import fee_adjusted_edge_bps
 
-        no_a_bps = (
-            opportunity.no_a_bps
-            if opportunity.no_a_bps
-            else opportunity.no_a * ONE_CENT_BPS
-        )
-        no_b_bps = (
-            opportunity.no_b_bps
-            if opportunity.no_b_bps
-            else opportunity.no_b * ONE_CENT_BPS
-        )
+        no_a_bps = opportunity.no_a_bps if opportunity.no_a_bps else opportunity.no_a * ONE_CENT_BPS
+        no_b_bps = opportunity.no_b_bps if opportunity.no_b_bps else opportunity.no_b * ONE_CENT_BPS
         if fee_adjusted_edge_bps(no_a_bps, no_b_bps, rate=pair.fee_rate) < 0:
             self._emit(
                 event,
                 "block_unprofitable",
-                f"fee-adjusted edge negative at "
-                f"{opportunity.no_a}+{opportunity.no_b}",
+                f"fee-adjusted edge negative at {opportunity.no_a}+{opportunity.no_b}",
                 fee_edge=opportunity.fee_edge,
             )
             return None

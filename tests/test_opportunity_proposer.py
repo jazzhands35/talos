@@ -43,8 +43,7 @@ def test_proposer_no_longer_takes_drip_kwarg() -> None:
 
     sig = inspect.signature(OpportunityProposer.evaluate)
     assert "drip" not in sig.parameters, (
-        "drip parameter should be removed; "
-        f"got params: {list(sig.parameters.keys())}"
+        f"drip parameter should be removed; got params: {list(sig.parameters.keys())}"
     )
 
 
@@ -327,3 +326,58 @@ class TestCooldown:
         t3 = t2 + timedelta(seconds=11)
         result3 = proposer.evaluate(pair, opp, ledger, set(), now=t3)
         assert result3 is not None
+
+
+# ── DRIP cap sizing ─────────────────────────────────────────────────
+
+
+def test_proposer_caps_qty_at_drip_max_ahead() -> None:
+    """When DRIP is enabled, proposer should size qty to the DRIP cap, not unit_size."""
+    from talos.drip import DripConfig
+
+    config = AutomationConfig(edge_threshold_cents=1.0, stability_seconds=0)
+    proposer = OpportunityProposer(config)
+    pair = _make_pair("EVT")
+    opp = _make_opp(event_ticker="EVT", no_a=49, no_b=49, fee_edge=2.0)
+    ledger = PositionLedger(event_ticker="EVT", unit_size=5)
+
+    drip_config = DripConfig(drip_size=1, max_drips=1)  # cap = 1
+    proposal = proposer.evaluate(
+        pair,
+        opp,
+        ledger,
+        pending_keys=set(),
+        display_name="EVT",
+        drip_config=drip_config,
+    )
+
+    assert proposal is not None
+    assert proposal.bid is not None
+    assert proposal.bid.qty == 1, f"expected qty=1, got {proposal.bid.qty}"
+
+
+def test_proposer_blocks_when_drip_cap_full() -> None:
+    """When DRIP cap is fully resting, proposer should emit block_strategy_cap."""
+    from talos.drip import DripConfig
+
+    config = AutomationConfig(edge_threshold_cents=1.0, stability_seconds=0)
+    proposer = OpportunityProposer(config)
+    pair = _make_pair("EVT")
+    opp = _make_opp(event_ticker="EVT", no_a=49, no_b=49, fee_edge=2.0)
+    ledger = PositionLedger(event_ticker="EVT", unit_size=5)
+    # 1 resting on each side fills the DRIP cap of 1; use record_resting (confirmed)
+    # so the pending-change gate (Gate 2b) does not fire before the strategy cap gate.
+    ledger.record_resting(Side.A, "oa", 1, 49)
+    ledger.record_resting(Side.B, "ob", 1, 49)
+
+    drip_config = DripConfig(drip_size=1, max_drips=1)
+    proposal = proposer.evaluate(
+        pair,
+        opp,
+        ledger,
+        pending_keys=set(),
+        display_name="EVT",
+        drip_config=drip_config,
+    )
+
+    assert proposal is None
