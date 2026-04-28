@@ -3087,7 +3087,6 @@ class TradingEngine:
                 pending_keys,
                 display_name=self._display_name(pair.event_ticker),
                 exit_only=self.is_exit_only(pair.event_ticker),
-                drip=self.is_drip(pair.event_ticker),
                 pair_volume_24h=pair_volume,
             )
             if proposal is not None:

@@ -36,6 +36,18 @@ def _make_opp(
 # ── Edge Threshold ──────────────────────────────────────────────────
 
 
+def test_proposer_no_longer_takes_drip_kwarg() -> None:
+    """After the insertion-strategy redesign, the proposer no longer
+    accepts a `drip` parameter. The signature must reject it."""
+    import inspect
+
+    sig = inspect.signature(OpportunityProposer.evaluate)
+    assert "drip" not in sig.parameters, (
+        "drip parameter should be removed; "
+        f"got params: {list(sig.parameters.keys())}"
+    )
+
+
 class TestEdgeThreshold:
     def test_below_threshold_no_proposal(self) -> None:
         cfg = AutomationConfig(edge_threshold_cents=1.5, stability_seconds=0)

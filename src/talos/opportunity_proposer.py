@@ -107,7 +107,6 @@ class OpportunityProposer:
         if exit_only:
             self._emit(event, "block_exit_only", "exit-only mode, no new bids")
             return None
-
         # Gate 0b: volume — skip illiquid markets where pair completion
         # is unlikely. Uses min(side_a_vol, side_b_vol) since both sides
         # need liquidity for a pair to complete.
