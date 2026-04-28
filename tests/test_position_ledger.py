@@ -827,6 +827,137 @@ class TestSameTickerSync:
         ledger.sync_from_orders(orders, "MKT-1", "MKT-1")
         assert ledger.resting_price(Side.A) == 42  # yes_price, not no_price
 
+    def test_sync_from_orders_with_fills_false_skips_fill_count_update(self):
+        """sync_from_orders(with_fills=False) updates resting only, not fills.
+
+        Regression: 2026-04-27 KXGOLDCARDS-26-B0.0 same-ticker double-write.
+        WS user_orders channel and WS fill channel each fire for the same
+        trade; both writers landed on filled_count_fp100. With the order
+        update arriving first (sync_from_orders SET-to-fill_count) and the
+        fill arriving second (record_fill_from_ws ADD), the ledger over-
+        counted by exactly 1 contract per fill. Same-ticker has no
+        positions-API correction path, so the drift is permanent.
+
+        The fix: _on_order_update calls sync_from_orders(with_fills=False)
+        so the WS-fill channel is the unique writer to filled_count.
+        """
+        ledger = PositionLedger(
+            event_ticker="KXGOLDCARDS-26-B0.0",
+            unit_size=10,
+            side_a_str="yes",
+            side_b_str="no",
+            is_same_ticker=True,
+        )
+        # ── Replay 22:24:33: ws_order_fill arrives first, reporting that
+        # the YES order's cumulative fill_count_fp went from 0 to 1.
+        order_after_fill = Order(
+            order_id="f901344b-0fd7-43e1-bb57-787bb2fc617a",
+            ticker="KXGOLDCARDS-26-B0.0",
+            action="buy",
+            side="yes",
+            no_price_bps=1600,
+            yes_price_bps=8400,
+            initial_count_fp100=100,
+            remaining_count_fp100=0,
+            fill_count_fp100=100,
+            status="executed",
+        )
+        ledger.sync_from_orders(
+            [order_after_fill],
+            ticker_a="KXGOLDCARDS-26-B0.0",
+            ticker_b="KXGOLDCARDS-26-B0.0",
+            with_fills=False,
+        )
+        # Resting cleared (order is fully filled), but fill count must
+        # NOT be touched — that's the WS fill channel's job.
+        assert ledger.filled_count(Side.A) == 0
+        assert ledger.resting_count(Side.A) == 0
+
+        # ── Replay 22:24:33: ws_fill_detail arrives next with the actual
+        # fill event. record_fill_from_ws is the unique writer here.
+        applied = ledger.record_fill_from_ws(
+            Side.A,
+            trade_id="2bb96be1-481a-4fdf-b189-1ba7cd976a6e",
+            count_fp100=100,
+            price_bps=8400,
+        )
+        assert applied is True
+        # The bug case used to show 2 here. With the fix, it's 1.
+        assert ledger.filled_count(Side.A) == 1
+
+    def test_sync_from_orders_default_still_updates_fills(self):
+        """Default sync_from_orders (no flag) still writes filled_count.
+
+        Verifies the periodic refresh_account path is unchanged: it must
+        still ratchet ledger.filled up to match orders.fill_count_fp on
+        every poll. This is the dropped-WS-fill recovery path.
+        """
+        ledger = PositionLedger(
+            event_ticker="MKT-1",
+            unit_size=10,
+            side_a_str="yes",
+            side_b_str="no",
+            is_same_ticker=True,
+        )
+        order = Order(
+            order_id="o-1",
+            ticker="MKT-1",
+            action="buy",
+            side="yes",
+            no_price_bps=1600,
+            yes_price_bps=8400,
+            initial_count_fp100=100,
+            remaining_count_fp100=0,
+            fill_count_fp100=100,
+            status="executed",
+        )
+        ledger.sync_from_orders([order], "MKT-1", "MKT-1")  # default with_fills=True
+        assert ledger.filled_count(Side.A) == 1
+
+    def test_sync_from_orders_with_fills_false_still_clears_resting(self):
+        """A cancelled/executed order with remaining=0 still clears resting,
+        even when with_fills=False.
+
+        Replays 22:24:33's resting_order_cleared event: the YES resting
+        order f901344b transitioned from resting → executed; the resting
+        slot must be cleared regardless of the with_fills flag.
+        """
+        ledger = PositionLedger(
+            event_ticker="MKT-1",
+            unit_size=10,
+            side_a_str="yes",
+            side_b_str="no",
+            is_same_ticker=True,
+        )
+        # Pre-populate: order was resting before the fill
+        ledger.record_placement_bps(
+            Side.A,
+            order_id="o-1",
+            count_fp100=100,
+            price_bps=8400,
+        )
+        ledger.bump_sync_gen()  # advance past placement gen
+        ledger.bump_sync_gen()
+        assert ledger.resting_count(Side.A) == 1
+
+        # Order updates: fully filled, no longer resting
+        order = Order(
+            order_id="o-1",
+            ticker="MKT-1",
+            action="buy",
+            side="yes",
+            no_price_bps=1600,
+            yes_price_bps=8400,
+            initial_count_fp100=100,
+            remaining_count_fp100=0,
+            fill_count_fp100=100,
+            status="executed",
+        )
+        ledger.sync_from_orders([order], "MKT-1", "MKT-1", with_fills=False)
+        # Resting cleared, fills untouched
+        assert ledger.resting_count(Side.A) == 0
+        assert ledger.filled_count(Side.A) == 0
+
 
 class TestClosedBucket:
     """closed_* fields mirror filled_* and start at zero.
@@ -837,6 +968,7 @@ class TestClosedBucket:
 
     def test_new_ledger_has_zero_closed_fields(self):
         from talos.position_ledger import PositionLedger, Side
+
         ledger = PositionLedger("EVT-X", unit_size=5)
         for side in (Side.A, Side.B):
             s = ledger._sides[side]
@@ -846,6 +978,7 @@ class TestClosedBucket:
 
     def test_reset_zeroes_closed_fields(self):
         from talos.position_ledger import PositionLedger, Side
+
         ledger = PositionLedger("EVT-X", unit_size=5)
         s = ledger._sides[Side.A]
         s.closed_count_fp100 = 99 * 100
@@ -858,12 +991,14 @@ class TestClosedBucket:
 
     def test_open_count_equals_filled_when_closed_is_zero(self):
         from talos.position_ledger import PositionLedger, Side
+
         ledger = PositionLedger("EVT-X", unit_size=5)
         ledger._sides[Side.A].filled_count_fp100 = 7 * 100
         assert ledger.open_count(Side.A) == 7
 
     def test_open_count_subtracts_closed(self):
         from talos.position_ledger import PositionLedger, Side
+
         ledger = PositionLedger("EVT-X", unit_size=5)
         s = ledger._sides[Side.A]
         s.filled_count_fp100 = 10 * 100
@@ -872,11 +1007,13 @@ class TestClosedBucket:
 
     def test_open_avg_filled_price_zero_when_no_open_fills(self):
         from talos.position_ledger import PositionLedger, Side
+
         ledger = PositionLedger("EVT-X", unit_size=5)
         assert ledger.open_avg_filled_price(Side.A) == 0.0
 
     def test_open_avg_filled_price_zero_when_everything_closed(self):
         from talos.position_ledger import PositionLedger, Side
+
         ledger = PositionLedger("EVT-X", unit_size=5)
         s = ledger._sides[Side.A]
         s.filled_count_fp100 = 5 * 100
@@ -887,6 +1024,7 @@ class TestClosedBucket:
 
     def test_open_avg_filled_price_uses_open_bucket_only(self):
         from talos.position_ledger import PositionLedger, Side
+
         ledger = PositionLedger("EVT-X", unit_size=5)
         s = ledger._sides[Side.A]
         # Closed bucket: 5 contracts at avg 18c (90c total)
@@ -902,6 +1040,7 @@ class TestClosedBucket:
     def test_lifetime_avg_unchanged(self):
         """avg_filled_price must still return the lifetime blended avg."""
         from talos.position_ledger import PositionLedger, Side
+
         ledger = PositionLedger("EVT-X", unit_size=5)
         s = ledger._sides[Side.A]
         s.filled_count_fp100 = 10 * 100
@@ -916,6 +1055,7 @@ class TestReconcileClosed:
 
     def test_noop_when_imbalanced(self):
         from talos.position_ledger import PositionLedger, Side
+
         ledger = PositionLedger("EVT-X", unit_size=5)
         ledger._sides[Side.A].filled_count_fp100 = 5 * 100
         ledger._sides[Side.A].filled_total_cost_bps = 410 * 100
@@ -928,13 +1068,14 @@ class TestReconcileClosed:
 
     def test_closes_one_balanced_unit(self):
         from talos.position_ledger import PositionLedger, Side
+
         ledger = PositionLedger("EVT-X", unit_size=5)
         a = ledger._sides[Side.A]
         b = ledger._sides[Side.B]
         a.filled_count_fp100 = 5 * 100
         a.filled_total_cost_bps = 410 * 100  # avg 82c
         b.filled_count_fp100 = 5 * 100
-        b.filled_total_cost_bps = 90 * 100   # avg 18c
+        b.filled_total_cost_bps = 90 * 100  # avg 18c
         ledger._reconcile_closed()
         assert a.closed_count_fp100 == 5 * 100
         assert a.closed_total_cost_bps == 410 * 100
@@ -945,6 +1086,7 @@ class TestReconcileClosed:
 
     def test_closes_multiple_balanced_units_at_once(self):
         from talos.position_ledger import PositionLedger, Side
+
         ledger = PositionLedger("EVT-X", unit_size=5)
         a = ledger._sides[Side.A]
         b = ledger._sides[Side.B]
@@ -958,6 +1100,7 @@ class TestReconcileClosed:
 
     def test_imbalanced_close_flushes_min_units(self):
         from talos.position_ledger import PositionLedger, Side
+
         ledger = PositionLedger("EVT-X", unit_size=5)
         a = ledger._sides[Side.A]
         b = ledger._sides[Side.B]
@@ -981,6 +1124,7 @@ class TestReconcileClosed:
 
     def test_idempotent_second_call_is_noop(self):
         from talos.position_ledger import PositionLedger, Side
+
         ledger = PositionLedger("EVT-X", unit_size=5)
         ledger._sides[Side.A].filled_count_fp100 = 5 * 100
         ledger._sides[Side.A].filled_total_cost_bps = 400 * 100
@@ -997,6 +1141,7 @@ class TestReconcileClosed:
         import logging
 
         from talos.position_ledger import PositionLedger, Side
+
         caplog.set_level(logging.INFO)
         ledger = PositionLedger("EVT-X", unit_size=5)
         ledger._sides[Side.A].filled_count_fp100 = 5 * 100
@@ -1006,13 +1151,14 @@ class TestReconcileClosed:
         ledger._reconcile_closed()
         # structlog records go through the standard logging module; look for the event
         assert any(
-            "ledger_reconciled_closed" in rec.getMessage() or
-            "ledger_reconciled_closed" in str(getattr(rec, "msg", ""))
+            "ledger_reconciled_closed" in rec.getMessage()
+            or "ledger_reconciled_closed" in str(getattr(rec, "msg", ""))
             for rec in caplog.records
         )
 
     def test_record_fill_triggers_reconcile(self):
         from talos.position_ledger import PositionLedger, Side
+
         ledger = PositionLedger("EVT-X", unit_size=5)
         # Pre-load A with 5 fills; B at zero
         ledger.record_fill(Side.A, 5, 80)
@@ -1027,10 +1173,14 @@ class TestReconcileClosed:
 
     def test_sync_from_orders_triggers_reconcile(self):
         from talos.position_ledger import PositionLedger, Side
+
         ledger = PositionLedger(
-            "EVT-X", unit_size=5,
-            ticker_a="TK-A", ticker_b="TK-B",
-            side_a_str="no", side_b_str="no",
+            "EVT-X",
+            unit_size=5,
+            ticker_a="TK-A",
+            ticker_b="TK-B",
+            side_a_str="no",
+            side_b_str="no",
         )
         orders = [
             _make_order("TK-A", fill_count=5, no_price=80, maker_fill_cost=400, status="executed"),
@@ -1042,9 +1192,12 @@ class TestReconcileClosed:
 
     def test_sync_from_positions_triggers_reconcile_non_same_ticker(self):
         from talos.position_ledger import PositionLedger, Side
+
         ledger = PositionLedger(
-            "EVT-X", unit_size=5,
-            ticker_a="TK-A", ticker_b="TK-B",
+            "EVT-X",
+            unit_size=5,
+            ticker_a="TK-A",
+            ticker_b="TK-B",
             is_same_ticker=False,
         )
         ledger.sync_from_positions(
@@ -1056,9 +1209,12 @@ class TestReconcileClosed:
 
     def test_sync_from_positions_same_ticker_early_returns_no_mutation(self):
         from talos.position_ledger import PositionLedger, Side
+
         ledger = PositionLedger(
-            "EVT-X", unit_size=5,
-            ticker_a="TK-A", ticker_b="TK-A",  # same ticker
+            "EVT-X",
+            unit_size=5,
+            ticker_a="TK-A",
+            ticker_b="TK-A",  # same ticker
             is_same_ticker=True,
         )
         # Preload known state
@@ -1085,6 +1241,7 @@ class TestSavedDictSchema:
 
     def test_save_dict_is_v2_envelope_with_bps_fp100(self):
         from talos.position_ledger import PositionLedger, Side
+
         ledger = PositionLedger("EVT-X", unit_size=5)
         ledger._sides[Side.A].closed_count_fp100 = 5 * 100
         ledger._sides[Side.A].closed_total_cost_bps = 410 * 100
@@ -1106,14 +1263,23 @@ class TestSavedDictSchema:
     def test_seed_restores_closed_verbatim_when_all_six_keys_valid(self):
         """5a normal restart (v1 payload): closed values restored as-is (×100 scaled)."""
         from talos.position_ledger import PositionLedger, Side
+
         ledger = PositionLedger("EVT-X", unit_size=5)
         # filled_a=5 closed_a=5 → open_A empty. filled_b=10 closed_b=5 → open_B=5 @ 23c.
         # Post-restore state is a quiet point: min(open_A, open_B) = 0 → reconcile no-op.
         data: dict[str, int | str | None] = {
-            "filled_a": 5, "cost_a": 410, "fees_a": 0,
-            "filled_b": 10, "cost_b": 205, "fees_b": 0,
-            "closed_count_a": 5, "closed_total_cost_a": 410, "closed_fees_a": 0,
-            "closed_count_b": 5, "closed_total_cost_b": 90, "closed_fees_b": 0,
+            "filled_a": 5,
+            "cost_a": 410,
+            "fees_a": 0,
+            "filled_b": 10,
+            "cost_b": 205,
+            "fees_b": 0,
+            "closed_count_a": 5,
+            "closed_total_cost_a": 410,
+            "closed_fees_a": 0,
+            "closed_count_b": 5,
+            "closed_total_cost_b": 90,
+            "closed_fees_b": 0,
         }
         ledger.seed_from_saved(data)
         # open_avg_B must be 23.0 (115/5), NOT the blended 20.5.
@@ -1126,13 +1292,22 @@ class TestSavedDictSchema:
         import logging
 
         from talos.position_ledger import PositionLedger
+
         caplog.set_level(logging.INFO)
         ledger = PositionLedger("EVT-X", unit_size=5)
         data: dict[str, int | str | None] = {
-            "filled_a": 5, "cost_a": 400, "fees_a": 0,
-            "filled_b": 5, "cost_b": 100, "fees_b": 0,
-            "closed_count_a": 5, "closed_total_cost_a": 400, "closed_fees_a": 0,
-            "closed_count_b": 5, "closed_total_cost_b": 100, "closed_fees_b": 0,
+            "filled_a": 5,
+            "cost_a": 400,
+            "fees_a": 0,
+            "filled_b": 5,
+            "cost_b": 100,
+            "fees_b": 0,
+            "closed_count_a": 5,
+            "closed_total_cost_a": 400,
+            "closed_fees_a": 0,
+            "closed_count_b": 5,
+            "closed_total_cost_b": 100,
+            "closed_fees_b": 0,
         }
         ledger.seed_from_saved(data)
         restored = [r for r in caplog.records if "ledger_restored_with_closed" in r.getMessage()]
@@ -1142,11 +1317,16 @@ class TestSavedDictSchema:
         import logging
 
         from talos.position_ledger import PositionLedger, Side
+
         caplog.set_level(logging.INFO)
         ledger = PositionLedger("EVT-X", unit_size=5)
         data: dict[str, int | str | None] = {
-            "filled_a": 10, "cost_a": 820, "fees_a": 0,
-            "filled_b": 10, "cost_b": 205, "fees_b": 0,
+            "filled_a": 10,
+            "cost_a": 820,
+            "fees_a": 0,
+            "filled_b": 10,
+            "cost_b": 205,
+            "fees_b": 0,
         }
         ledger.seed_from_saved(data)
         # After migration + terminal reconcile: all closed populated via pro-rata
@@ -1160,13 +1340,19 @@ class TestSavedDictSchema:
         import logging
 
         from talos.position_ledger import PositionLedger, Side
+
         caplog.set_level(logging.INFO)
         ledger = PositionLedger("EVT-X", unit_size=5)
         data: dict[str, int | str | None] = {
-            "filled_a": 10, "cost_a": 820, "fees_a": 0,
-            "filled_b": 10, "cost_b": 205, "fees_b": 0,
+            "filled_a": 10,
+            "cost_a": 820,
+            "fees_a": 0,
+            "filled_b": 10,
+            "cost_b": 205,
+            "fees_b": 0,
             # Only 2 of 6 closed keys present
-            "closed_count_a": 999, "closed_total_cost_a": 999,
+            "closed_count_a": 999,
+            "closed_total_cost_a": 999,
         }
         ledger.seed_from_saved(data)
         # Migration zeros and repopulates; verbatim restore would have set
@@ -1186,16 +1372,23 @@ class TestSavedDictSchema:
             caplog.set_level(logging.INFO)
             ledger = PositionLedger("EVT-X", unit_size=5)
             data: dict[str, int | str | float | None] = {
-                "filled_a": 10, "cost_a": 820, "fees_a": 0,
-                "filled_b": 10, "cost_b": 205, "fees_b": 0,
-                "closed_count_a": 5, "closed_total_cost_a": 410, "closed_fees_a": 0,
-                "closed_count_b": 5, "closed_total_cost_b": 90, "closed_fees_b": 0,
+                "filled_a": 10,
+                "cost_a": 820,
+                "fees_a": 0,
+                "filled_b": 10,
+                "cost_b": 205,
+                "fees_b": 0,
+                "closed_count_a": 5,
+                "closed_total_cost_a": 410,
+                "closed_fees_a": 0,
+                "closed_count_b": 5,
+                "closed_total_cost_b": 90,
+                "closed_fees_b": 0,
             }
             data["closed_count_a"] = bad_value  # inject corruption
             ledger.seed_from_saved(data)  # type: ignore[arg-type]  # intentionally wide for corruption test
             migrated = [
-                r for r in caplog.records
-                if "ledger_migrated_missing_closed" in r.getMessage()
+                r for r in caplog.records if "ledger_migrated_missing_closed" in r.getMessage()
             ]
             assert len(migrated) == 1, f"Expected migration log for bad_value={bad_value!r}"
             # Migration zeroed and reconciled — closed_count_fp100_a != 5*100 (restored-verbatim)
@@ -1208,6 +1401,7 @@ class TestIsPlacementSafeOpenScope:
     def test_rejects_placement_against_open_unit_avg(self):
         """A closed unit at 92/7 must not subsidize a new Yes 86 placement."""
         from talos.position_ledger import PositionLedger, Side
+
         ledger = PositionLedger("EVT-X", unit_size=5)
         # Pre-close one unit at 92/7
         ledger.record_fill(Side.A, 5, 92)

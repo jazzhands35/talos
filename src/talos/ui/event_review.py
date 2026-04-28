@@ -174,9 +174,7 @@ def _query_decisions(db: sqlite3.Connection, event_ticker: str) -> list[_Timelin
         if new_price is not None and new_price != book_top:
             inputs.append(f"new={new_price}")
         if eff_this is not None and eff_other is not None:
-            inputs.append(
-                f"eff={eff_this:.1f}+{eff_other:.1f}={eff_this + eff_other:.1f}"
-            )
+            inputs.append(f"eff={eff_this:.1f}+{eff_other:.1f}={eff_this + eff_other:.1f}")
         if inputs:
             text += f"\n         inputs: {' '.join(inputs)}"
         entries.append(_TimelineEntry(ts, "decision", text))
@@ -281,9 +279,7 @@ def build_timeline(db_path: Path, log_path: Path, event_ticker: str) -> list[_Ti
 # ── Position snapshot renderer ────────────────────────────────────────
 
 
-def _latest_decisions_by_side(
-    db_path: Path, event_ticker: str
-) -> dict[str, dict[str, str]]:
+def _latest_decisions_by_side(db_path: Path, event_ticker: str) -> dict[str, dict[str, str]]:
     """Return {side_label: {ts, trigger, outcome, reason}} for each side's latest eval."""
     result: dict[str, dict[str, str]] = {}
     try:
@@ -424,9 +420,7 @@ def render_position_snapshot(
             lines.append(explanation)
 
         # Latest decision per side — surfaces WHY Talos is (or isn't) acting
-        latest_by_side = (
-            _latest_decisions_by_side(db_path, event_ticker) if db_path else {}
-        )
+        latest_by_side = _latest_decisions_by_side(db_path, event_ticker) if db_path else {}
         for side_label in ("A", "B"):
             rec = latest_by_side.get(side_label)
             if rec is None:

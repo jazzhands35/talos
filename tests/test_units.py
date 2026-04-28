@@ -39,12 +39,12 @@ class TestDollarsStrToBps:
             (None, 0),
             ("0", 0),
             ("0.00", 0),
-            ("0.01", 100),       # 1¢
-            ("0.53", 5_300),     # 53¢
-            ("1.00", 10_000),    # $1
-            ("0.0488", 488),     # sub-cent (DJT-class)
-            ("0.961", 9_610),    # 96.1¢
-            ("0.9999", 9_999),   # 99.99¢
+            ("0.01", 100),  # 1¢
+            ("0.53", 5_300),  # 53¢
+            ("1.00", 10_000),  # $1
+            ("0.0488", 488),  # sub-cent (DJT-class)
+            ("0.961", 9_610),  # 96.1¢
+            ("0.9999", 9_999),  # 99.99¢
         ],
     )
     def test_valid(self, wire, bps):
@@ -78,7 +78,7 @@ class TestFpStrToFp100:
             ("0.00", 0),
             ("1.00", 100),
             ("10.00", 1_000),
-            ("1.89", 189),       # the MARJ fractional fill
+            ("1.89", 189),  # the MARJ fractional fill
             ("0.01", 1),
         ],
     )
@@ -105,7 +105,7 @@ class TestBpsToDollarsStr:
             (100, "0.01"),
             (5_300, "0.53"),
             (10_000, "1.00"),
-            (3_800, "0.38"),        # whole-cent → 2-decimal path
+            (3_800, "0.38"),  # whole-cent → 2-decimal path
         ],
     )
     def test_whole_cent_uses_two_decimals(self, bps, wire):
@@ -114,10 +114,10 @@ class TestBpsToDollarsStr:
     @pytest.mark.parametrize(
         "bps,wire",
         [
-            (488, "0.0488"),        # DJT-class sub-cent
+            (488, "0.0488"),  # DJT-class sub-cent
             (9_610, "0.9610"),
             (9_999, "0.9999"),
-            (1, "0.0001"),          # minimum nonzero sub-cent
+            (1, "0.0001"),  # minimum nonzero sub-cent
         ],
     )
     def test_sub_cent_uses_four_decimals(self, bps, wire):
@@ -177,7 +177,7 @@ class TestCentsAndContractsHelpers:
     def test_bps_to_cents_round_half_even(self):
         # half-even rounding: 4.50 → 4, 5.50 → 6, 4.88 → 5
         assert bps_to_cents_round(488) == 5
-        assert bps_to_cents_round(450) == 4    # half-even: round to nearest even
+        assert bps_to_cents_round(450) == 4  # half-even: round to nearest even
         assert bps_to_cents_round(550) == 6
 
     def test_contracts_to_fp100(self):
@@ -195,13 +195,13 @@ class TestCentsAndContractsHelpers:
 # ── Display formatters ────────────────────────────────────────────
 class TestDisplayFormatters:
     def test_format_bps_as_cents(self):
-        assert format_bps_as_cents(0) == "0.00\u00a2"       # 0.00¢
-        assert format_bps_as_cents(488) == "4.88\u00a2"     # 4.88¢
+        assert format_bps_as_cents(0) == "0.00\u00a2"  # 0.00¢
+        assert format_bps_as_cents(488) == "4.88\u00a2"  # 4.88¢
         assert format_bps_as_cents(10_000) == "100.00\u00a2"
 
     def test_format_bps_as_dollars_display(self):
         assert format_bps_as_dollars_display(5_300) == "$0.53"
-        assert format_bps_as_dollars_display(488) == "$0.05"   # rounds for display
+        assert format_bps_as_dollars_display(488) == "$0.05"  # rounds for display
 
     def test_format_fp100_as_contracts(self):
         assert format_fp100_as_contracts(189) == "1.89"
@@ -214,18 +214,21 @@ class TestDisplayFormatters:
 # migration). Here we only verify that quadratic_fee_bps is internally
 # consistent with its own documented dollar-space derivation.
 class TestQuadraticFeeBps:
-    @pytest.mark.parametrize("price_bps,rate,expected_bps", [
-        # fee = rate * price * (1 - price) in dollar space.
-        # At p=$0.50 (5000 bps), fee = 0.07 * 0.5 * 0.5 = 0.0175 dollars = 175 bps.
-        (5_000, 0.07, 175),
-        # At p=$0.01 (100 bps), fee = 0.07 * 0.01 * 0.99 = 0.000693 dollars ≈ 7 bps.
-        (100, 0.07, 7),
-        # Boundaries: p=0 and p=$1 both yield 0 (no fee on a certain outcome).
-        (0, 0.07, 0),
-        (10_000, 0.07, 0),
-        # Sub-cent price: p=$0.0488 (488 bps), fee ≈ 0.07 * 0.0488 * 0.9512 ≈ 0.00325 ≈ 32 bps.
-        (488, 0.07, 32),
-    ])
+    @pytest.mark.parametrize(
+        "price_bps,rate,expected_bps",
+        [
+            # fee = rate * price * (1 - price) in dollar space.
+            # At p=$0.50 (5000 bps), fee = 0.07 * 0.5 * 0.5 = 0.0175 dollars = 175 bps.
+            (5_000, 0.07, 175),
+            # At p=$0.01 (100 bps), fee = 0.07 * 0.01 * 0.99 = 0.000693 dollars ≈ 7 bps.
+            (100, 0.07, 7),
+            # Boundaries: p=0 and p=$1 both yield 0 (no fee on a certain outcome).
+            (0, 0.07, 0),
+            (10_000, 0.07, 0),
+            # Sub-cent price: p=$0.0488 (488 bps), fee ≈ 0.07 * 0.0488 * 0.9512 ≈ 0.00325 ≈ 32 bps.
+            (488, 0.07, 32),
+        ],
+    )
     def test_matches_dollar_space_derivation(self, price_bps, rate, expected_bps):
         assert quadratic_fee_bps(price_bps, rate=rate) == expected_bps
 

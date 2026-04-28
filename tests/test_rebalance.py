@@ -43,6 +43,7 @@ def _default_cancel_with_verify(rest: Any) -> Any:
 
     return _impl
 
+
 # ── Helpers ──────────────────────────────────────────────────────────
 
 
@@ -777,7 +778,10 @@ class TestExecuteRebalance:
         # Tracked order: already at qty 1 (= target)
         rest.get_order = AsyncMock(
             return_value=_make_order(
-                "TK-A", order_id="ord-a", remaining_count=1, no_price=45,
+                "TK-A",
+                order_id="ord-a",
+                remaining_count=1,
+                no_price=45,
             )
         )
         rest.decrease_order = AsyncMock()
@@ -785,10 +789,16 @@ class TestExecuteRebalance:
         rest.get_all_orders = AsyncMock(
             return_value=[
                 _make_order(
-                    "TK-A", order_id="ord-a", remaining_count=1, no_price=45,
+                    "TK-A",
+                    order_id="ord-a",
+                    remaining_count=1,
+                    no_price=45,
                 ),
                 _make_order(
-                    "TK-A", order_id="ord-a-dup", remaining_count=1, no_price=45,
+                    "TK-A",
+                    order_id="ord-a-dup",
+                    remaining_count=1,
+                    no_price=45,
                 ),
             ]
         )
@@ -825,7 +835,10 @@ class TestExecuteRebalance:
 
         rest.get_order = AsyncMock(
             return_value=_make_order(
-                "TK-A", order_id="ord-a", remaining_count=5, no_price=45,
+                "TK-A",
+                order_id="ord-a",
+                remaining_count=5,
+                no_price=45,
             )
         )
         rest.decrease_order = AsyncMock(
@@ -835,7 +848,10 @@ class TestExecuteRebalance:
         rest.get_all_orders = AsyncMock(
             return_value=[
                 _make_order(
-                    "TK-A", order_id="ord-a", remaining_count=3, no_price=45,
+                    "TK-A",
+                    order_id="ord-a",
+                    remaining_count=3,
+                    no_price=45,
                 ),
             ]
         )
@@ -1006,7 +1022,6 @@ class TestFreshSyncBeforeCatchup:
             count=10,
             order_group_id="grp-test",
         )
-
 
     @pytest.mark.asyncio
     async def test_catchup_records_placement_in_ledger(self):
@@ -1201,9 +1216,10 @@ class TestOvercommitReduction:
         ledger.record_resting(Side.B, "ord-b", 20, 48)
 
         # Verify rebalance_proposal sees no imbalance (delta=0)
-        assert compute_rebalance_proposal(
-            "EVT-1", ledger, pair, None, "Test", OrderBookManager()
-        ) is None
+        assert (
+            compute_rebalance_proposal("EVT-1", ledger, pair, None, "Test", OrderBookManager())
+            is None
+        )
 
         # Overcommit reduction SHOULD fire on side B
         result = compute_overcommit_reduction("EVT-1", ledger, pair, "Test")
@@ -1465,7 +1481,12 @@ class TestRebalanceCatchupOpenScope:
         )
         books = _books_with_data(no_a=86, no_b=18)
         proposal = compute_rebalance_proposal(
-            "EVT-X", ledger, pair, snapshot, "X", books,
+            "EVT-X",
+            ledger,
+            pair,
+            snapshot,
+            "X",
+            books,
         )
         assert proposal is not None
         assert proposal.rebalance is not None
@@ -1483,12 +1504,8 @@ def test_topup_needs_uses_drip_cap_when_config_provided() -> None:
     ledger = PositionLedger(event_ticker="EVT", unit_size=5)
     # 1 fill on each side at 40¢, no resting.
     # 40+40 = 80¢ combined; fee-adjusted ~83¢ < $1.00 → is_placement_safe passes.
-    ledger.record_fill_from_ws(
-        Side.A, trade_id="ta", count_fp100=100, price_bps=4000, fees_bps=0
-    )
-    ledger.record_fill_from_ws(
-        Side.B, trade_id="tb", count_fp100=100, price_bps=4000, fees_bps=0
-    )
+    ledger.record_fill_from_ws(Side.A, trade_id="ta", count_fp100=100, price_bps=4000, fees_bps=0)
+    ledger.record_fill_from_ws(Side.B, trade_id="tb", count_fp100=100, price_bps=4000, fees_bps=0)
     pair = ArbPair(
         event_ticker="EVT",
         ticker_a="EVT-A",

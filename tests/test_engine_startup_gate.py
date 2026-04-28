@@ -303,10 +303,7 @@ async def test_gate_times_out_and_notifies(monkeypatch: Any) -> None:
     eng = _make_engine_stub(ledger)
     ok = await eng._wait_for_ledger_ready(pair, "create_order")
     assert ok is False
-    assert any(
-        "blocked" in msg.lower() and sev == "error"
-        for msg, sev in eng._notifications
-    )
+    assert any("blocked" in msg.lower() and sev == "error" for msg, sev in eng._notifications)
 
 
 # ── 8. legacy_migration_pending triggers auto-reconcile ─────────────

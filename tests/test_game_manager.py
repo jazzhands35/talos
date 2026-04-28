@@ -335,11 +335,13 @@ class TestSportsBlock:
         rest, feed, scanner = self._make_mock_deps()
         gm = GameManager(rest, feed, scanner, sports_enabled=False)
 
-        result = gm.restore_game({
-            "event_ticker": "KXNHLGAME-26MAR14BOSWSH",
-            "ticker_a": "KXNHLGAME-26MAR14BOSWSH-A",
-            "ticker_b": "KXNHLGAME-26MAR14BOSWSH-B",
-        })
+        result = gm.restore_game(
+            {
+                "event_ticker": "KXNHLGAME-26MAR14BOSWSH",
+                "ticker_a": "KXNHLGAME-26MAR14BOSWSH-A",
+                "ticker_b": "KXNHLGAME-26MAR14BOSWSH-B",
+            }
+        )
         assert result is None
         assert len(gm.active_games) == 0
 
@@ -348,14 +350,16 @@ class TestSportsBlock:
         rest, feed, scanner = self._make_mock_deps()
         gm = GameManager(rest, feed, scanner, sports_enabled=False)
 
-        result = gm.restore_game({
-            "event_ticker": "SOME-NONSPORT-MKT",
-            "ticker_a": "SOME-NONSPORT-MKT",
-            "ticker_b": "SOME-NONSPORT-MKT",
-            "side_a": "yes",
-            "side_b": "no",
-            "kalshi_event_ticker": "SOME-NONSPORT-EVT",
-        })
+        result = gm.restore_game(
+            {
+                "event_ticker": "SOME-NONSPORT-MKT",
+                "ticker_a": "SOME-NONSPORT-MKT",
+                "ticker_b": "SOME-NONSPORT-MKT",
+                "side_a": "yes",
+                "side_b": "no",
+                "kalshi_event_ticker": "SOME-NONSPORT-EVT",
+            }
+        )
         assert result is not None
         assert result.side_a == "yes"
         assert result.side_b == "no"
@@ -366,11 +370,13 @@ class TestSportsBlock:
         rest, feed, scanner = self._make_mock_deps()
         gm = GameManager(rest, feed, scanner)  # default sports_enabled=True
 
-        result = gm.restore_game({
-            "event_ticker": "KXNHLGAME-26MAR14BOSWSH",
-            "ticker_a": "KXNHLGAME-26MAR14BOSWSH-A",
-            "ticker_b": "KXNHLGAME-26MAR14BOSWSH-B",
-        })
+        result = gm.restore_game(
+            {
+                "event_ticker": "KXNHLGAME-26MAR14BOSWSH",
+                "ticker_a": "KXNHLGAME-26MAR14BOSWSH-A",
+                "ticker_b": "KXNHLGAME-26MAR14BOSWSH-B",
+            }
+        )
         assert result is not None
         assert result.event_ticker == "KXNHLGAME-26MAR14BOSWSH"
 
@@ -379,11 +385,13 @@ class TestSportsBlock:
         rest, feed, scanner = self._make_mock_deps()
         gm = GameManager(rest, feed, scanner)
 
-        result = gm.restore_game({
-            "event_ticker": "EVT-OLD",
-            "ticker_a": "TICK-A",
-            "ticker_b": "TICK-B",
-        })
+        result = gm.restore_game(
+            {
+                "event_ticker": "EVT-OLD",
+                "ticker_a": "TICK-A",
+                "ticker_b": "TICK-B",
+            }
+        )
         assert result is not None
         assert result.side_a == "no"
         assert result.side_b == "no"
@@ -401,10 +409,18 @@ class TestSportsBlock:
             category="sports",
             status="open",
             markets=[
-                Market(ticker="T-A", event_ticker="KXNHLGAME-26MAR14BOSWSH",
-                       title="Team A", status="active"),
-                Market(ticker="T-B", event_ticker="KXNHLGAME-26MAR14BOSWSH",
-                       title="Team B", status="active"),
+                Market(
+                    ticker="T-A",
+                    event_ticker="KXNHLGAME-26MAR14BOSWSH",
+                    title="Team A",
+                    status="active",
+                ),
+                Market(
+                    ticker="T-B",
+                    event_ticker="KXNHLGAME-26MAR14BOSWSH",
+                    title="Team B",
+                    status="active",
+                ),
             ],
         )
         rest.get_event.return_value = event
@@ -459,8 +475,12 @@ class TestSportsBlock:
             category="politics",
             status="open",
             markets=[
-                Market(ticker="MKT-1", event_ticker="NONSPORT-EVT",
-                       title="Will it happen?", status="active"),
+                Market(
+                    ticker="MKT-1",
+                    event_ticker="NONSPORT-EVT",
+                    title="Will it happen?",
+                    status="active",
+                ),
             ],
         )
         rest.get_event.return_value = event
@@ -482,12 +502,15 @@ class TestSportsBlock:
             category="politics",
             status="open",
             markets=[
-                Market(ticker="MKT-1", event_ticker="NONSPORT-EVT",
-                       title="Option A", status="active"),
-                Market(ticker="MKT-2", event_ticker="NONSPORT-EVT",
-                       title="Option B", status="active"),
-                Market(ticker="MKT-3", event_ticker="NONSPORT-EVT",
-                       title="Option C", status="active"),
+                Market(
+                    ticker="MKT-1", event_ticker="NONSPORT-EVT", title="Option A", status="active"
+                ),
+                Market(
+                    ticker="MKT-2", event_ticker="NONSPORT-EVT", title="Option B", status="active"
+                ),
+                Market(
+                    ticker="MKT-3", event_ticker="NONSPORT-EVT", title="Option C", status="active"
+                ),
             ],
         )
         rest.get_event.return_value = event
@@ -523,14 +546,15 @@ class TestSeriesTicker:
     def test_arb_pair_has_series_ticker_field_with_default(self) -> None:
         """ArbPair.series_ticker defaults to empty string."""
         from talos.models.strategy import ArbPair
+
         pair = ArbPair(event_ticker="EVT-1", ticker_a="A", ticker_b="B")
         assert pair.series_ticker == ""
 
     def test_arb_pair_series_ticker_can_be_set(self) -> None:
         """ArbPair.series_ticker stores the provided value."""
         from talos.models.strategy import ArbPair
-        pair = ArbPair(event_ticker="EVT-1", ticker_a="A", ticker_b="B",
-                       series_ticker="KXNHLGAME")
+
+        pair = ArbPair(event_ticker="EVT-1", ticker_a="A", ticker_b="B", series_ticker="KXNHLGAME")
         assert pair.series_ticker == "KXNHLGAME"
 
     async def test_add_game_sets_series_ticker(self) -> None:
@@ -545,10 +569,18 @@ class TestSeriesTicker:
             category="sports",
             status="open",
             markets=[
-                Market(ticker="T-A", event_ticker="KXNHLGAME-26MAR14BOSWSH",
-                       title="Boston", status="active"),
-                Market(ticker="T-B", event_ticker="KXNHLGAME-26MAR14BOSWSH",
-                       title="Washington", status="active"),
+                Market(
+                    ticker="T-A",
+                    event_ticker="KXNHLGAME-26MAR14BOSWSH",
+                    title="Boston",
+                    status="active",
+                ),
+                Market(
+                    ticker="T-B",
+                    event_ticker="KXNHLGAME-26MAR14BOSWSH",
+                    title="Washington",
+                    status="active",
+                ),
             ],
         )
         rest.get_event.return_value = event
@@ -584,15 +616,17 @@ class TestSeriesTicker:
         rest, feed, scanner = self._make_mock_deps()
         gm = GameManager(rest, feed, scanner)
 
-        result = gm.restore_game({
-            "event_ticker": "NONSPORT-MKT",
-            "ticker_a": "NONSPORT-MKT",
-            "ticker_b": "NONSPORT-MKT",
-            "side_a": "yes",
-            "side_b": "no",
-            "kalshi_event_ticker": "NONSPORT-EVT",
-            "series_ticker": "KXNONSPORT",
-        })
+        result = gm.restore_game(
+            {
+                "event_ticker": "NONSPORT-MKT",
+                "ticker_a": "NONSPORT-MKT",
+                "ticker_b": "NONSPORT-MKT",
+                "side_a": "yes",
+                "side_b": "no",
+                "kalshi_event_ticker": "NONSPORT-EVT",
+                "series_ticker": "KXNONSPORT",
+            }
+        )
         assert result is not None
         assert result.series_ticker == "KXNONSPORT"
 
@@ -605,15 +639,17 @@ class TestSeriesTicker:
         rest, feed, scanner = self._make_mock_deps()
         gm = GameManager(rest, feed, scanner)
 
-        result = gm.restore_game({
-            "event_ticker": "EVT",
-            "ticker_a": "TICK-A",
-            "ticker_b": "TICK-B",
-            "side_a": "yes",
-            "side_b": "no",
-            "engine_state": "winding_down",
-            "source": "tree",
-        })
+        result = gm.restore_game(
+            {
+                "event_ticker": "EVT",
+                "ticker_a": "TICK-A",
+                "ticker_b": "TICK-B",
+                "side_a": "yes",
+                "side_b": "no",
+                "engine_state": "winding_down",
+                "source": "tree",
+            }
+        )
         assert result is not None
         assert result.engine_state == "winding_down"
         assert result.source == "tree"
@@ -623,11 +659,13 @@ class TestSeriesTicker:
         existed should restore as the model default."""
         rest, feed, scanner = self._make_mock_deps()
         gm = GameManager(rest, feed, scanner)
-        result = gm.restore_game({
-            "event_ticker": "EVT",
-            "ticker_a": "A",
-            "ticker_b": "B",
-        })
+        result = gm.restore_game(
+            {
+                "event_ticker": "EVT",
+                "ticker_a": "A",
+                "ticker_b": "B",
+            }
+        )
         assert result is not None
         assert result.engine_state == "active"
         assert result.source is None
@@ -637,11 +675,13 @@ class TestSeriesTicker:
         rest, feed, scanner = self._make_mock_deps()
         gm = GameManager(rest, feed, scanner)
 
-        result = gm.restore_game({
-            "event_ticker": "EVT-OLD",
-            "ticker_a": "TICK-A",
-            "ticker_b": "TICK-B",
-        })
+        result = gm.restore_game(
+            {
+                "event_ticker": "EVT-OLD",
+                "ticker_a": "TICK-A",
+                "ticker_b": "TICK-B",
+            }
+        )
         assert result is not None
         assert result.series_ticker == ""
 
@@ -660,15 +700,17 @@ class TestSeriesTicker:
 
         # Simulate a YES/NO pair where event_ticker is a market ticker (no "-" split works)
         # series_ticker is set explicitly to the correct value
-        result = gm.restore_game({
-            "event_ticker": "KXNONSPORT-MKT",
-            "ticker_a": "KXNONSPORT-MKT",
-            "ticker_b": "KXNONSPORT-MKT",
-            "side_a": "yes",
-            "side_b": "no",
-            "kalshi_event_ticker": "KXNONSPORT-EVT",
-            "series_ticker": "KXNONSPORT",
-        })
+        result = gm.restore_game(
+            {
+                "event_ticker": "KXNONSPORT-MKT",
+                "ticker_a": "KXNONSPORT-MKT",
+                "ticker_b": "KXNONSPORT-MKT",
+                "side_a": "yes",
+                "side_b": "no",
+                "kalshi_event_ticker": "KXNONSPORT-EVT",
+                "series_ticker": "KXNONSPORT",
+            }
+        )
         assert result is not None
 
         rest.get_markets = AsyncMock(return_value=[])
@@ -689,11 +731,13 @@ class TestSeriesTicker:
         gm = GameManager(rest, feed, scanner)
 
         # Old cache entry without series_ticker
-        result = gm.restore_game({
-            "event_ticker": "KXNHLGAME-26MAR14BOSWSH",
-            "ticker_a": "KXNHLGAME-26MAR14BOSWSH-A",
-            "ticker_b": "KXNHLGAME-26MAR14BOSWSH-B",
-        })
+        result = gm.restore_game(
+            {
+                "event_ticker": "KXNHLGAME-26MAR14BOSWSH",
+                "ticker_a": "KXNHLGAME-26MAR14BOSWSH-A",
+                "ticker_b": "KXNHLGAME-26MAR14BOSWSH-B",
+            }
+        )
         assert result is not None
 
         rest.get_markets = AsyncMock(return_value=[])
@@ -715,15 +759,17 @@ class TestSeriesTicker:
         gm = GameManager(rest, feed, scanner)
 
         # Restore a non-sports pair — KXHURCTOTMAJ scenario from the bug.
-        result = gm.restore_game({
-            "event_ticker": "KXHURCTOTMAJ-26DEC01-T4",
-            "ticker_a": "KXHURCTOTMAJ-26DEC01-T4",
-            "ticker_b": "KXHURCTOTMAJ-26DEC01-T4",
-            "side_a": "yes",
-            "side_b": "no",
-            "kalshi_event_ticker": "KXHURCTOTMAJ-26DEC01",
-            "series_ticker": "KXHURCTOTMAJ",
-        })
+        result = gm.restore_game(
+            {
+                "event_ticker": "KXHURCTOTMAJ-26DEC01-T4",
+                "ticker_a": "KXHURCTOTMAJ-26DEC01-T4",
+                "ticker_b": "KXHURCTOTMAJ-26DEC01-T4",
+                "side_a": "yes",
+                "side_b": "no",
+                "kalshi_event_ticker": "KXHURCTOTMAJ-26DEC01",
+                "series_ticker": "KXHURCTOTMAJ",
+            }
+        )
         assert result is not None
         # No prior volume seeded
         assert "KXHURCTOTMAJ-26DEC01-T4" not in gm.volumes_24h
@@ -790,8 +836,11 @@ class TestNonSportsScan:
         rest.get_all_events = AsyncMock(return_value=[])
         rest.get_series = AsyncMock(
             return_value=Series(
-                series_ticker="S", title="S", category="Crypto",
-                fee_type="quadratic_with_maker_fees", fee_multiplier=0.0175,
+                series_ticker="S",
+                title="S",
+                category="Crypto",
+                fee_type="quadratic_with_maker_fees",
+                fee_multiplier=0.0175,
             )
         )
         return rest
@@ -811,9 +860,7 @@ class TestNonSportsScan:
             nonsports_max_days=7,
         )
 
-    async def test_filters_by_category(
-        self, manager: GameManager, mock_rest: MagicMock
-    ) -> None:
+    async def test_filters_by_category(self, manager: GameManager, mock_rest: MagicMock) -> None:
         close = (datetime.now(UTC) + timedelta(days=3)).isoformat()
         mock_rest.get_all_events.return_value = [
             _make_nonsports_event("E1", "KXBTC", "Crypto", close),
@@ -824,9 +871,7 @@ class TestNonSportsScan:
         assert "E1" in tickers
         assert "E2" not in tickers
 
-    async def test_filters_by_time_window(
-        self, manager: GameManager, mock_rest: MagicMock
-    ) -> None:
+    async def test_filters_by_time_window(self, manager: GameManager, mock_rest: MagicMock) -> None:
         within = (datetime.now(UTC) + timedelta(days=3)).isoformat()
         beyond = (datetime.now(UTC) + timedelta(days=14)).isoformat()
         mock_rest.get_all_events.return_value = [
@@ -838,9 +883,7 @@ class TestNonSportsScan:
         assert "E1" in tickers
         assert "E2" not in tickers
 
-    async def test_excludes_sports_series(
-        self, manager: GameManager, mock_rest: MagicMock
-    ) -> None:
+    async def test_excludes_sports_series(self, manager: GameManager, mock_rest: MagicMock) -> None:
         close = (datetime.now(UTC) + timedelta(days=1)).isoformat()
         mock_rest.get_all_events.return_value = [
             _make_nonsports_event("E1", "KXNHLGAME", "Crypto", close),
@@ -878,14 +921,16 @@ class TestNonSportsScan:
         events = await manager.scan_events(scan_mode="nonsports")
         assert len(events) == 0
 
-    async def test_empty_categories_disables_scan(
-        self, mock_rest: MagicMock
-    ) -> None:
+    async def test_empty_categories_disables_scan(self, mock_rest: MagicMock) -> None:
         feed = MagicMock(spec=MarketFeed)
         scanner = MagicMock(spec=ArbitrageScanner)
         mgr = GameManager(
-            rest=mock_rest, feed=feed, scanner=scanner,
-            sports_enabled=False, nonsports_categories=[], nonsports_max_days=7,
+            rest=mock_rest,
+            feed=feed,
+            scanner=scanner,
+            sports_enabled=False,
+            nonsports_categories=[],
+            nonsports_max_days=7,
         )
         events = await mgr.scan_events()
         assert events == []
@@ -903,8 +948,11 @@ class TestTickerBlacklist:
         rest.get_all_events = AsyncMock(return_value=[])
         rest.get_series = AsyncMock(
             return_value=Series(
-                series_ticker="S", title="S", category="Crypto",
-                fee_type="quadratic_with_maker_fees", fee_multiplier=0.0175,
+                series_ticker="S",
+                title="S",
+                category="Crypto",
+                fee_type="quadratic_with_maker_fees",
+                fee_multiplier=0.0175,
             )
         )
         return rest
@@ -940,9 +988,7 @@ class TestTickerBlacklist:
         """KXBTC-OTHER should not match KXBTC-SPECIFIC."""
         assert manager.is_blacklisted("KXBTC-OTHER") is False
 
-    async def test_add_game_rejects_blacklisted(
-        self, manager: GameManager
-    ) -> None:
+    async def test_add_game_rejects_blacklisted(self, manager: GameManager) -> None:
         with pytest.raises(ValueError, match="blacklisted"):
             await manager.add_game("KXSURV-SAFE-26MAR25")
 

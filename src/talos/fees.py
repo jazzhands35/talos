@@ -85,6 +85,7 @@ def american_from_win_risk(win: float, risk: float) -> float | None:
 # ``docs/superpowers/specs/2026-04-17-bps-fp100-unit-migration-design.md``.
 # ==================================================================
 
+
 def flat_fee_bps(price_bps: int, *, rate: float) -> int:
     """Per-contract fee in bps for the flat fee model.
 
@@ -116,9 +117,7 @@ def fee_adjusted_cost_bps(price_bps: int, *, rate: float = MAKER_FEE_RATE) -> in
     return price_bps + quadratic_fee_bps(price_bps, rate=rate)
 
 
-def max_profitable_price_bps(
-    other_avg_price_bps: int, *, rate: float = MAKER_FEE_RATE
-) -> int:
+def max_profitable_price_bps(other_avg_price_bps: int, *, rate: float = MAKER_FEE_RATE) -> int:
     """Highest integer-cent-aligned bps price at which a catch-up bid is profitable.
 
     Scans whole-cent prices (100 bps increments) from 99¢ down — Talos
@@ -127,9 +126,7 @@ def max_profitable_price_bps(
     """
     import math
 
-    other_bps_rounded = (
-        math.ceil(other_avg_price_bps / ONE_CENT_BPS) * ONE_CENT_BPS
-    )
+    other_bps_rounded = math.ceil(other_avg_price_bps / ONE_CENT_BPS) * ONE_CENT_BPS
     other_cost_bps = fee_adjusted_cost_bps(other_bps_rounded, rate=rate)
     budget_bps = ONE_DOLLAR_BPS - other_cost_bps
     if budget_bps <= ONE_CENT_BPS:
@@ -141,9 +138,7 @@ def max_profitable_price_bps(
     return 0
 
 
-def american_odds_bps(
-    price_bps: int, *, rate: float = MAKER_FEE_RATE
-) -> float | None:
+def american_odds_bps(price_bps: int, *, rate: float = MAKER_FEE_RATE) -> float | None:
     """Fee-adjusted American odds for a NO contract, given price in bps.
 
     Returns ``None`` for degenerate prices (0 or ``ONE_DOLLAR_BPS``).
@@ -159,9 +154,7 @@ def american_odds_bps(
     return (win_bps / eff_bps) * 100
 
 
-def fee_adjusted_edge_bps(
-    no_a_bps: int, no_b_bps: int, *, rate: float = MAKER_FEE_RATE
-) -> int:
+def fee_adjusted_edge_bps(no_a_bps: int, no_b_bps: int, *, rate: float = MAKER_FEE_RATE) -> int:
     """Fee-adjusted edge in bps for a NO+NO pair.
 
     ``edge_bps = ONE_DOLLAR_BPS - fee_adjusted_cost_bps(a) - fee_adjusted_cost_bps(b)``.

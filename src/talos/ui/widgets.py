@@ -40,7 +40,7 @@ def _fmt_pnl(net_cents: float, kalshi_pnl: int | None = None) -> RichText:
 
     When Kalshi's realized_pnl is non-zero, append it as 'k$X.XX' suffix.
     """
-    dollars = net_cents / 100
+    dollars = net_cents / ONE_CENT_BPS
     if dollars >= 0:
         label = f"${dollars:.2f}"
         style = GREEN
@@ -48,7 +48,7 @@ def _fmt_pnl(net_cents: float, kalshi_pnl: int | None = None) -> RichText:
         label = f"-${abs(dollars):.2f}"
         style = RED
     if kalshi_pnl is not None and kalshi_pnl != 0:
-        k_dollars = kalshi_pnl / 100
+        k_dollars = kalshi_pnl / ONE_CENT_BPS
         k_str = f"${k_dollars:.2f}" if k_dollars >= 0 else f"-${abs(k_dollars):.2f}"
         label = f"{label} k{k_str}"
     return RichText(label, style=style, justify="right")
@@ -156,6 +156,21 @@ def _fmt_vol(volume: int) -> RichText:
     return RichText(label, justify="right")
 
 
+def _fmt_frequency(value: float | None) -> RichText:
+    if value is None:
+        return DIM_DASH
+    return RichText(f"{value:.0f}/h", justify="right")
+
+
+def _fmt_flow_burst(value: float | None) -> RichText:
+    if value is None:
+        return DIM_DASH
+    label = f"{value * 100:.0f}%"
+    if value >= 0.75:
+        return RichText(label, style=YELLOW, justify="right")
+    return RichText(label, justify="right")
+
+
 _PT = ZoneInfo("America/Los_Angeles")
 
 
@@ -199,6 +214,7 @@ def _fmt_status(status: str) -> RichText:
     status_styles: list[tuple[str, str, str]] = [
         ("EXITING", "\u25f7", PEACH),
         ("EXIT", "\u2716", PEACH),
+        ("DRIP", "\u25d2", BLUE),
         ("Low edge", "\u25cb", "dim"),
         ("Unstable", "\u25cb", "dim"),
         ("Sug. off", "\u25cb", "dim"),
@@ -251,7 +267,7 @@ def _fmt_freshness(age_seconds: float | None) -> RichText:
 
 def _fmt_pnl_with_roi(pnl_cents: int, invested_cents: int) -> str:
     """Format P&L with ROI percentage: '$6.40 (4.1%)'."""
-    dollars = pnl_cents / 100
+    dollars = pnl_cents / ONE_CENT_BPS
     label = f"${dollars:.2f}" if dollars >= 0 else f"-${abs(dollars):.2f}"
     if invested_cents > 0:
         roi = (pnl_cents / invested_cents) * 100
@@ -285,6 +301,8 @@ _COL_SPECS: tuple[_ColSpec, ...] = (
     _ColSpec("pos", "Pos", 14, "right", True, "pos"),
     _ColSpec("queue", "Queue", 6, "right", True, "queue"),
     _ColSpec("cpm", "CPM", 7, "right", True, "cpm"),
+    _ColSpec("frequency", "Frequency", 9, "right", False, "frequency"),
+    _ColSpec("flow", "Flow", 5, "right", False, "flow"),
     _ColSpec("eta", "ETA", 5, "right", True, "eta"),
     _ColSpec("edge", "Edge", 5, "right", True, "fee_edge"),
     _ColSpec("eval", "Eval", 4, "right", True, "eval"),
@@ -380,9 +398,7 @@ class OpportunitiesTable(DataTable):
         """Pin the leading identifier columns so they stay visible during
         horizontal scroll. Count depends on the current view mode.
         """
-        self.fixed_columns = (
-            self._FIXED_COLS_COMPACT if self._compact else self._FIXED_COLS_FULL
-        )
+        self.fixed_columns = self._FIXED_COLS_COMPACT if self._compact else self._FIXED_COLS_FULL
 
     # ── View mode helpers ────────────────────────────────────────────
 
@@ -410,7 +426,7 @@ class OpportunitiesTable(DataTable):
         return result
 
     def _filter_row(self, full_row: tuple[Any, ...]) -> tuple[Any, ...]:
-        """Select only visible columns from a full 18-element row tuple."""
+        """Select only visible columns from a full row tuple."""
         if not self._compact:
             return full_row
         return tuple(full_row[i] for i in self._vis_idx)
@@ -601,6 +617,16 @@ class OpportunitiesTable(DataTable):
         if key_name == "cpm":
             pos = self._positions.get(opp.event_ticker)
             return pos.leg_a.cpm if pos and pos.leg_a.cpm is not None else 0.0
+        if key_name == "frequency":
+            pos = self._positions.get(opp.event_ticker)
+            return pos.leg_a.frequency if pos and pos.leg_a.frequency is not None else 0.0
+        if key_name == "flow":
+            pos = self._positions.get(opp.event_ticker)
+            return (
+                pos.leg_a.flow_burst_ratio
+                if pos and pos.leg_a.flow_burst_ratio is not None
+                else 0.0
+            )
         if key_name == "eta":
             pos = self._positions.get(opp.event_ticker)
             if pos and pos.leg_a.eta_minutes is not None:
@@ -800,6 +826,10 @@ class OpportunitiesTable(DataTable):
             )
             cpm_a = RichText(format_cpm(pos.leg_a.cpm, pos.leg_a.cpm_partial), justify="right")
             cpm_b = RichText(format_cpm(pos.leg_b.cpm, pos.leg_b.cpm_partial), justify="right")
+            freq_a = _fmt_frequency(pos.leg_a.frequency)
+            freq_b = _fmt_frequency(pos.leg_b.frequency)
+            flow_a = _fmt_flow_burst(pos.leg_a.flow_burst_ratio)
+            flow_b = _fmt_flow_burst(pos.leg_b.flow_burst_ratio)
             eta_a = RichText(
                 format_eta(pos.leg_a.eta_minutes, pos.leg_a.cpm_partial), justify="right"
             )
@@ -810,22 +840,28 @@ class OpportunitiesTable(DataTable):
             # Locked and Exposure — convert bps to cents for display.
             locked = bps_to_cents_round(int(pos.locked_profit_bps))
             if locked > 0:
-                locked_str = RichText(f"${locked / 100:.2f}", style=GREEN, justify="right")
+                locked_str = RichText(f"${locked / ONE_CENT_BPS:.2f}", style=GREEN, justify="right")
             elif locked == 0:
                 locked_str = DIM_DASH
             else:
-                locked_str = RichText(f"-${abs(locked) / 100:.2f}", style=RED, justify="right")
+                locked_str = RichText(
+                    f"-${abs(locked) / ONE_CENT_BPS:.2f}",
+                    style=RED,
+                    justify="right",
+                )
 
             exposure = bps_to_cents_round(pos.exposure_bps)
             if exposure > 0:
-                exposure_str = RichText(f"${exposure / 100:.2f}", style=RED, justify="right")
+                exposure_str = RichText(
+                    f"${exposure / ONE_CENT_BPS:.2f}", style=RED, justify="right"
+                )
             else:
                 exposure_str = DIM_DASH
 
             status = _fmt_status(pos.status)
         else:
             pos_a = pos_b = q_a = q_b = DIM_DASH
-            cpm_a = cpm_b = eta_a = eta_b = DIM_DASH
+            cpm_a = cpm_b = freq_a = freq_b = flow_a = flow_b = eta_a = eta_b = DIM_DASH
             locked_str = exposure_str = DIM_DASH
             status = _fmt_status(self._event_statuses.get(opp.event_ticker, ""))
 
@@ -867,6 +903,8 @@ class OpportunitiesTable(DataTable):
             pos_a,
             q_a,
             cpm_a,
+            freq_a,
+            flow_a,
             eta_a,
             edge_str,
             eval_str,
@@ -889,6 +927,8 @@ class OpportunitiesTable(DataTable):
             pos_b,
             q_b,
             cpm_b,
+            freq_b,
+            flow_b,
             eta_b,
             "",
             "",
@@ -921,9 +961,9 @@ class PortfolioPanel(Static):
 
     def render(self) -> str:
         """Compute content each frame — bypasses Static.update() entirely."""
-        cash = f"${self._cash / 100:,.2f}"
-        locked = f"${self._locked / 100:,.2f}"
-        exposure = f"${self._exposure / 100:,.2f}"
+        cash = f"${self._cash / ONE_CENT_BPS:,.2f}"
+        locked = f"${self._locked / ONE_CENT_BPS:,.2f}"
+        exposure = f"${self._exposure / ONE_CENT_BPS:,.2f}"
         return (
             f"Cash:       {cash}\n"
             f"Matched:    {self._matched} pairs\n"

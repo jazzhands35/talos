@@ -13,16 +13,19 @@ from types import MethodType, SimpleNamespace
 from typing import cast
 
 from rich.text import Text as RichText
+from textual.app import App, ComposeResult
 from textual.binding import Binding
 
 from talos.auto_accept_log import AutoAcceptLogger
 from talos.engine import TradingEngine
+from talos.models.market import Event, Market
 from talos.models.position import EventPositionSummary, LegSummary
 from talos.models.strategy import Opportunity
 from talos.models.ws import OrderBookSnapshot
 from talos.orderbook import OrderBookManager
 from talos.scanner import ArbitrageScanner
 from talos.ui.app import TalosApp
+from talos.ui.screens import ScanScreen
 from talos.ui.widgets import OpportunitiesTable, OrderLog, PortfolioPanel
 
 
@@ -165,8 +168,8 @@ class TestOpportunitiesTable:
             # Col 7 = Price per leg (after ID column)
             assert "38¢" in str(row_a[7])
             assert "55¢" in str(row_b[7])
-            # Col 13 = Edge (on row A only)
-            assert "6.2" in str(row_a[13])
+            # Col 15 = Edge (on row A only)
+            assert "6.2" in str(row_a[15])
 
     async def test_short_event_label_displayed(self) -> None:
         """Table should show team names from leg_labels."""
@@ -226,7 +229,7 @@ class TestOpportunitiesTable:
             await pilot.pause()
             assert table.row_count == 2  # still visible (2 rows)
             row_a = table.get_row_at(0)
-            assert "-" in str(row_a[13])  # Edge col 13 shows negative
+            assert "-" in str(row_a[15])  # Edge col 15 shows negative
 
 
 class TestPortfolioPanel:
@@ -260,6 +263,8 @@ class TestTablePositions:
                             queue_position=8,
                             cpm=12.5,
                             cpm_partial=False,
+                            frequency=3.0,
+                            flow_burst_ratio=0.40,
                             eta_minutes=0.64,
                         ),
                         leg_b=LegSummary(
@@ -271,6 +276,8 @@ class TestTablePositions:
                             queue_position=15,
                             cpm=6.0,
                             cpm_partial=True,
+                            frequency=1.0,
+                            flow_burst_ratio=0.85,
                             eta_minutes=2.5,
                         ),
                         matched_pairs=3,
@@ -286,17 +293,20 @@ class TestTablePositions:
             # Two-row layout: row 0 = team A, row 1 = team B
             row_a = table.get_row_at(0)
             row_b = table.get_row_at(1)
-            # Col 9 = Pos, Col 10 = Queue, Col 11 = CPM, Col 12 = ETA (shifted +1 for ID col)
+            # Col 9 = Pos, Col 10 = Queue, Col 11 = CPM,
+            # Col 12 = Frequency, Col 13 = Flow, Col 14 = ETA.
             assert "3/5 31.4" in str(row_a[9])  # Pos-A with fee-adjusted avg
             assert "3/5 67.4" in str(row_b[9])  # Pos-B with fee-adjusted avg
             assert "8" in str(row_a[10])  # Queue-A
             assert "15" in str(row_b[10])  # Queue-B
             assert "12.5" in str(row_a[11])  # CPM-A
             assert "6.00*" in str(row_b[11])  # CPM-B (partial)
-            assert "1m" in str(row_a[12])  # ETA-A
-            assert "2m*" in str(row_b[12])  # ETA-B (partial)
-            # Col 16 = Locked profit
-            assert "0.02" in str(row_a[16])  # Locked (2.38 cents ≈ $0.02)
+            assert "3/h" in str(row_a[12])  # Frequency-A
+            assert "85%" in str(row_b[13])  # Flow-B
+            assert "1m" in str(row_a[14])  # ETA-A
+            assert "2m*" in str(row_b[14])  # ETA-B (partial)
+            # Col 18 = Locked profit
+            assert "0.02" in str(row_a[18])  # Locked (2.38 cents ≈ $0.02)
 
     async def test_table_shows_odds_without_positions(self) -> None:
         scanner = _make_scanner_with_opportunity()
@@ -544,6 +554,132 @@ class TestAddGamesModal:
             await pilot.press("escape")
             await pilot.pause()
             assert not isinstance(app.screen, AddGamesScreen)
+
+
+def _make_scan_event(ticker: str, *, volume: int = 100) -> Event:
+    return Event(
+        event_ticker=ticker,
+        series_ticker="KXNHLGAME",
+        title=f"{ticker} title",
+        sub_title=f"{ticker} subtitle",
+        category="Sports",
+        markets=[
+            Market(
+                ticker=f"{ticker}-A",
+                event_ticker=ticker,
+                title="A",
+                status="active",
+                volume_24h_fp100=volume * 100,
+            ),
+            Market(
+                ticker=f"{ticker}-B",
+                event_ticker=ticker,
+                title="B",
+                status="active",
+                volume_24h_fp100=volume * 100,
+            ),
+        ],
+    )
+
+
+class ScanHarness(App[None]):
+    def __init__(self, events: list[Event]) -> None:
+        super().__init__()
+        self.events = events
+        self.result: list[str] | None = None
+
+    def compose(self) -> ComposeResult:
+        yield from ()
+
+    def on_mount(self) -> None:
+        self.push_screen(ScanScreen(self.events), callback=self._capture)
+
+    def _capture(self, result: list[str] | None) -> None:
+        self.result = result
+
+
+class TestScanScreen:
+    async def test_enter_adds_space_toggled_rows(self) -> None:
+        app = ScanHarness([_make_scan_event("EVT-1"), _make_scan_event("EVT-2")])
+
+        async with app.run_test(size=(160, 50)) as pilot:
+            await pilot.pause()
+            assert isinstance(app.screen, ScanScreen)
+
+            await pilot.press("space")
+            await pilot.press("enter")
+            await pilot.pause()
+
+        assert app.result == ["EVT-1"]
+
+
+def _talos_binding_map() -> dict[str, str]:
+    result: dict[str, str] = {}
+    for binding in TalosApp.BINDINGS:
+        if isinstance(binding, Binding):
+            result[binding.key] = binding.action
+        else:
+            key, action, *_ = binding
+            result[key] = action
+    return result
+
+
+class TestActionMenu:
+    def test_main_bindings_keep_footer_curated(self) -> None:
+        bindings = _talos_binding_map()
+
+        assert bindings["a"] == "add_games"
+        assert bindings["delete"] == "remove_game"
+        assert bindings["d"] == "toggle_drip"
+        assert bindings["c"] == "scan"
+        assert bindings["e"] == "toggle_exit_only"
+        assert bindings["E"] == "exit_all"
+        assert bindings["r"] == "review_event"
+        assert bindings["m"] == "open_action_menu"
+        assert bindings["q"] == "quit"
+
+        moved_to_menu = {"x", "u", "s", "y", "n", "f", "p", "o", "h", "l", "b", "B", "v", "t"}
+        assert moved_to_menu.isdisjoint(bindings)
+
+    def test_action_menu_contains_moved_actions(self) -> None:
+        actions = {action for action, _, _ in TalosApp.ACTION_MENU_ITEMS}
+
+        assert {
+            "clear_games",
+            "set_unit_size",
+            "toggle_suggestions",
+            "toggle_auto_accept",
+            "show_proposals",
+            "approve_proposal",
+            "reject_proposal",
+            "open_in_browser",
+            "settlement_history",
+            "copy_activity_log",
+            "blacklist_ticker",
+            "edit_blacklist",
+            "toggle_scan_mode",
+            "toggle_view",
+            "push_tree_screen",
+        } <= actions
+
+    async def test_menu_opens_on_m_key(self) -> None:
+        from talos.ui.screens import ActionMenuScreen
+
+        app = TalosApp()
+        async with app.run_test(size=(200, 50)) as pilot:
+            await pilot.press("m")
+            await pilot.pause()
+            assert isinstance(app.screen, ActionMenuScreen)
+
+    def test_menu_dispatches_existing_app_action(self) -> None:
+        app = TalosApp()
+        called: list[str] = []
+
+        app.action_toggle_view = MethodType(lambda self: called.append("view"), app)
+
+        app._on_action_menu_selected("toggle_view")
+
+        assert called == ["view"]
 
 
 class TestBidModal:
@@ -823,8 +959,7 @@ class TestHorizontalScrollUX:
             table = app.query_one(OpportunitiesTable)
 
             expected = sum(
-                c.get_render_width(table)
-                for c in table.ordered_columns[: table.fixed_columns]
+                c.get_render_width(table) for c in table.ordered_columns[: table.fixed_columns]
             )
             first_row_key = next(iter(table._data.keys()))
             fixed, _scrollable = table._render_line_in_row(
@@ -860,9 +995,7 @@ class TestHorizontalScrollUX:
             await pilot.pause()
             table = app.query_one(OpportunitiesTable)
             fc = table.fixed_columns
-            fixed_width = sum(
-                c.get_render_width(table) for c in table.ordered_columns[:fc]
-            )
+            fixed_width = sum(c.get_render_width(table) for c in table.ordered_columns[:fc])
             first_row_key = next(iter(table._data.keys()))
             _fixed, scrollable = table._render_line_in_row(
                 first_row_key,
@@ -871,9 +1004,7 @@ class TestHorizontalScrollUX:
                 Coordinate(-1, -1),
                 Coordinate(-1, -1),
             )
-            prefix_width = sum(
-                sum(len(seg.text) for seg in cell) for cell in scrollable[:fc]
-            )
+            prefix_width = sum(sum(len(seg.text) for seg in cell) for cell in scrollable[:fc])
             assert prefix_width == fixed_width, (
                 f"scrollable prefix width {prefix_width} must equal fixed_width "
                 f"{fixed_width}. If larger, the scroll crop lands inside the "
@@ -896,9 +1027,7 @@ class TestHorizontalScrollUX:
             await pilot.pause()
             table = app.query_one(OpportunitiesTable)
             fc = table.fixed_columns
-            fixed_width = sum(
-                c.get_render_width(table) for c in table.ordered_columns[:fc]
-            )
+            fixed_width = sum(c.get_render_width(table) for c in table.ordered_columns[:fc])
             expected_first_col_width = table.ordered_columns[fc].get_render_width(table)
 
             first_row_key = next(iter(table._data.keys()))
@@ -909,9 +1038,7 @@ class TestHorizontalScrollUX:
                 Coordinate(-1, -1),
                 Coordinate(-1, -1),
             )
-            first_scrollable_cell_width = sum(
-                len(seg.text) for seg in scrollable[fc]
-            )
+            first_scrollable_cell_width = sum(len(seg.text) for seg in scrollable[fc])
             # Cell at index fc must be the first non-fixed column (no
             # separator cell has been inserted before it).
             assert first_scrollable_cell_width == expected_first_col_width, (
@@ -926,16 +1053,11 @@ class TestHorizontalScrollUX:
             if fc + 1 < len(scrollable) and fc + 2 < len(scrollable):
                 sep_width = sum(len(seg.text) for seg in scrollable[fc + 1])
                 assert sep_width == 1, (
-                    f"expected separator (width 1) at scrollable[{fc + 1}], "
-                    f"got width {sep_width}"
+                    f"expected separator (width 1) at scrollable[{fc + 1}], got width {sep_width}"
                 )
             # And prefix text content before the crop boundary must be
             # exactly fixed_width characters.
-            prefix_text = "".join(
-                seg.text
-                for cell in scrollable[:fc]
-                for seg in cell
-            )
+            prefix_text = "".join(seg.text for cell in scrollable[:fc] for seg in cell)
             assert len(prefix_text) == fixed_width
 
     async def test_shift_right_advances_scroll_x(self) -> None:
@@ -967,8 +1089,7 @@ class TestHorizontalScrollUX:
 
             assert table.row_count == row_count_before
             assert scroll_x_after_one > scroll_x_start, (
-                "shift+right must advance scroll_x (binding not reaching "
-                "scroll_right action)"
+                "shift+right must advance scroll_x (binding not reaching scroll_right action)"
             )
             assert scroll_x_after_two > scroll_x_after_one, (
                 "second shift+right must advance scroll_x further"

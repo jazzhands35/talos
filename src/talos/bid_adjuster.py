@@ -73,7 +73,6 @@ class BidAdjuster:
         # Pending proposals: event_ticker → {side → proposal}
         self._proposals: dict[str, dict[Side, ProposedAdjustment]] = {}
 
-
     @property
     def ledgers(self) -> dict[str, PositionLedger]:
         """Read-only access to all per-event ledgers."""
@@ -331,10 +330,7 @@ class BidAdjuster:
                 adj_side=adj_side,
                 trigger=trigger,
                 outcome="skip_stale_book",
-                reason=(
-                    f"new_price {new_price} <= resting "
-                    f"{ledger.resting_price(adj_side)}"
-                ),
+                reason=(f"new_price {new_price} <= resting {ledger.resting_price(adj_side)}"),
                 book_top=new_price,
                 resting_price=cur_resting_price,
                 resting_count=cur_resting_count,
@@ -381,10 +377,7 @@ class BidAdjuster:
         # Float-cent views for log fields and human-readable reason strings.
         this_effective = this_effective_bps / ONE_CENT_BPS
         other_effective = other_effective_bps / ONE_CENT_BPS
-        if (
-            other_effective_bps > 0
-            and this_effective_bps + other_effective_bps >= ONE_DOLLAR_BPS
-        ):
+        if other_effective_bps > 0 and this_effective_bps + other_effective_bps >= ONE_DOLLAR_BPS:
             # No fills on either side → withdraw both orders entirely.
             # With fills → hold and wait for market to return (P16).
             if ledger.filled_count(Side.A) == 0 and ledger.filled_count(Side.B) == 0:

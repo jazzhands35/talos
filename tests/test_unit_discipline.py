@@ -193,7 +193,7 @@ _ALLOWLIST: frozenset[tuple[str, int]] = frozenset(
         ("src/talos/ui/event_review.py", 120),  # pnl (cents, sqlite col) → $N.NN display
         ("src/talos/ui/event_review.py", 121),  # revenue (cents, sqlite col) → $N.NN display
         # Cents-scale UI widgets / plumbing.
-        ("src/talos/ui/widgets.py", 51),   # kalshi_pnl param (cents) → $N.NN display
+        ("src/talos/ui/widgets.py", 51),  # kalshi_pnl param (cents) → $N.NN display
         ("src/talos/ui/widgets.py", 254),  # pnl_cents → $N.NN display
         ("src/talos/ui/widgets.py", 821),  # exposure (cents post bps→cents round) → display
         ("src/talos/ui/widgets.py", 926),  # _exposure (cents internal store) → display
@@ -301,7 +301,7 @@ def test_no_lossy_format_spec_on_money_identifiers() -> None:
             if (rel, node.lineno) in _ALLOWLIST:
                 continue
             violations.append(
-                f"{rel}:{node.lineno}: f\"{{{ident}:{spec_text}}}\" — use "
+                f'{rel}:{node.lineno}: f"{{{ident}:{spec_text}}}" — use '
                 f"talos.units.format_bps_as_dollars_display / format_bps_as_cents "
                 f"/ format_fp100_as_contracts instead."
             )

@@ -25,6 +25,8 @@ class LegSummary(BaseModel):
     cpm: float | None = None
     cpm_partial: bool = False
     eta_minutes: float | None = None
+    frequency: float | None = None
+    flow_burst_ratio: float | None = None
     resting_no_price_bps: int | None = None
 
 

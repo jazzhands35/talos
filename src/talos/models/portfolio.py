@@ -11,21 +11,36 @@ from talos.models._converters import dollars_to_bps_round as _dollars_to_bps_rou
 from talos.models._converters import fp_to_fp100 as _fp_to_fp100
 from talos.models._converters import log_unknown_fields
 
-_POSITION_FP_FIELDS = frozenset({
-    "position_fp", "total_traded_dollars", "market_exposure_dollars",
-    "realized_pnl_dollars", "fees_paid_dollars",
-})
+_POSITION_FP_FIELDS = frozenset(
+    {
+        "position_fp",
+        "total_traded_dollars",
+        "market_exposure_dollars",
+        "realized_pnl_dollars",
+        "fees_paid_dollars",
+    }
+)
 
-_EVENT_POSITION_FP_FIELDS = frozenset({
-    "total_cost_dollars", "event_exposure_dollars", "realized_pnl_dollars",
-    "fees_paid_dollars", "total_cost_shares_fp",
-})
+_EVENT_POSITION_FP_FIELDS = frozenset(
+    {
+        "total_cost_dollars",
+        "event_exposure_dollars",
+        "realized_pnl_dollars",
+        "fees_paid_dollars",
+        "total_cost_shares_fp",
+    }
+)
 
-_SETTLEMENT_FP_FIELDS = frozenset({
-    "yes_total_cost_dollars", "no_total_cost_dollars",
-    "yes_count_fp", "no_count_fp", "value_dollars",
-    "fee_cost_dollars",
-})
+_SETTLEMENT_FP_FIELDS = frozenset(
+    {
+        "yes_total_cost_dollars",
+        "no_total_cost_dollars",
+        "yes_count_fp",
+        "no_count_fp",
+        "value_dollars",
+        "fee_cost_dollars",
+    }
+)
 
 
 class Balance(BaseModel):

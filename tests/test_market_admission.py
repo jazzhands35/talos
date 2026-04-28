@@ -42,19 +42,21 @@ def _fractional_market(ticker: str = "KXF-26JAN01-A") -> Market:
 
 
 def _subcent_market(ticker: str = "KXS-26JAN01-A") -> Market:
-    return Market.model_validate({
-        "ticker": ticker,
-        "event_ticker": "KXS-26JAN01",
-        "title": f"Sub-cent {ticker}",
-        "status": "open",
-        "price_ranges": [
-            {
-                "min_price_dollars": "0.01",
-                "max_price_dollars": "0.99",
-                "tick_dollars": "0.001",
-            }
-        ],
-    })
+    return Market.model_validate(
+        {
+            "ticker": ticker,
+            "event_ticker": "KXS-26JAN01",
+            "title": f"Sub-cent {ticker}",
+            "status": "open",
+            "price_ranges": [
+                {
+                    "min_price_dollars": "0.01",
+                    "max_price_dollars": "0.99",
+                    "tick_dollars": "0.001",
+                }
+            ],
+        }
+    )
 
 
 def test_accepts_two_cent_markets():
@@ -96,20 +98,22 @@ def test_admits_sub_cent_tick_on_side_b():
 
 def test_admits_fractional_and_sub_cent_combined():
     """Both Phase 0 shape classes on the same market now flow through."""
-    a = Market.model_validate({
-        "ticker": "KXBOTH-26JAN01-A",
-        "event_ticker": "KXBOTH-26JAN01",
-        "title": "Both",
-        "status": "open",
-        "fractional_trading_enabled": True,
-        "price_ranges": [
-            {
-                "min_price_dollars": "0.01",
-                "max_price_dollars": "0.99",
-                "tick_dollars": "0.001",
-            }
-        ],
-    })
+    a = Market.model_validate(
+        {
+            "ticker": "KXBOTH-26JAN01-A",
+            "event_ticker": "KXBOTH-26JAN01",
+            "title": "Both",
+            "status": "open",
+            "fractional_trading_enabled": True,
+            "price_ranges": [
+                {
+                    "min_price_dollars": "0.01",
+                    "max_price_dollars": "0.99",
+                    "tick_dollars": "0.001",
+                }
+            ],
+        }
+    )
     b = _cent_market()
     validate_market_for_admission(a, b)  # must not raise
 
@@ -144,6 +148,7 @@ def test_scanner_admits_fractional_pair_and_logs_no_admission_skip(caplog):
     evaluate the books (empty here, so no opportunity — but no guard log
     either)."""
     import logging
+
     caplog.set_level(logging.WARNING)
 
     books = OrderBookManager()
@@ -157,9 +162,7 @@ def test_scanner_admits_fractional_pair_and_logs_no_admission_skip(caplog):
 
     scanner.scan("KXF-26JAN01-A")
 
-    admission_warnings = [
-        r for r in caplog.records if "admission" in r.message.lower()
-    ]
+    admission_warnings = [r for r in caplog.records if "admission" in r.message.lower()]
     assert admission_warnings == [], (
         f"expected no admission skip warnings post-Task-12, got "
         f"{[r.message for r in admission_warnings]}"
@@ -170,6 +173,7 @@ def test_scanner_admits_subcent_pair(caplog):
     """Post-Task-12: a pair stored with tick_bps < 100 no longer triggers
     a scanner admission skip."""
     import logging
+
     caplog.set_level(logging.WARNING)
 
     books = OrderBookManager()
@@ -182,15 +186,14 @@ def test_scanner_admits_subcent_pair(caplog):
     )
     scanner.scan("KXS-26JAN01-A")
 
-    admission_warnings = [
-        r for r in caplog.records if "admission" in r.message.lower()
-    ]
+    admission_warnings = [r for r in caplog.records if "admission" in r.message.lower()]
     assert admission_warnings == []
 
 
 def test_scanner_admits_ordinary_cent_pair(caplog):
     """Regression guard — the ordinary cent path is still admission-clean."""
     import logging
+
     caplog.set_level(logging.WARNING)
     books = OrderBookManager()
     scanner = ArbitrageScanner(books)
@@ -252,17 +255,13 @@ async def test_add_pairs_from_selection_returns_commit_result_with_mixed_batch(
     def _raise_for_kxf(market_a: Market, market_b: Market) -> None:
         for m in (market_a, market_b):
             if m.ticker.startswith("KXF-"):
-                raise MarketAdmissionError(
-                    f"{m.ticker}: test-only shape invariant violation"
-                )
+                raise MarketAdmissionError(f"{m.ticker}: test-only shape invariant violation")
 
     with patch(
         "talos.engine.validate_market_for_admission",
         side_effect=_raise_for_kxf,
     ):
-        result = await engine_fixture.add_pairs_from_selection(
-            [good_record, bad_record]
-        )
+        result = await engine_fixture.add_pairs_from_selection([good_record, bad_record])
 
     assert isinstance(result, CommitResult)
     assert len(result.admitted) == 1
@@ -281,11 +280,14 @@ async def test_add_pairs_from_selection_all_admitted(engine_fixture):
         "event_ticker": "KXA-26JAN01",
         "ticker_a": "KXA-26JAN01-A",
         "ticker_b": "KXA-26JAN01-B",
-        "side_a": "no", "side_b": "no",
+        "side_a": "no",
+        "side_b": "no",
         "kalshi_event_ticker": "KXA-26JAN01",
         "series_ticker": "KXA",
-        "fee_type": "quadratic_with_maker_fees", "fee_rate": 0.0175,
-        "close_time": "2026-12-31T00:00:00Z", "expected_expiration_time": None,
+        "fee_type": "quadratic_with_maker_fees",
+        "fee_rate": 0.0175,
+        "close_time": "2026-12-31T00:00:00Z",
+        "expected_expiration_time": None,
     }
     result = await engine_fixture.add_pairs_from_selection([record])
     assert isinstance(result, CommitResult)
@@ -305,11 +307,14 @@ async def test_add_pairs_from_selection_admits_sub_cent_post_task_12(
         "event_ticker": "KXS-26JAN01",
         "ticker_a": "KXS-26JAN01-A",
         "ticker_b": "KXS-26JAN01-B",
-        "side_a": "no", "side_b": "no",
+        "side_a": "no",
+        "side_b": "no",
         "kalshi_event_ticker": "KXS-26JAN01",
         "series_ticker": "KXS",
-        "fee_type": "quadratic_with_maker_fees", "fee_rate": 0.0175,
-        "close_time": "2026-12-31T00:00:00Z", "expected_expiration_time": None,
+        "fee_type": "quadratic_with_maker_fees",
+        "fee_rate": 0.0175,
+        "close_time": "2026-12-31T00:00:00Z",
+        "expected_expiration_time": None,
     }
     result = await engine_fixture.add_pairs_from_selection([subcent_record])
     assert isinstance(result, CommitResult)
@@ -384,9 +389,7 @@ async def test_add_market_pairs_surfaces_rejection_notification(engine_fixture):
     def _raise_for_kxf(market_a: Market, market_b: Market) -> None:
         for m in (market_a, market_b):
             if m.ticker.startswith("KXF-"):
-                raise MarketAdmissionError(
-                    f"{m.ticker}: test-only shape invariant violation"
-                )
+                raise MarketAdmissionError(f"{m.ticker}: test-only shape invariant violation")
 
     async def _add_market_as_pair(event, market):
         # Route through the (patched) guard so the structured-rejection path
@@ -394,6 +397,7 @@ async def test_add_market_pairs_surfaces_rejection_notification(engine_fixture):
         from talos.game_manager import (
             validate_market_for_admission as _guard,
         )
+
         _guard(market, market)
         return ArbPair(
             event_ticker=market.ticker,
@@ -439,7 +443,8 @@ async def test_add_market_pairs_surfaces_rejection_notification(engine_fixture):
         side_effect=_raise_for_kxf,
     ):
         pairs = await engine_fixture.add_market_pairs(
-            event, [fractional_market, ok_market],
+            event,
+            [fractional_market, ok_market],
         )
 
     # The OK market succeeded.
@@ -449,12 +454,10 @@ async def test_add_market_pairs_surfaces_rejection_notification(engine_fixture):
     # A rejection notification fired, mentioning the fractional ticker and
     # with severity=error.
     rejection_notifs = [
-        (msg, sev) for msg, sev, _toast in captured
-        if sev == "error" and "KXF-26JAN01-A" in msg
+        (msg, sev) for msg, sev, _toast in captured if sev == "error" and "KXF-26JAN01-A" in msg
     ]
     assert rejection_notifs, (
-        f"expected rejection notification mentioning KXF-26JAN01-A, "
-        f"got {captured}"
+        f"expected rejection notification mentioning KXF-26JAN01-A, got {captured}"
     )
 
 
@@ -471,10 +474,9 @@ async def test_add_games_surfaces_admission_rejection_as_specific_toast(
     directly) so this test is independent of which specific shape
     invariant is being enforced — it only verifies the toast wiring.
     """
+
     async def _raise(urls):
-        raise MarketAdmissionError(
-            "KXF-26JAN01-A: test-only shape invariant violation"
-        )
+        raise MarketAdmissionError("KXF-26JAN01-A: test-only shape invariant violation")
 
     engine_fixture._game_manager.add_games = _raise
 
@@ -489,12 +491,11 @@ async def test_add_games_surfaces_admission_rejection_as_specific_toast(
 
     assert result == []
     rejection_notifs = [
-        (msg, sev) for msg, sev, _toast in captured
+        (msg, sev)
+        for msg, sev, _toast in captured
         if sev == "error" and "admission guard" in msg.lower()
     ]
-    assert rejection_notifs, (
-        f"expected 'admission guard' rejection notification, got {captured}"
-    )
+    assert rejection_notifs, f"expected 'admission guard' rejection notification, got {captured}"
     assert any("Market rejected" in msg for msg, _sev, _toast in captured), (
         f"expected 'Market rejected' prefix, got {captured}"
     )

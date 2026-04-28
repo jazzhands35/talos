@@ -284,10 +284,7 @@ class ReconcileBanner(Static):
         Safe to call from a timer — cheap when nothing has changed.
         """
         now = time.monotonic()
-        stale = (
-            self._ledger.stale_fills_unconfirmed
-            or self._ledger.stale_resting_unconfirmed
-        )
+        stale = self._ledger.stale_fills_unconfirmed or self._ledger.stale_resting_unconfirmed
         if stale:
             if self._stale_observed_at is None:
                 self._stale_observed_at = now
@@ -298,9 +295,7 @@ class ReconcileBanner(Static):
         if self._stale_observed_at is not None:
             stale_elapsed = now - self._stale_observed_at
 
-        resolved = _resolve_banner_state(
-            self._ledger, stale_elapsed_seconds=stale_elapsed
-        )
+        resolved = _resolve_banner_state(self._ledger, stale_elapsed_seconds=stale_elapsed)
         self._render_resolved(resolved)
 
     @property
@@ -492,18 +487,10 @@ class ReconcileBanner(Static):
         resting_a = self._ledger.resting_count(Side.A)
         resting_b = self._ledger.resting_count(Side.B)
 
-        lines.append(
-            f"Filled A: {_fmt_legacy('filled_a'):<20}→  {filled_a}"
-        )
-        lines.append(
-            f"Filled B: {_fmt_legacy('filled_b'):<20}→  {filled_b}"
-        )
-        lines.append(
-            f"Resting A count: {_fmt_legacy('resting_count_a'):<13}→  {resting_a}"
-        )
-        lines.append(
-            f"Resting B count: {_fmt_legacy('resting_count_b'):<13}→  {resting_b}"
-        )
+        lines.append(f"Filled A: {_fmt_legacy('filled_a'):<20}→  {filled_a}")
+        lines.append(f"Filled B: {_fmt_legacy('filled_b'):<20}→  {filled_b}")
+        lines.append(f"Resting A count: {_fmt_legacy('resting_count_a'):<13}→  {resting_a}")
+        lines.append(f"Resting B count: {_fmt_legacy('resting_count_b'):<13}→  {resting_b}")
         lines.append(
             f"Cost A (¢):       {_fmt_legacy('cost_a'):<12}→  "
             f"{self._ledger.filled_total_cost(Side.A)}"

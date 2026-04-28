@@ -75,19 +75,16 @@ class MarketFeed:
         # gapped before any snapshot), include all unmapped as last resort.
         if learned:
             affected_batches = [
-                batch for batch in self._bulk_batches
-                if any(t in batch for t in learned)
+                batch for batch in self._bulk_batches if any(t in batch for t in learned)
             ]
             unmapped = [
-                t for batch in affected_batches
+                t
+                for batch in affected_batches
                 for t in batch
                 if t in self._subscribed_tickers and t not in self._ticker_to_sid
             ]
         else:
-            unmapped = [
-                t for t in self._subscribed_tickers
-                if t not in self._ticker_to_sid
-            ]
+            unmapped = [t for t in self._subscribed_tickers if t not in self._ticker_to_sid]
         affected_tickers = list(set(learned + unmapped))
         if not affected_tickers:
             logger.warning("ws_seq_gap_unknown_sid", sid=sid, channel=channel)

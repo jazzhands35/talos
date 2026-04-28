@@ -314,8 +314,11 @@ class TestYesNoPairScanning:
     def test_add_yesno_pair(self):
         scanner = ArbitrageScanner(OrderBookManager())
         scanner.add_pair(
-            "MKT-TICKER", "MKT-TICKER", "MKT-TICKER",
-            side_a="yes", side_b="no",
+            "MKT-TICKER",
+            "MKT-TICKER",
+            "MKT-TICKER",
+            side_a="yes",
+            side_b="no",
         )
         assert len(scanner.pairs) == 1
         pair = scanner.pairs[0]
@@ -328,13 +331,21 @@ class TestYesNoPairScanning:
         mgr = OrderBookManager()
         scanner = ArbitrageScanner(mgr)
         scanner.add_pair(
-            "MKT-TICKER", "MKT-TICKER", "MKT-TICKER",
-            side_a="yes", side_b="no",
+            "MKT-TICKER",
+            "MKT-TICKER",
+            "MKT-TICKER",
+            side_a="yes",
+            side_b="no",
         )
-        mgr.apply_snapshot("MKT-TICKER", OrderBookSnapshot(
-            market_ticker="MKT-TICKER", market_id="m1",
-            yes=[[48, 100]], no=[[45, 200]],
-        ))
+        mgr.apply_snapshot(
+            "MKT-TICKER",
+            OrderBookSnapshot(
+                market_ticker="MKT-TICKER",
+                market_id="m1",
+                yes=[[48, 100]],
+                no=[[45, 200]],
+            ),
+        )
         scanner.scan("MKT-TICKER")
         opps = scanner.opportunities
         assert len(opps) == 1
@@ -348,13 +359,21 @@ class TestYesNoPairScanning:
         mgr = OrderBookManager()
         scanner = ArbitrageScanner(mgr)
         scanner.add_pair(
-            "MKT-TICKER", "MKT-TICKER", "MKT-TICKER",
-            side_a="yes", side_b="no",
+            "MKT-TICKER",
+            "MKT-TICKER",
+            "MKT-TICKER",
+            side_a="yes",
+            side_b="no",
         )
-        mgr.apply_snapshot("MKT-TICKER", OrderBookSnapshot(
-            market_ticker="MKT-TICKER", market_id="m1",
-            yes=[[55, 100]], no=[[48, 200]],
-        ))
+        mgr.apply_snapshot(
+            "MKT-TICKER",
+            OrderBookSnapshot(
+                market_ticker="MKT-TICKER",
+                market_id="m1",
+                yes=[[55, 100]],
+                no=[[48, 200]],
+            ),
+        )
         scanner.scan("MKT-TICKER")
         assert len(scanner.opportunities) == 0
 
@@ -363,13 +382,21 @@ class TestYesNoPairScanning:
         mgr = OrderBookManager()
         scanner = ArbitrageScanner(mgr)
         scanner.add_pair(
-            "MKT-TICKER", "MKT-TICKER", "MKT-TICKER",
-            side_a="yes", side_b="no",
+            "MKT-TICKER",
+            "MKT-TICKER",
+            "MKT-TICKER",
+            side_a="yes",
+            side_b="no",
         )
-        mgr.apply_snapshot("MKT-TICKER", OrderBookSnapshot(
-            market_ticker="MKT-TICKER", market_id="m1",
-            yes=[], no=[[45, 200]],
-        ))
+        mgr.apply_snapshot(
+            "MKT-TICKER",
+            OrderBookSnapshot(
+                market_ticker="MKT-TICKER",
+                market_id="m1",
+                yes=[],
+                no=[[45, 200]],
+            ),
+        )
         scanner.scan("MKT-TICKER")
         assert len(scanner.opportunities) == 0
 
@@ -378,12 +405,24 @@ class TestYesNoPairScanning:
         mgr = OrderBookManager()
         scanner = ArbitrageScanner(mgr)
         scanner.add_pair("EVT", "TK-A", "TK-B")
-        mgr.apply_snapshot("TK-A", OrderBookSnapshot(
-            market_ticker="TK-A", market_id="m1", yes=[], no=[[45, 100]],
-        ))
-        mgr.apply_snapshot("TK-B", OrderBookSnapshot(
-            market_ticker="TK-B", market_id="m2", yes=[], no=[[48, 100]],
-        ))
+        mgr.apply_snapshot(
+            "TK-A",
+            OrderBookSnapshot(
+                market_ticker="TK-A",
+                market_id="m1",
+                yes=[],
+                no=[[45, 100]],
+            ),
+        )
+        mgr.apply_snapshot(
+            "TK-B",
+            OrderBookSnapshot(
+                market_ticker="TK-B",
+                market_id="m2",
+                yes=[],
+                no=[[48, 100]],
+            ),
+        )
         scanner.scan("TK-A")
         opps = scanner.opportunities
         assert len(opps) == 1
@@ -405,8 +444,7 @@ class TestDynamicFeeRate:
 
         opp = scanner.opportunities[0]
         expected = (
-            fee_adjusted_edge_bps(38 * ONE_CENT_BPS, 55 * ONE_CENT_BPS, rate=0.03)
-            / ONE_CENT_BPS
+            fee_adjusted_edge_bps(38 * ONE_CENT_BPS, 55 * ONE_CENT_BPS, rate=0.03) / ONE_CENT_BPS
         )
         assert opp.fee_edge == pytest.approx(expected)
 

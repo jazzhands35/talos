@@ -18,16 +18,27 @@ from talos.models._converters import (
 
 ACTIVE_STATUSES = frozenset({"resting", "executed"})
 
-_ORDER_FP_FIELDS = frozenset({
-    "yes_price_dollars", "no_price_dollars",
-    "taker_fees_dollars", "maker_fees_dollars",
-    "maker_fill_cost_dollars", "taker_fill_cost_dollars",
-    "fill_count_fp", "remaining_count_fp", "initial_count_fp",
-})
+_ORDER_FP_FIELDS = frozenset(
+    {
+        "yes_price_dollars",
+        "no_price_dollars",
+        "taker_fees_dollars",
+        "maker_fees_dollars",
+        "maker_fill_cost_dollars",
+        "taker_fill_cost_dollars",
+        "fill_count_fp",
+        "remaining_count_fp",
+        "initial_count_fp",
+    }
+)
 
-_FILL_FP_FIELDS = frozenset({
-    "yes_price_dollars", "no_price_dollars", "count_fp",
-})
+_FILL_FP_FIELDS = frozenset(
+    {
+        "yes_price_dollars",
+        "no_price_dollars",
+        "count_fp",
+    }
+)
 
 
 class Order(BaseModel, extra="ignore"):

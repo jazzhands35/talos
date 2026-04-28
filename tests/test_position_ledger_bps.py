@@ -12,6 +12,7 @@ accessors still return cents/contracts after the migration. This file exercises:
   5. Mixed round-trip — save v2, reload, verify legacy accessors return original
      cents/contracts.
 """
+
 from __future__ import annotations
 
 from talos.position_ledger import PositionLedger, Side
@@ -69,9 +70,7 @@ class TestRecordFillBps:
     def test_record_fill_bps_reduces_resting_fp100(self):
         """Partial fill shrinks resting by the fp100 fill count."""
         ledger = PositionLedger("EVT-1", unit_size=10)
-        ledger.record_resting_bps(
-            Side.A, order_id="ord-1", count_fp100=1000, price_bps=4500
-        )
+        ledger.record_resting_bps(Side.A, order_id="ord-1", count_fp100=1000, price_bps=4500)
         # Fractional fill against the resting order
         ledger.record_fill_bps(Side.A, count_fp100=189, price_bps=4500)
         assert ledger.resting_count_fp100(Side.A) == 811  # 1000 - 189
@@ -89,12 +88,24 @@ class TestPersistenceV1Load:
     def test_v1_payload_scales_x100_into_bps_fp100(self):
         """Legacy v1 save (pre-migration shape) loads and ×100 scales cleanly."""
         data: dict[str, object] = {
-            "filled_a": 5, "cost_a": 250, "fees_a": 3,
-            "filled_b": 5, "cost_b": 90, "fees_b": 1,
-            "closed_count_a": 5, "closed_total_cost_a": 250, "closed_fees_a": 3,
-            "closed_count_b": 5, "closed_total_cost_b": 90, "closed_fees_b": 1,
-            "resting_id_a": "ord-a", "resting_count_a": 2, "resting_price_a": 48,
-            "resting_id_b": None, "resting_count_b": 0, "resting_price_b": 0,
+            "filled_a": 5,
+            "cost_a": 250,
+            "fees_a": 3,
+            "filled_b": 5,
+            "cost_b": 90,
+            "fees_b": 1,
+            "closed_count_a": 5,
+            "closed_total_cost_a": 250,
+            "closed_fees_a": 3,
+            "closed_count_b": 5,
+            "closed_total_cost_b": 90,
+            "closed_fees_b": 1,
+            "resting_id_a": "ord-a",
+            "resting_count_a": 2,
+            "resting_price_a": 48,
+            "resting_id_b": None,
+            "resting_count_b": 0,
+            "resting_price_b": 0,
         }
         ledger = PositionLedger("EVT-X", unit_size=5)
         ledger.seed_from_saved(data)
@@ -219,13 +230,14 @@ class TestReconcileClosedNegativeStateGuard:
 
     def test_closed_exceeds_filled_skips_without_crash(self, caplog) -> None:
         import logging
+
         caplog.set_level(logging.WARNING)
         ledger = PositionLedger("EVT-NEG", unit_size=5)
         # Manually induce a corruption state: closed > filled on Side A.
         # (Normally unreachable via public API; tests the defensive path.)
         s = ledger._sides[Side.A]
-        s.filled_count_fp100 = 500   # 5 contracts
-        s.closed_count_fp100 = 600   # 6 contracts — impossible state
+        s.filled_count_fp100 = 500  # 5 contracts
+        s.closed_count_fp100 = 600  # 6 contracts — impossible state
         s.filled_total_cost_bps = 25000
         s.closed_total_cost_bps = 30000
         # Give Side B a normal state so unit-close logic would otherwise fire.

@@ -13,6 +13,8 @@ from textual.events import Key
 from textual.screen import ModalScreen
 from textual.widgets import Button, DataTable, Input, Label, TextArea
 
+from talos.cpm import FlowMetrics, format_flow, format_frequency
+from talos.drip import DripConfig
 from talos.game_manager import extract_leg_labels
 from talos.game_status import GameStatus, _extract_date_from_ticker
 from talos.models.market import Event, Market
@@ -285,6 +287,124 @@ class AutoAcceptScreen(ModalScreen[float | Literal["indefinite"] | None]):
             self.dismiss(hours)
 
 
+class DripConfigScreen(ModalScreen[DripConfig | None]):
+    """Modal for enabling DRIP/BLIP on the selected event."""
+
+    BINDINGS = [("escape", "cancel", "Cancel")]
+
+    @staticmethod
+    def parse_config(
+        drip_size_raw: str,
+        max_drips_raw: str,
+        blip_delta_raw: str,
+    ) -> DripConfig | None:
+        try:
+            config = DripConfig(
+                drip_size=int(drip_size_raw.strip()),
+                max_drips=int(max_drips_raw.strip()),
+                blip_delta_min=float(blip_delta_raw.strip()),
+            )
+        except ValueError:
+            return None
+        if config.max_drips != 1:
+            return None
+        return config
+
+    def action_cancel(self) -> None:
+        self.dismiss(None)
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="modal-dialog"):
+            yield Label("Enable DRIP/BLIP", classes="modal-title")
+            yield Label("DRIP_SIZE")
+            yield Input(value="1", id="drip-size-input", type="integer")
+            yield Label("MAX_DRIPS")
+            yield Input(value="1", id="max-drips-input", type="integer")
+            yield Label("BLIP_DELTA_MIN")
+            yield Input(value="5.0", id="blip-delta-input", type="number")
+            yield Label("", id="modal-error", classes="modal-error")
+            with Vertical(id="modal-buttons"):
+                yield Button("Cancel", id="cancel-btn", variant="default")
+                yield Button("Enable", id="enable-btn", variant="warning")
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id == "cancel-btn":
+            self.dismiss(None)
+            return
+        if event.button.id != "enable-btn":
+            return
+
+        config = self.parse_config(
+            self.query_one("#drip-size-input", Input).value,
+            self.query_one("#max-drips-input", Input).value,
+            self.query_one("#blip-delta-input", Input).value,
+        )
+        if config is None:
+            self.query_one("#modal-error", Label).update(
+                "Enter positive values; POC supports MAX_DRIPS=1"
+            )
+            return
+        self.dismiss(config)
+
+
+class ActionMenuScreen(ModalScreen[str | None]):
+    """Modal command menu for lower-frequency app actions."""
+
+    DEFAULT_CSS = """
+    ActionMenuScreen {
+        align: center middle;
+    }
+    #action-menu-dialog {
+        width: 74;
+        height: 28;
+        border: thick $surface;
+        background: $surface;
+        padding: 1 2;
+    }
+    #action-menu-table {
+        height: 1fr;
+    }
+    """
+
+    BINDINGS = [
+        ("escape", "cancel", "Cancel"),
+        ("enter", "confirm", "Run"),
+    ]
+
+    def __init__(self, actions: list[tuple[str, str, str]]) -> None:
+        super().__init__()
+        self._actions = actions
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="action-menu-dialog"):
+            yield Label("Action Menu", classes="modal-title")
+            yield DataTable(id="action-menu-table")
+
+    def on_mount(self) -> None:
+        table = self.query_one("#action-menu-table", DataTable)
+        table.cursor_type = "row"
+        table.zebra_stripes = True
+        table.add_column("Action", width=24)
+        table.add_column("Scope")
+        for action, label, scope in self._actions:
+            table.add_row(label, scope, key=action)
+        table.focus()
+
+    def action_cancel(self) -> None:
+        self.dismiss(None)
+
+    def action_confirm(self) -> None:
+        table = self.query_one("#action-menu-table", DataTable)
+        if table.cursor_row is None or table.row_count == 0:
+            return
+        row_key = table.ordered_rows[table.cursor_row].key
+        self.dismiss(str(row_key.value))
+
+    def on_data_table_row_selected(self, event: DataTable.RowSelected) -> None:
+        event.stop()
+        self.dismiss(str(event.row_key.value))
+
+
 def _fmt_vol_compact(volume: int) -> str:
     """Format volume as compact string (e.g., '1.2k')."""
     if volume == 0:
@@ -328,10 +448,12 @@ class ScanScreen(ModalScreen[list[str] | None]):
         self,
         events: list[Event],
         statuses: dict[str, GameStatus] | None = None,
+        flow_metrics: dict[str, FlowMetrics] | None = None,
     ) -> None:
         super().__init__()
         self._events = events
         self._statuses = statuses or {}
+        self._flow_metrics = flow_metrics or {}
         self._selected: set[str] = set()
         self._all_selected = False
         # Ordered list of event tickers matching table row order
@@ -341,8 +463,7 @@ class ScanScreen(ModalScreen[list[str] | None]):
         count = len(self._events)
         with Vertical(id="scan-dialog"):
             yield Label(
-                f"Scan Results — {count} events found  "
-                "Space:Toggle  Enter:Add  Esc:Cancel",
+                f"Scan Results — {count} events found  Space:Toggle  Enter:Add  Esc:Cancel",
                 classes="modal-title",
                 markup=False,
             )
@@ -361,7 +482,11 @@ class ScanScreen(ModalScreen[list[str] | None]):
         table.add_column(RichText("Time", justify=r), width=8)
         table.add_column("Event")
         table.add_column(RichText("24h A", justify=r), width=7)
+        table.add_column(RichText("Freq A", justify=r), width=7)
+        table.add_column(RichText("Flow A", justify=r), width=6)
         table.add_column(RichText("24h B", justify=r), width=7)
+        table.add_column(RichText("Freq B", justify=r), width=7)
+        table.add_column(RichText("Flow B", justify=r), width=6)
 
         rows: list[tuple[float, str, tuple[str, ...]]] = []
         for ev in self._events:
@@ -393,15 +518,12 @@ class ScanScreen(ModalScreen[list[str] | None]):
                 else:
                     # Non-sports fallback: earliest market close_time
                     close_times = [
-                        m.close_time for m in ev.markets
-                        if m.status == "active" and m.close_time
+                        m.close_time for m in ev.markets if m.status == "active" and m.close_time
                     ]
                     if close_times:
                         earliest = min(close_times)
                         try:
-                            ct = datetime.fromisoformat(
-                                earliest.replace("Z", "+00:00")
-                            )
+                            ct = datetime.fromisoformat(earliest.replace("Z", "+00:00"))
                             pt = ct.astimezone(_PT)
                             date_str = pt.strftime("%m/%d")
                             time_str = pt.strftime("%I:%M %p").lstrip("0")
@@ -427,14 +549,62 @@ class ScanScreen(ModalScreen[list[str] | None]):
                 else "—"
             )
 
+            freq_a = (
+                format_frequency(self._flow_metrics.get(active_mkts[0].ticker))
+                if active_mkts
+                else "--"
+            )
+            flow_a = (
+                format_flow(self._flow_metrics.get(active_mkts[0].ticker)) if active_mkts else "--"
+            )
+            freq_b = (
+                format_frequency(self._flow_metrics.get(active_mkts[1].ticker))
+                if len(active_mkts) > 1
+                else "--"
+            )
+            flow_b = (
+                format_flow(self._flow_metrics.get(active_mkts[1].ticker))
+                if len(active_mkts) > 1
+                else "--"
+            )
+
             rows.append(
-                (sort_ts, ticker, (sport, league, date_str, time_str, label, vol_a, vol_b))
+                (
+                    sort_ts,
+                    ticker,
+                    (
+                        sport,
+                        league,
+                        date_str,
+                        time_str,
+                        label,
+                        vol_a,
+                        freq_a,
+                        flow_a,
+                        vol_b,
+                        freq_b,
+                        flow_b,
+                    ),
+                )
             )
 
         rows.sort(key=lambda r: r[0])
 
         self._row_tickers = []
-        for _, ticker, (sport, league, date_str, time_str, label, vol_a, vol_b) in rows:
+        for _, ticker, row in rows:
+            (
+                sport,
+                league,
+                date_str,
+                time_str,
+                label,
+                vol_a,
+                freq_a,
+                flow_a,
+                vol_b,
+                freq_b,
+                flow_b,
+            ) = row
             self._row_tickers.append(ticker)
             table.add_row(
                 "",
@@ -444,12 +614,33 @@ class ScanScreen(ModalScreen[list[str] | None]):
                 RichText(time_str, justify="right"),
                 label,
                 RichText(vol_a, justify="right"),
+                RichText(freq_a, justify="right"),
+                RichText(flow_a, justify="right"),
                 RichText(vol_b, justify="right"),
+                RichText(freq_b, justify="right"),
+                RichText(flow_b, justify="right"),
                 key=ticker,
             )
+        table.focus()
 
     def action_cancel(self) -> None:
         self.dismiss(None)
+
+    def on_key(self, event: Key) -> None:
+        """Handle table keys before DataTable consumes them."""
+        if event.key == "space":
+            event.prevent_default()
+            event.stop()
+            self.action_toggle_selection()
+        elif event.key == "enter":
+            event.prevent_default()
+            event.stop()
+            self._confirm()
+
+    def on_data_table_row_selected(self, event: DataTable.RowSelected) -> None:
+        """DataTable fires RowSelected on Enter; treat it as Add Selected."""
+        event.stop()
+        self._confirm()
 
     def action_toggle_selection(self) -> None:
         table = self.query_one("#scan-table", DataTable)
@@ -473,6 +664,9 @@ class ScanScreen(ModalScreen[list[str] | None]):
             self.dismiss(list(self._row_tickers))
 
     def action_confirm(self) -> None:
+        self._confirm()
+
+    def _confirm(self) -> None:
         if self._selected:
             # Preserve the display order for selected tickers
             ordered = [t for t in self._row_tickers if t in self._selected]
@@ -573,14 +767,10 @@ class SettlementHistoryScreen(ModalScreen[None]):
             for _, legs, _ in day_events:
                 for s in legs:
                     implicit_bps = (
-                        min(s.yes_count_fp100, s.no_count_fp100)
-                        * ONE_DOLLAR_BPS
+                        min(s.yes_count_fp100, s.no_count_fp100) * ONE_DOLLAR_BPS
                     ) // ONE_CONTRACT_FP100
                     cost_bps = s.no_total_cost_bps + s.yes_total_cost_bps
-                    day_pnl_bps += (
-                        s.revenue_bps + implicit_bps
-                        - cost_bps - s.fee_cost_bps
-                    )
+                    day_pnl_bps += s.revenue_bps + implicit_bps - cost_bps - s.fee_cost_bps
 
             # Day separator row
             day_label = day_events[0][2].strftime("%b %d")
@@ -591,7 +781,14 @@ class SettlementHistoryScreen(ModalScreen[None]):
             sep_text = f"─── {day_label} ─────────────────── Day P&L: {day_pnl_str} ───"
             table.add_row(
                 RichText(sep_text, style=SURFACE2),
-                "", "", "", "", "", "", "", "",
+                "",
+                "",
+                "",
+                "",
+                "",
+                "",
+                "",
+                "",
                 key=f"day:{day_key}",
             )
             row_idx += 1
@@ -631,16 +828,10 @@ class SettlementHistoryScreen(ModalScreen[None]):
         # Bps arithmetic: fp100 × bps / fp100 = bps.
         total_revenue_bps = sum(
             s.revenue_bps
-            + (
-                min(s.yes_count_fp100, s.no_count_fp100)
-                * ONE_DOLLAR_BPS
-            ) // ONE_CONTRACT_FP100
+            + (min(s.yes_count_fp100, s.no_count_fp100) * ONE_DOLLAR_BPS) // ONE_CONTRACT_FP100
             for s in legs
         )
-        total_cost_bps = sum(
-            s.no_total_cost_bps + s.yes_total_cost_bps
-            for s in legs
-        )
+        total_cost_bps = sum(s.no_total_cost_bps + s.yes_total_cost_bps for s in legs)
         total_fees_bps = sum(s.fee_cost_bps for s in legs)
         actual_pnl_bps = total_revenue_bps - total_cost_bps - total_fees_bps
         actual_pnl = bps_to_cents_round(actual_pnl_bps)
@@ -688,7 +879,9 @@ class SettlementHistoryScreen(ModalScreen[None]):
             self._fmt_no_price(leg_b),
             self._fmt_qty(leg_b),
             self._fmt_cost(leg_b),
-            "", "", "",
+            "",
+            "",
+            "",
             key=f"{evt_ticker}:b",
         )
 
@@ -697,9 +890,7 @@ class SettlementHistoryScreen(ModalScreen[None]):
         if not settled_str:
             return None
         try:
-            return datetime.fromisoformat(
-                settled_str.replace("Z", "+00:00")
-            ).astimezone(_PT)
+            return datetime.fromisoformat(settled_str.replace("Z", "+00:00")).astimezone(_PT)
         except (ValueError, TypeError):
             return None
 
@@ -748,10 +939,14 @@ class SettlementHistoryScreen(ModalScreen[None]):
     def _fmt_dollars_bps(bps: int) -> RichText:
         if bps >= 0:
             return RichText(
-                format_bps_as_dollars_display(bps), style=GREEN, justify="right",
+                format_bps_as_dollars_display(bps),
+                style=GREEN,
+                justify="right",
             )
         return RichText(
-            f"-{format_bps_as_dollars_display(abs(bps))}", style=RED, justify="right",
+            f"-{format_bps_as_dollars_display(abs(bps))}",
+            style=RED,
+            justify="right",
         )
 
     def action_cancel(self) -> None:
@@ -824,8 +1019,7 @@ class BlacklistScreen(ModalScreen[list[str] | None]):
     def compose(self) -> ComposeResult:
         with Vertical(id="blacklist-dialog"):
             yield Label(
-                f"Ticker Blacklist — {len(self._entries)} entries  "
-                "Del:Remove  Enter:Add  Esc:Done",
+                f"Ticker Blacklist — {len(self._entries)} entries  Del:Remove  Enter:Add  Esc:Done",
                 classes="modal-title",
                 markup=False,
             )
@@ -850,8 +1044,7 @@ class BlacklistScreen(ModalScreen[list[str] | None]):
             kind = "prefix" if len(entry.split("-")) == 1 else "ticker"
             table.add_row(entry, kind, key=entry)
         self.query_one("#blacklist-dialog Label", Label).update(
-            f"Ticker Blacklist — {len(self._entries)} entries  "
-            "Del:Remove  Enter:Add  Esc:Done"
+            f"Ticker Blacklist — {len(self._entries)} entries  Del:Remove  Enter:Add  Esc:Done"
         )
 
     def action_delete_entry(self) -> None:
@@ -912,10 +1105,16 @@ class MarketPickerScreen(ModalScreen[list[Market]]):
         ("a", "select_all", "Select All"),
     ]
 
-    def __init__(self, markets: list[Market], event_title: str = "") -> None:
+    def __init__(
+        self,
+        markets: list[Market],
+        event_title: str = "",
+        flow_metrics: dict[str, FlowMetrics] | None = None,
+    ) -> None:
         super().__init__()
         self._markets = markets
         self._event_title = event_title
+        self._flow_metrics = flow_metrics or {}
         self._selected: set[str] = set()  # market tickers
         # Ordered list of tickers matching table row order
         self._row_tickers: list[str] = []
@@ -941,6 +1140,8 @@ class MarketPickerScreen(ModalScreen[list[Market]]):
         table.add_column("Market")
         table.add_column("Ticker", width=30)
         table.add_column(RichText("24h Vol", justify=r), width=10)
+        table.add_column(RichText("Frequency", justify=r), width=9)
+        table.add_column(RichText("Flow", justify=r), width=6)
 
         # Sort by 24h volume descending (most liquid first)
         sorted_markets = sorted(
@@ -953,11 +1154,14 @@ class MarketPickerScreen(ModalScreen[list[Market]]):
         for market in sorted_markets:
             self._row_tickers.append(market.ticker)
             vol_str = _fmt_vol_compact((market.volume_24h_fp100 or 0) // 100)
+            metrics = self._flow_metrics.get(market.ticker)
             table.add_row(
                 "",  # ✓ column
                 market.title or market.ticker,
                 market.ticker,
                 RichText(vol_str, justify="right"),
+                RichText(format_frequency(metrics), justify="right"),
+                RichText(format_flow(metrics), justify="right"),
                 key=market.ticker,
             )
 
@@ -1058,7 +1262,8 @@ class MarketPickerScreen(ModalScreen[list[Market]]):
                     self._selected.add(self._row_tickers[row_idx])
 
         selected = [
-            m for t in self._row_tickers
+            m
+            for t in self._row_tickers
             if t in self._selected
             for m in self._markets
             if m.ticker == t

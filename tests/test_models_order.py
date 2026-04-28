@@ -304,12 +304,14 @@ class TestBpsWireInvariants:
         ],
     )
     def test_order_bps_from_wire(self, wire_dollars: str, bps: int) -> None:
-        o = Order.model_validate({
-            "order_id": "x",
-            "ticker": "y",
-            "side": "yes",
-            "yes_price_dollars": wire_dollars,
-        })
+        o = Order.model_validate(
+            {
+                "order_id": "x",
+                "ticker": "y",
+                "side": "yes",
+                "yes_price_dollars": wire_dollars,
+            }
+        )
         assert o.yes_price_bps == bps
 
     @pytest.mark.parametrize(
@@ -321,24 +323,28 @@ class TestBpsWireInvariants:
         ],
     )
     def test_fill_bps_from_wire(self, wire_dollars: str, bps: int) -> None:
-        f = Fill.model_validate({
-            "trade_id": "t",
-            "order_id": "o",
-            "ticker": "y",
-            "side": "yes",
-            "yes_price_dollars": wire_dollars,
-        })
+        f = Fill.model_validate(
+            {
+                "trade_id": "t",
+                "order_id": "o",
+                "ticker": "y",
+                "side": "yes",
+                "yes_price_dollars": wire_dollars,
+            }
+        )
         assert f.yes_price_bps == bps
 
     def test_order_accepts_float_at_validation_time_for_whole_cent(self) -> None:
         """Legacy JSON payloads sometimes arrive with floats. The parser
         accepts them for whole-cent values. Pin this compatibility path."""
-        o = Order.model_validate({
-            "order_id": "x",
-            "ticker": "y",
-            "side": "yes",
-            "yes_price_dollars": 0.53,  # float, not str
-        })
+        o = Order.model_validate(
+            {
+                "order_id": "x",
+                "ticker": "y",
+                "side": "yes",
+                "yes_price_dollars": 0.53,  # float, not str
+            }
+        )
         assert o.yes_price_bps == 5_300
 
 

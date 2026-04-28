@@ -81,9 +81,7 @@ class MilestoneResolver:
 
         if self._last_refresh is None or self.count == 0:
             return False
-        max_age = timedelta(
-            seconds=self._refresh_interval_seconds * self._STALE_SLACK_FACTOR
-        )
+        max_age = timedelta(seconds=self._refresh_interval_seconds * self._STALE_SLACK_FACTOR)
         return datetime.now(UTC) - self._last_refresh <= max_age
 
     # ── Refresh ──────────────────────────────────────────────────────

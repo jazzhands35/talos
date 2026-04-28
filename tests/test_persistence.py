@@ -176,9 +176,7 @@ class TestGamesFullSchemaAndDurability:
 
     def test_future_schema_version_raises(self, tmp_path: Path) -> None:
         path = tmp_path / "games_full.json"
-        path.write_text(
-            json.dumps({"schema_version": 999, "games": []})
-        )
+        path.write_text(json.dumps({"schema_version": 999, "games": []}))
         with pytest.raises(GamesFullCorruptError, match="newer"):
             load_saved_games_full(path=path)
 
@@ -186,16 +184,12 @@ class TestGamesFullSchemaAndDurability:
         """v0 saves predate engine_state; load must accept and stamp the
         field as 'active' (safe — v0 had no winding_down concept)."""
         path = tmp_path / "games_full.json"
-        path.write_text(
-            json.dumps([{"event_ticker": "K", "ticker_a": "K", "ticker_b": "K"}])
-        )
+        path.write_text(json.dumps([{"event_ticker": "K", "ticker_a": "K", "ticker_b": "K"}]))
         loaded = load_saved_games_full(path=path)
         assert loaded is not None
         assert loaded[0]["engine_state"] == "active"
 
-    def test_atomic_write_does_not_corrupt_on_concurrent_read(
-        self, tmp_path: Path
-    ) -> None:
+    def test_atomic_write_does_not_corrupt_on_concurrent_read(self, tmp_path: Path) -> None:
         """Direct write_text would let a concurrent reader see a half-written
         file. Atomic write via temp+os.replace eliminates that window — the
         file at the destination path is always the previous complete version

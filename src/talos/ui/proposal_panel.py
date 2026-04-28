@@ -90,7 +90,7 @@ class ProposalPanel(Vertical):
 
     def compose(self) -> ComposeResult:
         yield Static("PROPOSALS", classes="proposal-header")
-        yield Static("[Y] approve  [N] reject  [\u2191\u2193] select", classes="proposal-hint")
+        yield Static("[M] menu approve/reject  [\u2191\u2193] select", classes="proposal-hint")
 
     def refresh_proposals(self) -> None:
         """Re-render from current queue state. Called by parent on timer."""

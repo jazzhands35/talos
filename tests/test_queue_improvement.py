@@ -396,8 +396,8 @@ class TestQueueImprovementExecution:
         engine._rest.amend_order = AsyncMock(return_value=(old_order, amended_order))
 
         notifications: list[str] = []
-        engine.on_notification = (
-            lambda msg, sev="information", toast=False: notifications.append(msg)
+        engine.on_notification = lambda msg, sev="information", toast=False: notifications.append(
+            msg
         )
         engine._verify_after_action = AsyncMock()
 
@@ -435,8 +435,8 @@ class TestQueueImprovementExecution:
         )
 
         notifications: list[str] = []
-        engine.on_notification = (
-            lambda msg, sev="information", toast=False: notifications.append(msg)
+        engine.on_notification = lambda msg, sev="information", toast=False: notifications.append(
+            msg
         )
         engine._verify_after_action = AsyncMock()
 
@@ -472,8 +472,8 @@ class TestQueueImprovementExecution:
         )
 
         notifications: list[str] = []
-        engine.on_notification = (
-            lambda msg, sev="information", toast=False: notifications.append(msg)
+        engine.on_notification = lambda msg, sev="information", toast=False: notifications.append(
+            msg
         )
         engine._verify_after_action = AsyncMock()
 

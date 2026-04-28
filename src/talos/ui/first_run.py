@@ -17,9 +17,7 @@ from talos.ui.theme import APP_CSS
 def write_env_file(path: Path, *, key_id: str, key_path: str) -> None:
     """Write a .env file with Kalshi production credentials."""
     path.write_text(
-        f"KALSHI_KEY_ID={key_id}\n"
-        f"KALSHI_PRIVATE_KEY_PATH={key_path}\n"
-        f"KALSHI_ENV=production\n"
+        f"KALSHI_KEY_ID={key_id}\nKALSHI_PRIVATE_KEY_PATH={key_path}\nKALSHI_ENV=production\n"
     )
 
 

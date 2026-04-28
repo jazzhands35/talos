@@ -272,9 +272,7 @@ def compute_overcommit_reduction(
         else:
             other = Side.B if side == Side.A else Side.A
             fill_gap = max(0, ledger.filled_count(other) - filled)
-            allowed_resting = max(
-                per_side_max_ahead(ledger, side, drip_config), fill_gap
-            )
+            allowed_resting = max(per_side_max_ahead(ledger, side, drip_config), fill_gap)
 
         if resting <= allowed_resting:
             continue
@@ -293,9 +291,7 @@ def compute_overcommit_reduction(
             filled_in_unit=filled_in_unit,
             resting=resting,
             target_resting=target_resting,
-            from_reconciliation=bool(
-                reconciled_targets and side.value in reconciled_targets
-            ),
+            from_reconciliation=bool(reconciled_targets and side.value in reconciled_targets),
             from_drip=drip_config is not None,
         )
 
@@ -423,7 +419,6 @@ async def execute_rebalance(
     def _notify(msg: str, sev: str) -> None:
         notify(f"{_pfx}{msg}", sev)
 
-
     # Resolve the pair to get api_event_ticker for Kalshi API calls
     pair = _find_pair(scanner, rebalance.event_ticker)
     api_event_ticker = pair.api_event_ticker if pair else rebalance.event_ticker
@@ -487,8 +482,7 @@ async def execute_rebalance(
                 fresh_remaining = fresh_order.remaining_count_fp100 // ONE_CONTRACT_FP100
                 if fresh_remaining <= rebalance.target_resting:
                     _notify(
-                        f"Rebalance step 1: already at target"
-                        f" (remaining={fresh_remaining})",
+                        f"Rebalance step 1: already at target (remaining={fresh_remaining})",
                         "information",
                     )
                 else:

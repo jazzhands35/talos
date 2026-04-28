@@ -3,8 +3,18 @@
 from __future__ import annotations
 
 import time
+from unittest.mock import patch
 
-from talos.cpm import CPMTracker, FlowKey, format_cpm, format_eta
+import pytest
+
+from talos.cpm import (
+    CPMTracker,
+    FlowKey,
+    format_cpm,
+    format_eta,
+    format_flow,
+    format_frequency,
+)
 from talos.models.market import Trade
 
 
@@ -88,6 +98,33 @@ class TestCPM:
         result = tracker.cpm("MKT-A", window_sec=300.0)
         assert result is not None
         assert result > 0
+
+    def test_cpm_default_window_is_one_hour(self) -> None:
+        tracker = CPMTracker()
+        now = time.time()
+        key = FlowKey(ticker="MKT-A", outcome="yes", book_side="ASK", price_bps=5000)
+        tracker._events[key] = [(now - 1800, 1000)]
+
+        with patch("talos.cpm.time.time", return_value=now):
+            assert tracker.cpm("MKT-A") is not None
+
+    def test_flow_metrics_frequency_and_burst_ratio(self) -> None:
+        tracker = CPMTracker()
+        now = time.time()
+        key = FlowKey(ticker="MKT-A", outcome="yes", book_side="ASK", price_bps=5000)
+        tracker._events[key] = [(now - 300, 25_000), (now - 60, 5_000)]
+
+        with patch("talos.cpm.time.time", return_value=now):
+            metrics = tracker.flow_metrics("MKT-A")
+
+        assert metrics is not None
+        assert metrics.volume_contracts == 300
+        assert metrics.trade_count == 2
+        assert metrics.trades_per_hour == 2
+        assert metrics.largest_trade_contracts == 250
+        assert metrics.burst_ratio == pytest.approx(250 / 300)
+        assert format_frequency(metrics) == "2/h"
+        assert format_flow(metrics) == "83%"
 
     def test_cpm_none_for_unknown_ticker(self) -> None:
         tracker = CPMTracker()
@@ -276,9 +313,7 @@ def test_ticker_aggregate_counts_each_trade_once_via_ingest():
     # Verify by also asserting the per-outcome aggregate equals the bare aggregate:
     rate_yes = tracker.cpm("KX-TEST", outcome="yes", window_sec=300.0)
     assert rate_yes is not None
-    assert abs(rate - rate_yes) < 1e-9, (
-        f"bare aggregate {rate} should equal yes-only {rate_yes}"
-    )
+    assert abs(rate - rate_yes) < 1e-9, f"bare aggregate {rate} should equal yes-only {rate_yes}"
 
 
 def test_ticker_aggregate_with_n_trades_scales_linearly():
@@ -305,9 +340,7 @@ def test_ticker_aggregate_with_n_trades_scales_linearly():
     rate_yes = tracker.cpm("KX-TEST", outcome="yes", window_sec=3600.0)
     assert rate_yes is not None
     # Bare aggregate must equal the yes-only aggregate (one-side iteration).
-    assert abs(rate - rate_yes) < 1e-9, (
-        f"bare aggregate {rate} should equal yes-only {rate_yes}"
-    )
+    assert abs(rate - rate_yes) < 1e-9, f"bare aggregate {rate} should equal yes-only {rate_yes}"
 
 
 def test_per_bucket_isolation_vs_bare_aggregate():
@@ -342,9 +375,7 @@ def test_per_bucket_isolation_vs_bare_aggregate():
 
         # Per-bucket: yes-ASK-5500 sees t1's contribution only.
         # 6 contracts over observed=60s → use_sec=60s → CPM = 6 / 1 min = 6.0.
-        per_bucket = tracker.cpm(
-            "KX-TEST", "yes", "ASK", 5500, window_sec=300.0
-        )
+        per_bucket = tracker.cpm("KX-TEST", "yes", "ASK", 5500, window_sec=300.0)
         assert per_bucket is not None
         assert abs(per_bucket - 6.0) < 0.01
 

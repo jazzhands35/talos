@@ -52,9 +52,7 @@ class TreeMetadataStore:
 
         ok = save_tree_metadata(self._data, self._path)
         if not ok:
-            raise PersistenceError(
-                "save_tree_metadata() returned failure (see warning log)"
-            )
+            raise PersistenceError("save_tree_metadata() returned failure (see warning log)")
 
     def _touch(self) -> None:
         if self._autosave:

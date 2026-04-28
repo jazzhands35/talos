@@ -21,6 +21,8 @@ from datetime import datetime
 from talos.models.market import Trade
 from talos.units import ONE_CONTRACT_FP100, ONE_DOLLAR_BPS
 
+DEFAULT_FLOW_WINDOW_SEC = 3600.0
+
 
 def _parse_iso(ts: str) -> float:
     """Parse ISO 8601 timestamp to Unix seconds."""
@@ -43,6 +45,23 @@ class FlowKey:
     outcome: str  # "yes" | "no"
     book_side: str  # "BID" | "ASK"
     price_bps: int  # 0..10_000
+
+
+@dataclass(frozen=True)
+class FlowMetrics:
+    """Trade frequency and burstiness over a rolling window."""
+
+    volume_contracts: float
+    trade_count: int
+    largest_trade_contracts: float
+    burst_ratio: float
+    window_sec: float
+
+    @property
+    def trades_per_hour(self) -> float:
+        if self.window_sec <= 0:
+            return 0.0
+        return self.trade_count / (self.window_sec / 3600.0)
 
 
 def format_cpm(value: float | None, partial: bool = False) -> str:
@@ -92,6 +111,20 @@ def format_eta(
     return text
 
 
+def format_frequency(metrics: FlowMetrics | None) -> str:
+    """Format trade frequency as trades/hour."""
+    if metrics is None or metrics.trade_count == 0:
+        return "—"
+    return f"{metrics.trades_per_hour:.0f}/h"
+
+
+def format_flow(metrics: FlowMetrics | None) -> str:
+    """Format burstiness as largest-trade share of window volume."""
+    if metrics is None or metrics.volume_contracts <= 0:
+        return "—"
+    return f"{metrics.burst_ratio * 100:.0f}%"
+
+
 class CPMTracker:
     """Pure state machine that tracks trade flow per (ticker, outcome,
     book_side, price) and computes CPM/ETA over rolling windows.
@@ -122,13 +155,9 @@ class CPMTracker:
         for t in trades:
             if t.trade_id in self._seen:
                 continue
-            yes_price_bps = (
-                t.yes_price_bps if t.yes_price_bps is not None else t.price_bps
-            )
+            yes_price_bps = t.yes_price_bps if t.yes_price_bps is not None else t.price_bps
             no_price_bps = (
-                t.no_price_bps
-                if t.no_price_bps is not None
-                else (ONE_DOLLAR_BPS - yes_price_bps)
+                t.no_price_bps if t.no_price_bps is not None else (ONE_DOLLAR_BPS - yes_price_bps)
             )
             # Skip trades without a usable price — bucketing at the extremes
             # would be misleading.
@@ -192,7 +221,7 @@ class CPMTracker:
         outcome: str | None = None,
         book_side: str | None = None,
         price_bps: int | None = None,
-        window_sec: float = 300.0,
+        window_sec: float = DEFAULT_FLOW_WINDOW_SEC,
     ) -> float | None:
         """Contracts per minute over the given window, optionally filtered.
 
@@ -243,7 +272,7 @@ class CPMTracker:
         outcome: str | None = None,
         book_side: str | None = None,
         price_bps: int | None = None,
-        window_sec: float = 300.0,
+        window_sec: float = DEFAULT_FLOW_WINDOW_SEC,
     ) -> bool:
         """True if observed time is shorter than the window (extrapolation flag)."""
         bare_aggregate = outcome is None and book_side is None and price_bps is None
@@ -271,7 +300,7 @@ class CPMTracker:
         outcome: str | None = None,
         book_side: str | None = None,
         price_bps: int | None = None,
-        window_sec: float = 300.0,
+        window_sec: float = DEFAULT_FLOW_WINDOW_SEC,
     ) -> float | None:
         """Estimated minutes until ``queue_position`` contracts ahead of you fill,
         optionally narrowed to a specific (outcome, book_side, price_bps) bucket.
@@ -300,6 +329,54 @@ class CPMTracker:
         if rate is None or rate <= 0:
             return None
         return queue_position / rate
+
+    def flow_metrics(
+        self,
+        ticker: str,
+        outcome: str | None = None,
+        book_side: str | None = None,
+        price_bps: int | None = None,
+        window_sec: float = DEFAULT_FLOW_WINDOW_SEC,
+    ) -> FlowMetrics | None:
+        """Return frequency and burstiness for the same bucket shape as CPM."""
+        bare_aggregate = outcome is None and book_side is None and price_bps is None
+        matching: list[tuple[float, int]] = []
+        for key, events in self._events.items():
+            if key.ticker != ticker:
+                continue
+            if bare_aggregate and key.outcome != "yes":
+                continue
+            if outcome is not None and key.outcome != outcome:
+                continue
+            if book_side is not None and key.book_side != book_side:
+                continue
+            if price_bps is not None and key.price_bps != price_bps:
+                continue
+            matching.extend(events)
+        if not matching:
+            return None
+
+        cutoff = time.time() - window_sec
+        recent = [(ts, c) for ts, c in matching if ts >= cutoff]
+        if not recent:
+            return FlowMetrics(
+                volume_contracts=0.0,
+                trade_count=0,
+                largest_trade_contracts=0.0,
+                burst_ratio=0.0,
+                window_sec=window_sec,
+            )
+
+        counts = [count_fp100 / ONE_CONTRACT_FP100 for _, count_fp100 in recent]
+        volume = sum(counts)
+        largest = max(counts)
+        return FlowMetrics(
+            volume_contracts=volume,
+            trade_count=len(recent),
+            largest_trade_contracts=largest,
+            burst_ratio=largest / volume if volume > 0 else 0.0,
+            window_sec=window_sec,
+        )
 
     @property
     def tickers(self) -> list[str]:

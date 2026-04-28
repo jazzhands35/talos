@@ -31,9 +31,7 @@ class _StubEngine:
         self._commit_result = commit_result
         self.calls: list[list[dict[str, Any]]] = []
 
-    async def add_pairs_from_selection(
-        self, records: list[dict[str, Any]]
-    ) -> CommitResult:
+    async def add_pairs_from_selection(self, records: list[dict[str, Any]]) -> CommitResult:
         self.calls.append(records)
         return self._commit_result
 
@@ -69,9 +67,7 @@ class _AppStub:
     def __init__(self) -> None:
         self.notifications: list[tuple[str, str]] = []
 
-    def notify(
-        self, msg: str, severity: str = "information", **_: Any
-    ) -> None:
+    def notify(self, msg: str, severity: str = "information", **_: Any) -> None:
         self.notifications.append((msg, severity))
 
 
@@ -79,9 +75,7 @@ class _AppStub:
 def ts_with_commit_result(monkeypatch):
     """Factory: build a TreeScreen-like object with a controlled CommitResult."""
 
-    def _build(
-        commit_result: CommitResult, staged_records: list[ArbPairRecord]
-    ):
+    def _build(commit_result: CommitResult, staged_records: list[ArbPairRecord]):
         # Build TreeScreen via __new__ to bypass Textual mounting.
         ts: Any = TreeScreen.__new__(TreeScreen)
         ts._engine = _StubEngine(commit_result)
@@ -94,9 +88,7 @@ def ts_with_commit_result(monkeypatch):
         # Capture notify calls via an _AppStub (screen.app is a read-only
         # Textual property, so we patch it at the class level).
         app_stub = _AppStub()
-        monkeypatch.setattr(
-            TreeScreen, "app", property(lambda _self: app_stub)
-        )
+        monkeypatch.setattr(TreeScreen, "app", property(lambda _self: app_stub))
         ts._notify_capture = app_stub.notifications
         # Bypass the needs_schedule branch by stubbing _events_needing_schedule.
         ts._events_needing_schedule = lambda: []
@@ -124,9 +116,7 @@ async def test_mixed_batch_keeps_rejected_staged_and_clears_admitted(
         rejected=[
             (
                 {"event_ticker": "KXF-26JAN01", "ticker_a": "KXF-26JAN01-A"},
-                MarketAdmissionError(
-                    "KXF-26JAN01-A: fractional_trading_enabled ..."
-                ),
+                MarketAdmissionError("KXF-26JAN01-A: fractional_trading_enabled ..."),
             ),
         ],
     )
@@ -134,9 +124,7 @@ async def test_mixed_batch_keeps_rejected_staged_and_clears_admitted(
 
     ok = await ts.commit()
 
-    assert ok is False, (
-        "mixed-batch commit must return False to suppress success toast"
-    )
+    assert ok is False, "mixed-batch commit must return False to suppress success toast"
     staged_tickers = {r.event_ticker for r in ts.staged_changes.to_add}
     assert staged_tickers == {"KXF-26JAN01"}, (
         f"expected only KXF-26JAN01 to remain staged, got {staged_tickers}"
@@ -235,12 +223,9 @@ async def test_commit_worker_suppresses_success_toast_on_any_rejection(
 
     await ts._commit_worker()
 
-    success_toasts = [
-        m for m, _ in ts._notify_capture if m == "Commit complete."
-    ]
+    success_toasts = [m for m, _ in ts._notify_capture if m == "Commit complete."]
     assert success_toasts == [], (
-        f"success toast must not fire when any row was rejected, got: "
-        f"{ts._notify_capture}"
+        f"success toast must not fire when any row was rejected, got: {ts._notify_capture}"
     )
     # The partial-failure notify fired from commit(), captured via app_stub.
     assert any("KXF-26JAN01" in m for m, _ in ts._notify_capture)
@@ -264,9 +249,7 @@ async def test_commit_worker_fires_success_toast_on_clean_batch(
 
     await ts._commit_worker()
 
-    success_toasts = [
-        m for m, _ in ts._notify_capture if m == "Commit complete."
-    ]
+    success_toasts = [m for m, _ in ts._notify_capture if m == "Commit complete."]
     assert len(success_toasts) == 1, (
         f"expected one success toast on clean commit, got: {ts._notify_capture}"
     )

@@ -440,6 +440,12 @@ def main() -> None:
                     entry["ledger"] = ledger.to_save_dict()
                 except KeyError:
                     pass
+                # DRIP config: persist when enabled so toggle + params
+                # survive restart. Controller runtime state is NOT saved —
+                # see TradingEngine.drip_save_dict.
+                drip_payload = engine.drip_save_dict(p.event_ticker)
+                if drip_payload is not None:
+                    entry["drip"] = drip_payload
                 games_data.append(entry)
             ok = save_games_full(games_data)
             if not ok:
@@ -448,8 +454,7 @@ def main() -> None:
             raise
         except Exception as exc:
             raise PersistenceError(
-                f"persistence-path failure during _persist_games: "
-                f"{type(exc).__name__}: {exc}"
+                f"persistence-path failure during _persist_games: {type(exc).__name__}: {exc}"
             ) from exc
 
     game_mgr.on_change = _persist_games

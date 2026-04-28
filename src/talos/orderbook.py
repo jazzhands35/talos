@@ -27,10 +27,7 @@ def _parse_levels_sorted(
     integer-cents wire and ``_dollars_fp`` string wire into this shape, so
     this function receives exact bps/fp100 pairs directly.
     """
-    levels = [
-        OrderBookLevel(price_bps=pb, quantity_fp100=qf)
-        for (pb, qf) in raw_bps_fp100
-    ]
+    levels = [OrderBookLevel(price_bps=pb, quantity_fp100=qf) for (pb, qf) in raw_bps_fp100]
     return sorted(levels, key=lambda lvl: lvl.price_bps, reverse=True)
 
 

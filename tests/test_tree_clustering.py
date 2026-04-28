@@ -1,4 +1,5 @@
 """Unit tests for tree_clustering.cluster_series."""
+
 from __future__ import annotations
 
 from talos.models.tree import SeriesNode
@@ -87,8 +88,6 @@ def test_no_clustering_when_both_dimensions_sparse() -> None:
 
 def test_threshold_boundary_exactly_50_percent_tagged_uses_tags() -> None:
     # 5/10 = 50% -> should use tag mode (≥50 threshold)
-    series = [_mk(f"A{i}", tags=["x"]) for i in range(5)] + [
-        _mk(f"B{i}") for i in range(5)
-    ]
+    series = [_mk(f"A{i}", tags=["x"]) for i in range(5)] + [_mk(f"B{i}") for i in range(5)]
     mode, _, _ = cluster_series(series)
     assert mode == "tag"

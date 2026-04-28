@@ -181,8 +181,7 @@ class OrderBook(BaseModel):
     def _parse_levels(cls, raw: list[list[int]]) -> list[OrderBookLevel]:
         # Integer wire: promote cents → bps, whole-contracts → fp100.
         return [
-            OrderBookLevel(price_bps=pair[0] * 100, quantity_fp100=pair[1] * 100)
-            for pair in raw
+            OrderBookLevel(price_bps=pair[0] * 100, quantity_fp100=pair[1] * 100) for pair in raw
         ]
 
     @model_validator(mode="before")

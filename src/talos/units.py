@@ -28,9 +28,9 @@ from decimal import ROUND_HALF_EVEN, Decimal, InvalidOperation
 from typing import Any
 
 # ── Constants ─────────────────────────────────────────────────────
-ONE_DOLLAR_BPS = 10_000          # $1 = 10_000 bps
-ONE_CENT_BPS = 100               # 1¢ = 100 bps
-ONE_CONTRACT_FP100 = 100         # 1 contract = 100 fp100
+ONE_DOLLAR_BPS = 10_000  # $1 = 10_000 bps
+ONE_CENT_BPS = 100  # 1¢ = 100 bps
+ONE_CONTRACT_FP100 = 100  # 1 contract = 100 fp100
 
 # Kalshi wire precision (decimals)
 DOLLARS_WIRE_DECIMALS = 4
@@ -196,9 +196,6 @@ def quadratic_fee_bps(price_bps: int, *, rate: float) -> int:
     In bps: fee_bps = rate × price_bps × (ONE_DOLLAR_BPS − price_bps) / ONE_DOLLAR_BPS.
     """
     fee_d = (
-        Decimal(str(rate))
-        * Decimal(price_bps)
-        * Decimal(complement_bps(price_bps))
-        / _BPS_SCALE
+        Decimal(str(rate)) * Decimal(price_bps) * Decimal(complement_bps(price_bps)) / _BPS_SCALE
     )
     return int(fee_d.to_integral_value())

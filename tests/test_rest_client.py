@@ -121,10 +121,7 @@ class TestErrorMapping:
         assert exc_info.value.status_code == 500
         assert exc_info.value.body is None
 
-
-    async def test_html_success_body_raises_api_error(
-        self, client: KalshiRESTClient
-    ) -> None:
+    async def test_html_success_body_raises_api_error(self, client: KalshiRESTClient) -> None:
         """Non-JSON 200 responses (CloudFront maintenance page, proxy redirect)
         must raise KalshiAPIError, not an unhandled JSONDecodeError.
 
@@ -292,9 +289,7 @@ class TestMarketEndpoints:
 
         assert series.series_ticker == "KXHIGHMIA"
 
-    async def test_get_series_allows_nullable_list_fields(
-        self, client: KalshiRESTClient
-    ) -> None:
+    async def test_get_series_allows_nullable_list_fields(self, client: KalshiRESTClient) -> None:
         mock_data = {
             "series": {
                 "title": "Trump Sayings",

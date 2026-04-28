@@ -46,9 +46,7 @@ class OrderBookSnapshot(BaseModel):
             if legacy_key in data and data[legacy_key] and new_key not in data:
                 pairs = data.pop(legacy_key)
                 if isinstance(pairs, list) and pairs and isinstance(pairs[0], list):
-                    data[new_key] = [
-                        [p * 100, q * 100] for p, q in pairs
-                    ]
+                    data[new_key] = [[p * 100, q * 100] for p, q in pairs]
         # _dollars_fp wire: ["0.52", "10.00"] strings → exact bps/fp100.
         for new_key, wire in [
             ("yes_bps_fp100", "yes_dollars_fp"),

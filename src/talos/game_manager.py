@@ -233,11 +233,7 @@ def _market_closes_within(market: Market, max_days: int) -> bool:
 
 def _has_market_closing_within(event: Event, max_days: int) -> bool:
     """Check if any active market on the event closes within max_days from now."""
-    return any(
-        _market_closes_within(m, max_days)
-        for m in event.markets
-        if m.status == "active"
-    )
+    return any(_market_closes_within(m, max_days) for m in event.markets if m.status == "active")
 
 
 class GameManager:
@@ -266,7 +262,8 @@ class GameManager:
         self._scanner = scanner
         self._sports_enabled = sports_enabled
         self._nonsports_categories: set[str] = set(
-            nonsports_categories if nonsports_categories is not None
+            nonsports_categories
+            if nonsports_categories is not None
             else DEFAULT_NONSPORTS_CATEGORIES
         )
         self._nonsports_max_days = nonsports_max_days
@@ -341,7 +338,8 @@ class GameManager:
         Returns list of removed event tickers.
         """
         to_remove = [
-            et for et, pair in self._games.items()
+            et
+            for et, pair in self._games.items()
             if self.is_blacklisted(et)
             or self.is_blacklisted(pair.ticker_a)
             or self.is_blacklisted(pair.series_ticker)
@@ -406,7 +404,9 @@ class GameManager:
             if len(active_markets) == 1:
                 # Auto-add single market as YES/NO pair
                 return await self.add_market_as_pair(
-                    event, active_markets[0], subscribe=subscribe,
+                    event,
+                    active_markets[0],
+                    subscribe=subscribe,
                 )
             # Multiple markets — caller shows market picker
             raise MarketPickerNeeded(event, active_markets)
@@ -455,9 +455,7 @@ class GameManager:
         # Raises MarketAdmissionError; engine.add_games surfaces it as a
         # specific operator-visible toast.
         validate_market_for_admission(mkt_a, mkt_b)
-        pair_fractional = (
-            mkt_a.fractional_trading_enabled or mkt_b.fractional_trading_enabled
-        )
+        pair_fractional = mkt_a.fractional_trading_enabled or mkt_b.fractional_trading_enabled
         pair_tick_bps = min(mkt_a.tick_bps(), mkt_b.tick_bps())
         pair = ArbPair(
             event_ticker=event.event_ticker,
@@ -518,7 +516,11 @@ class GameManager:
         return pair
 
     async def add_market_as_pair(
-        self, event: Event, market: Market, *, subscribe: bool = True,
+        self,
+        event: Event,
+        market: Market,
+        *,
+        subscribe: bool = True,
     ) -> ArbPair:
         """Create a YES/NO arb pair from a single market within an event."""
         if market.ticker in self._games:
@@ -540,7 +542,9 @@ class GameManager:
             fee_rate = effective_fee_rate(series.fee_type)
         except Exception:
             logger.warning(
-                "series_fee_fetch_failed", series=event.series_ticker, exc_info=True,
+                "series_fee_fetch_failed",
+                series=event.series_ticker,
+                exc_info=True,
             )
 
         pair = ArbPair(
@@ -718,7 +722,9 @@ class GameManager:
                             continue
                         try:
                             p = await self.add_market_as_pair(
-                                e.event, market, subscribe=False,
+                                e.event,
+                                market,
+                                subscribe=False,
                             )
                             added.append(p)
                         except MarketAdmissionError as adm_exc:
@@ -847,8 +853,7 @@ class GameManager:
         """Discover all open arb-eligible events not already monitored."""
         active_tickers = {p.event_ticker for p in self.active_games}
         active_kalshi_tickers = {
-            p.kalshi_event_ticker for p in self.active_games
-            if p.kalshi_event_ticker
+            p.kalshi_event_ticker for p in self.active_games if p.kalshi_event_ticker
         }
         all_active = active_tickers | active_kalshi_tickers
 
@@ -857,6 +862,7 @@ class GameManager:
         # --- Sports path (unchanged) ---
         sports_events: list[Event] = []
         if self._sports_enabled and scan_mode in ("sports", "both"):
+
             async def fetch_series(series: str) -> list[Event]:
                 async with sem:
                     try:

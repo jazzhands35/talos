@@ -257,9 +257,7 @@ class TestSeqGapRecovery:
         mock_ws.unsubscribe.assert_not_called()  # type: ignore[union-attr]
         mock_ws.subscribe.assert_not_called()  # type: ignore[union-attr]
 
-    async def test_seq_gap_scoped_to_batch(
-        self, feed: MarketFeed, mock_ws: KalshiWSClient
-    ) -> None:
+    async def test_seq_gap_scoped_to_batch(self, feed: MarketFeed, mock_ws: KalshiWSClient) -> None:
         """Unmapped tickers from unrelated batches must NOT be included in recovery.
 
         Regression: all globally unmapped tickers were swept into recovery for
@@ -267,8 +265,8 @@ class TestSeqGapRecovery:
         """
         # Simulate two bulk subscriptions in different batches
         feed._bulk_batches = [
-            {"MKT-1", "MKT-2", "MKT-3"},   # batch 1 → sid 10
-            {"MKT-X", "MKT-Y", "MKT-Z"},   # batch 2 → sid 20 (unrelated)
+            {"MKT-1", "MKT-2", "MKT-3"},  # batch 1 → sid 10
+            {"MKT-X", "MKT-Y", "MKT-Z"},  # batch 2 → sid 20 (unrelated)
         ]
         feed._subscribed_tickers = {"MKT-1", "MKT-2", "MKT-3", "MKT-X", "MKT-Y", "MKT-Z"}
         # Only MKT-1 has learned sid 10; MKT-2/MKT-3 are still unmapped

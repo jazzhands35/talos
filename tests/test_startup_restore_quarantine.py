@@ -130,9 +130,7 @@ def _raise_for_kxf(market_a, market_b) -> None:
     shape invariants the real guard currently enforces."""
     for m in (market_a, market_b):
         if m.ticker.startswith("KXF-"):
-            raise MarketAdmissionError(
-                f"{m.ticker}: test-only shape invariant violation"
-            )
+            raise MarketAdmissionError(f"{m.ticker}: test-only shape invariant violation")
 
 
 @pytest.mark.asyncio
@@ -197,9 +195,7 @@ async def test_restore_does_not_quarantine_clean_market(engine_fixture):
 
     await engine._setup_initial_games()
 
-    assert "KXA-26JAN01" not in engine._exit_only_events, (
-        "cent-market pair must not be quarantined"
-    )
+    assert "KXA-26JAN01" not in engine._exit_only_events, "cent-market pair must not be quarantined"
     assert not persist_calls, f"expected no force-persist, got {persist_calls} calls"
 
 
@@ -228,7 +224,5 @@ async def test_restore_rest_failure_does_not_quarantine(engine_fixture):
 
     await engine._setup_initial_games()
 
-    assert "KXA-26JAN01" not in engine._exit_only_events, (
-        "REST failure must not trigger quarantine"
-    )
+    assert "KXA-26JAN01" not in engine._exit_only_events, "REST failure must not trigger quarantine"
     assert not persist_calls, "REST failure must not trigger durable persist"

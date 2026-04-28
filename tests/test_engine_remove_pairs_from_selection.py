@@ -208,9 +208,7 @@ async def test_winding_down_persist_failure_raises_remove_batch_persistence_erro
     e._persist_active_games = MagicMock(side_effect=_persist)
 
     with pytest.raises(RemoveBatchPersistenceError) as exc_info:
-        await e.remove_pairs_from_selection(
-            [("K-1", "K"), ("K-2", "K"), ("K-3", "K")]
-        )
+        await e.remove_pairs_from_selection([("K-1", "K"), ("K-2", "K"), ("K-3", "K")])
 
     # Persisted count = 1 (only K-1 made it to disk).
     assert exc_info.value.persisted_count == 1
@@ -268,6 +266,7 @@ async def test_force_during_suppress_uses_saved_callback():
 
     # Restore the real method (helper mocks it).
     from talos.engine import TradingEngine
+
     del e._persist_active_games
     e._persist_active_games = TradingEngine._persist_active_games.__get__(e)
 
@@ -291,6 +290,7 @@ async def test_force_during_suppress_raises_when_no_callback_wired():
     e._game_manager._suppressed_on_change_stack = []
 
     from talos.engine import TradingEngine
+
     del e._persist_active_games
     e._persist_active_games = TradingEngine._persist_active_games.__get__(e)
 
@@ -312,6 +312,7 @@ async def test_force_during_suppress_callback_exception_propagates_as_persistenc
     e._game_manager.on_change = boom
 
     from talos.engine import TradingEngine
+
     del e._persist_active_games
     e._persist_active_games = TradingEngine._persist_active_games.__get__(e)
 

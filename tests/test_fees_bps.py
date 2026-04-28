@@ -5,6 +5,7 @@ the ``_bps`` variants that operate in internal bps/fp100 space. Legacy
 cents-scale parity tests were retired alongside the cents-scale
 functions themselves.
 """
+
 from __future__ import annotations
 
 import pytest

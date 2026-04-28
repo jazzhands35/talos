@@ -101,5 +101,3 @@ def test_blip_noops_when_front_order_missing() -> None:
     )
 
     assert action == NoOp("no_front_order")
-
-

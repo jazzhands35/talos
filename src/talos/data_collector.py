@@ -402,9 +402,7 @@ class DataCollector:
 
     # ── Market snapshots ──────────────────────────────────────────
 
-    def log_market_snapshots(
-        self, snapshots: list[dict[str, Any]]
-    ) -> None:
+    def log_market_snapshots(self, snapshots: list[dict[str, Any]]) -> None:
         """Bulk insert market snapshots for all monitored events."""
         if not snapshots:
             return

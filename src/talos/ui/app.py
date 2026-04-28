@@ -690,9 +690,7 @@ class TalosApp(App):
                 if pos is None:
                     continue
                 our_expected = bps_to_cents_round(int(pos.locked_profit_bps))
-                disc = reconcile_event(
-                    our_expected, s.revenue_bps // ONE_CENT_BPS, s.event_ticker
-                )
+                disc = reconcile_event(our_expected, s.revenue_bps // ONE_CENT_BPS, s.event_ticker)
                 if disc is not None and abs(disc["difference"]) > 5:
                     self.query_one(ActivityLog).log_activity(
                         f"P&L DISCREPANCY {s.event_ticker}: "
@@ -862,9 +860,7 @@ class TalosApp(App):
 
         if not isinstance(e, MarketPickerNeeded) or self._engine is None:
             return
-        flow_metrics = await self._engine.flow_metrics_for_markets(
-            [m.ticker for m in e.markets]
-        )
+        flow_metrics = await self._engine.flow_metrics_for_markets([m.ticker for m in e.markets])
         selected = await self.push_screen_wait(
             MarketPickerScreen(
                 e.markets,

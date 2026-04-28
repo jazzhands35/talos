@@ -39,32 +39,40 @@ class TestPathFunctions:
 
     def test_load_settings_uses_data_dir(self, tmp_path: Path) -> None:
         import json
+
         set_data_dir(tmp_path)
         settings_file = tmp_path / "settings.json"
         settings_file.write_text(json.dumps({"unit_size": 42}))
         from talos.persistence import load_settings
+
         result = load_settings()
         assert result["unit_size"] == 42
 
     def test_save_settings_uses_data_dir(self, tmp_path: Path) -> None:
         import json
+
         set_data_dir(tmp_path)
         from talos.persistence import save_settings
+
         save_settings({"unit_size": 7})
         result = json.loads((tmp_path / "settings.json").read_text())
         assert result["unit_size"] == 7
 
     def test_load_saved_games_uses_data_dir(self, tmp_path: Path) -> None:
         import json
+
         set_data_dir(tmp_path)
         (tmp_path / "games.json").write_text(json.dumps(["EVT-1", "EVT-2"]))
         from talos.persistence import load_saved_games
+
         assert load_saved_games() == ["EVT-1", "EVT-2"]
 
     def test_save_games_uses_data_dir(self, tmp_path: Path) -> None:
         import json
+
         set_data_dir(tmp_path)
         from talos.persistence import save_games
+
         save_games(["A", "B"])
         result = json.loads((tmp_path / "games.json").read_text())
         assert result == ["A", "B"]

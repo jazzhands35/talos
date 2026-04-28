@@ -188,9 +188,7 @@ class TreeScreen(Screen):
         """
         visible = self._visible_series(cat)
         total_events = sum((s.event_count or 0) for s in visible)
-        state = self._aggregate_state(
-            [self._series_selection_state(s) for s in visible]
-        )
+        state = self._aggregate_state([self._series_selection_state(s) for s in visible])
         glyph = self._glyph_for_state(state)
         return f"{glyph} {name}   {len(visible)} series · {total_events} open"
 
@@ -225,6 +223,7 @@ class TreeScreen(Screen):
         # loop during on_mount) avoids private-API access (app._loop)
         # and the cross-thread-only contract of call_from_thread.
         import asyncio
+
         self._app_loop = asyncio.get_running_loop()
 
         # Listener registration MUST happen IMMEDIATELY after _app_loop
@@ -235,12 +234,8 @@ class TreeScreen(Screen):
         # an event finishing winding-down during mount would be lost
         # because no listener was wired yet. The persisted pending flag
         # would then stick until a later restart.
-        if self._engine is not None and hasattr(
-            self._engine, "add_event_fully_removed_listener"
-        ):
-            self._engine.add_event_fully_removed_listener(
-                self.on_event_fully_removed
-            )
+        if self._engine is not None and hasattr(self._engine, "add_event_fully_removed_listener"):
+            self._engine.add_event_fully_removed_listener(self.on_event_fully_removed)
 
         # Give the tree widget focus so keybindings (space/c/r) work
         # immediately without needing to tab into it.
@@ -509,9 +504,7 @@ class TreeScreen(Screen):
         series, so a fully-ticked cluster shows [✓] and a partially-ticked
         one shows [~]."""
         total_events = sum((s.event_count or 0) for s in members)
-        state = self._aggregate_state(
-            [self._series_selection_state(s) for s in members]
-        )
+        state = self._aggregate_state([self._series_selection_state(s) for s in members])
         glyph = self._glyph_for_state(state)
         return f"{glyph} {cluster_name}   {len(members)} series · {total_events} open"
 
@@ -667,9 +660,7 @@ class TreeScreen(Screen):
         # staged_remove is now a list of (pair_ticker, kalshi_event_ticker)
         # tuples; check if any pair_ticker is in our event's pair set.
         pair_tickers = set(self._engine_pairs_for_event(kalshi_event_ticker))
-        staged_remove_overlap = any(
-            pt in pair_tickers for pt, _ in self.staged_changes.to_remove
-        )
+        staged_remove_overlap = any(pt in pair_tickers for pt, _ in self.staged_changes.to_remove)
         if staged_remove_overlap:
             return "empty"
         return current
@@ -747,12 +738,12 @@ class TreeScreen(Screen):
 
         # If staged remove, unstage it
         staged_remove_overlap_pts = [
-            pt for pt, _ in self.staged_changes.to_remove
-            if pt in currently_monitored_pairs
+            pt for pt, _ in self.staged_changes.to_remove if pt in currently_monitored_pairs
         ]
         if staged_remove_overlap_pts:
             self.staged_changes.to_remove = [
-                (pt, ket) for pt, ket in self.staged_changes.to_remove
+                (pt, ket)
+                for pt, ket in self.staged_changes.to_remove
                 if pt not in staged_remove_overlap_pts
             ]
             # Also drop any to_set_unticked flag
@@ -1037,13 +1028,9 @@ class TreeScreen(Screen):
         # adjuster/feed cleanup ran, retry from a re-commit will hit
         # the same code path. Toast preserves staging so user can fix
         # the underlying cause and retry.
-        failed_outcomes = [
-            o for o in remove_outcomes if o.status == "failed"
-        ]
+        failed_outcomes = [o for o in remove_outcomes if o.status == "failed"]
         if failed_outcomes:
-            failed_pair_tickers = sorted(
-                {o.pair_ticker for o in failed_outcomes}
-            )
+            failed_pair_tickers = sorted({o.pair_ticker for o in failed_outcomes})
             sample_reason = next(
                 (o.reason for o in failed_outcomes if o.reason),
                 "no reason recorded",
@@ -1080,12 +1067,9 @@ class TreeScreen(Screen):
                 matching = [
                     o
                     for o in remove_outcomes
-                    if o.kalshi_event_ticker == k
-                    and o.pair_ticker in staged_remove_pair_tickers
+                    if o.kalshi_event_ticker == k and o.pair_ticker in staged_remove_pair_tickers
                 ]
-                if matching and all(
-                    o.status in ("removed", "not_found") for o in matching
-                ):
+                if matching and all(o.status in ("removed", "not_found") for o in matching):
                     self._metadata.set_deliberately_unticked(k)
                 else:
                     # Some pair(s) went winding_down or failed → defer.
@@ -1155,17 +1139,14 @@ class TreeScreen(Screen):
         # match a real event_ticker and the rejected row would vanish).
         # add_pairs_from_selection hands back the original r.model_dump()
         # dict which always has event_ticker, so .get is unnecessary.
-        rejected_event_tickers = {
-            rec["event_ticker"] for rec, _exc in rejected
-        }
+        rejected_event_tickers = {rec["event_ticker"] for rec, _exc in rejected}
         self.staged_changes = StagedChanges.empty()
         if rejected_event_tickers:
             # Re-stage only the rejected rows from the ORIGINAL pre-commit
             # staged.to_add list (we already captured it into local `staged`
             # at the top of commit()).
             self.staged_changes.to_add = [
-                r for r in staged.to_add
-                if r.event_ticker in rejected_event_tickers
+                r for r in staged.to_add if r.event_ticker in rejected_event_tickers
             ]
 
         # 4b. F34 + F35: if any record was rejected, surface a partial-
@@ -1174,23 +1155,20 @@ class TreeScreen(Screen):
         # success toast.
         if rejected:
             reasons = "\n".join(
-                f"  • {rec.get('event_ticker', '?')}: {exc}"
-                for rec, exc in rejected
+                f"  • {rec.get('event_ticker', '?')}: {exc}" for rec, exc in rejected
             )
             # error severity when NOTHING was admitted; warning when partial.
             severity = "error" if not added else "warning"
             self.app.notify(
-                f"Commit rejected {len(rejected)} row(s) "
-                f"(remaining staged for review):\n{reasons}",
+                f"Commit rejected {len(rejected)} row(s) (remaining staged for review):\n{reasons}",
                 severity=severity,
                 timeout=30,
             )
             # Still trigger volume refresh for admitted pairs before returning
             # (same background task that normally fires at the end of commit).
-            if added and self._engine is not None and hasattr(
-                self._engine, "refresh_volumes"
-            ):
+            if added and self._engine is not None and hasattr(self._engine, "refresh_volumes"):
                 import asyncio as _asyncio
+
                 _asyncio.create_task(self._engine.refresh_volumes())
             return False
 
@@ -1201,10 +1179,9 @@ class TreeScreen(Screen):
         # for up to 60 minutes after adding (the 2026-04-19 bug). Fire
         # as a background task so commit() returns immediately and the
         # refresh's ~1s API call doesn't block the UI worker.
-        if added and self._engine is not None and hasattr(
-            self._engine, "refresh_volumes"
-        ):
+        if added and self._engine is not None and hasattr(self._engine, "refresh_volumes"):
             import asyncio as _asyncio
+
             _asyncio.create_task(self._engine.refresh_volumes())
 
         return True
@@ -1221,18 +1198,17 @@ class TreeScreen(Screen):
         below only fires on a wiring bug.
         """
         import structlog as _structlog
+
         loop = getattr(self, "_app_loop", None)
         if loop is None:
             _structlog.get_logger().warning(
                 "on_event_fully_removed_pre_mount_drop",
                 kalshi_event_ticker=kalshi_event_ticker,
                 reason="listener fired before TreeScreen.on_mount captured "
-                       "_app_loop — wiring bug, dropping event",
+                "_app_loop — wiring bug, dropping event",
             )
             return
-        loop.call_soon_threadsafe(
-            self._handle_event_fully_removed, kalshi_event_ticker
-        )
+        loop.call_soon_threadsafe(self._handle_event_fully_removed, kalshi_event_ticker)
 
     def _handle_event_fully_removed(self, kalshi_event_ticker: str) -> None:
         """Actual promotion work, always running on the Textual loop.
@@ -1337,13 +1313,9 @@ class TreeScreen(Screen):
                 severity="warning",
             )
             return
-        await self._bulk_toggle_series_list(
-            category_name, [s.ticker for s in visible]
-        )
+        await self._bulk_toggle_series_list(category_name, [s.ticker for s in visible])
 
-    async def _bulk_toggle_series_list(
-        self, label: str, series_tickers: list[str]
-    ) -> None:
+    async def _bulk_toggle_series_list(self, label: str, series_tickers: list[str]) -> None:
         """Bulk-toggle every active event across the given series tickers.
 
         Fail-closed: if ANY per-series fetch fails (rate limit, network
@@ -1462,9 +1434,7 @@ class TreeScreen(Screen):
             return
         for cat in self._discovery.categories.values():
             if series_ticker in cat.series:
-                node.set_label(
-                    self._series_label(series_ticker, cat.series[series_ticker])
-                )
+                node.set_label(self._series_label(series_ticker, cat.series[series_ticker]))
                 p = node.parent
                 while p is not None:
                     self._relabel_node(p)

@@ -4,6 +4,7 @@ Covers the 5a (normal restart), 5b (first-boot migration from old saves),
 5c (Kalshi-only cold start), and 5d (same-ticker specifics) regimes from
 docs/superpowers/specs/2026-04-15-open-unit-avg-scoping-design.md.
 """
+
 from __future__ import annotations
 
 import logging
@@ -62,10 +63,18 @@ class TestRegime5aNormalRestart:
         """The Codex scenario: open B at 23c must come back at 23c,
         not the blended 20.5c."""
         persisted: _SaveDict = {
-            "filled_a": 5, "cost_a": 410, "fees_a": 0,
-            "filled_b": 10, "cost_b": 205, "fees_b": 0,
-            "closed_count_a": 5, "closed_total_cost_a": 410, "closed_fees_a": 0,
-            "closed_count_b": 5, "closed_total_cost_b": 90, "closed_fees_b": 0,
+            "filled_a": 5,
+            "cost_a": 410,
+            "fees_a": 0,
+            "filled_b": 10,
+            "cost_b": 205,
+            "fees_b": 0,
+            "closed_count_a": 5,
+            "closed_total_cost_a": 410,
+            "closed_fees_a": 0,
+            "closed_count_b": 5,
+            "closed_total_cost_b": 90,
+            "closed_fees_b": 0,
         }
         ledger = PositionLedger("EVT-X", unit_size=5)
         ledger.seed_from_saved(persisted)
@@ -75,10 +84,18 @@ class TestRegime5aNormalRestart:
 
     def test_reconcile_after_restart_is_noop(self):
         persisted: _SaveDict = {
-            "filled_a": 5, "cost_a": 410, "fees_a": 0,
-            "filled_b": 10, "cost_b": 205, "fees_b": 0,
-            "closed_count_a": 5, "closed_total_cost_a": 410, "closed_fees_a": 0,
-            "closed_count_b": 5, "closed_total_cost_b": 90, "closed_fees_b": 0,
+            "filled_a": 5,
+            "cost_a": 410,
+            "fees_a": 0,
+            "filled_b": 10,
+            "cost_b": 205,
+            "fees_b": 0,
+            "closed_count_a": 5,
+            "closed_total_cost_a": 410,
+            "closed_fees_a": 0,
+            "closed_count_b": 5,
+            "closed_total_cost_b": 90,
+            "closed_fees_b": 0,
         }
         ledger = PositionLedger("EVT-X", unit_size=5)
         ledger.seed_from_saved(persisted)
@@ -91,10 +108,18 @@ class TestRegime5aNormalRestart:
     def test_restored_log_line_once_per_ledger(self, caplog):
         caplog.set_level(logging.INFO)
         persisted: _SaveDict = {
-            "filled_a": 5, "cost_a": 400, "fees_a": 0,
-            "filled_b": 5, "cost_b": 100, "fees_b": 0,
-            "closed_count_a": 5, "closed_total_cost_a": 400, "closed_fees_a": 0,
-            "closed_count_b": 5, "closed_total_cost_b": 100, "closed_fees_b": 0,
+            "filled_a": 5,
+            "cost_a": 400,
+            "fees_a": 0,
+            "filled_b": 5,
+            "cost_b": 100,
+            "fees_b": 0,
+            "closed_count_a": 5,
+            "closed_total_cost_a": 400,
+            "closed_fees_a": 0,
+            "closed_count_b": 5,
+            "closed_total_cost_b": 100,
+            "closed_fees_b": 0,
         }
         ledger = PositionLedger("EVT-X", unit_size=5)
         ledger.seed_from_saved(persisted)
@@ -107,8 +132,12 @@ class TestRegime5bFirstBootMigration:
 
     def test_migration_flushes_balanced_portion(self):
         old_save: _SaveDict = {
-            "filled_a": 10, "cost_a": 820, "fees_a": 0,
-            "filled_b": 10, "cost_b": 205, "fees_b": 0,
+            "filled_a": 10,
+            "cost_a": 820,
+            "fees_a": 0,
+            "filled_b": 10,
+            "cost_b": 205,
+            "fees_b": 0,
         }
         ledger = PositionLedger("EVT-X", unit_size=5)
         ledger.seed_from_saved(old_save)
@@ -119,8 +148,12 @@ class TestRegime5bFirstBootMigration:
 
     def test_migration_preserves_lifetime_avg(self):
         old_save: _SaveDict = {
-            "filled_a": 10, "cost_a": 820, "fees_a": 0,
-            "filled_b": 10, "cost_b": 205, "fees_b": 0,
+            "filled_a": 10,
+            "cost_a": 820,
+            "fees_a": 0,
+            "filled_b": 10,
+            "cost_b": 205,
+            "fees_b": 0,
         }
         ledger = PositionLedger("EVT-X", unit_size=5)
         ledger.seed_from_saved(old_save)
@@ -130,8 +163,12 @@ class TestRegime5bFirstBootMigration:
     def test_migration_emits_migrated_log(self, caplog):
         caplog.set_level(logging.INFO)
         old_save: _SaveDict = {
-            "filled_a": 10, "cost_a": 820, "fees_a": 0,
-            "filled_b": 10, "cost_b": 205, "fees_b": 0,
+            "filled_a": 10,
+            "cost_a": 820,
+            "fees_a": 0,
+            "filled_b": 10,
+            "cost_b": 205,
+            "fees_b": 0,
         }
         ledger = PositionLedger("EVT-X", unit_size=5)
         ledger.seed_from_saved(old_save)
@@ -141,8 +178,12 @@ class TestRegime5bFirstBootMigration:
     def test_post_migration_save_includes_closed_keys(self):
         """After v1 → v2 migration round-trip, new save carries bps/fp100 closed-bucket keys."""
         old_save: _SaveDict = {
-            "filled_a": 10, "cost_a": 820, "fees_a": 0,
-            "filled_b": 10, "cost_b": 205, "fees_b": 0,
+            "filled_a": 10,
+            "cost_a": 820,
+            "fees_a": 0,
+            "filled_b": 10,
+            "cost_b": 205,
+            "fees_b": 0,
         }
         ledger = PositionLedger("EVT-X", unit_size=5)
         ledger.seed_from_saved(old_save)
@@ -151,8 +192,12 @@ class TestRegime5bFirstBootMigration:
         ledger_payload = new_save["ledger"]
         assert isinstance(ledger_payload, dict)
         for k in (
-            "closed_count_fp100_a", "closed_total_cost_bps_a", "closed_fees_bps_a",
-            "closed_count_fp100_b", "closed_total_cost_bps_b", "closed_fees_bps_b",
+            "closed_count_fp100_a",
+            "closed_total_cost_bps_a",
+            "closed_fees_bps_a",
+            "closed_count_fp100_b",
+            "closed_total_cost_bps_b",
+            "closed_fees_bps_b",
         ):
             assert k in ledger_payload, f"expected {k} in new save"
 
@@ -163,9 +208,14 @@ class TestRegime5bPartialKeys:
     def test_partial_keys_trigger_full_migration(self, caplog):
         caplog.set_level(logging.INFO)
         corrupt: _SaveDict = {
-            "filled_a": 10, "cost_a": 820, "fees_a": 0,
-            "filled_b": 10, "cost_b": 205, "fees_b": 0,
-            "closed_count_a": 999, "closed_total_cost_a": 999,
+            "filled_a": 10,
+            "cost_a": 820,
+            "fees_a": 0,
+            "filled_b": 10,
+            "cost_b": 205,
+            "fees_b": 0,
+            "closed_count_a": 999,
+            "closed_total_cost_a": 999,
             # missing closed_fees_a, all three B closed keys
         }
         ledger = PositionLedger("EVT-X", unit_size=5)
@@ -184,10 +234,18 @@ class TestRegime5bCorruptValues:
     def test_corrupt_value_triggers_migration(self, caplog, bad_value):
         caplog.set_level(logging.INFO)
         corrupt: _SaveDict = {
-            "filled_a": 10, "cost_a": 820, "fees_a": 0,
-            "filled_b": 10, "cost_b": 205, "fees_b": 0,
-            "closed_count_a": 5, "closed_total_cost_a": 410, "closed_fees_a": 0,
-            "closed_count_b": 5, "closed_total_cost_b": 90, "closed_fees_b": 0,
+            "filled_a": 10,
+            "cost_a": 820,
+            "fees_a": 0,
+            "filled_b": 10,
+            "cost_b": 205,
+            "fees_b": 0,
+            "closed_count_a": 5,
+            "closed_total_cost_a": 410,
+            "closed_fees_a": 0,
+            "closed_count_b": 5,
+            "closed_total_cost_b": 90,
+            "closed_fees_b": 0,
         }
         corrupt["closed_count_a"] = bad_value  # type: ignore[assignment]
         ledger = PositionLedger("EVT-X", unit_size=5)
@@ -203,14 +261,24 @@ class TestRegime5dSameTicker:
 
     def test_same_ticker_normal_restart_preserves_state(self):
         persisted: _SaveDict = {
-            "filled_a": 5, "cost_a": 410, "fees_a": 0,
-            "filled_b": 10, "cost_b": 205, "fees_b": 0,
-            "closed_count_a": 5, "closed_total_cost_a": 410, "closed_fees_a": 0,
-            "closed_count_b": 5, "closed_total_cost_b": 90, "closed_fees_b": 0,
+            "filled_a": 5,
+            "cost_a": 410,
+            "fees_a": 0,
+            "filled_b": 10,
+            "cost_b": 205,
+            "fees_b": 0,
+            "closed_count_a": 5,
+            "closed_total_cost_a": 410,
+            "closed_fees_a": 0,
+            "closed_count_b": 5,
+            "closed_total_cost_b": 90,
+            "closed_fees_b": 0,
         }
         ledger = PositionLedger(
-            "EVT-X", unit_size=5,
-            ticker_a="TK-X", ticker_b="TK-X",
+            "EVT-X",
+            unit_size=5,
+            ticker_a="TK-X",
+            ticker_b="TK-X",
             is_same_ticker=True,
         )
         ledger.seed_from_saved(persisted)
@@ -227,12 +295,18 @@ class TestRegime5dSameTicker:
         """Same-ticker can't rely on sync_from_positions; migration must
         succeed via seed_from_saved alone."""
         old_save: _SaveDict = {
-            "filled_a": 10, "cost_a": 820, "fees_a": 0,
-            "filled_b": 10, "cost_b": 205, "fees_b": 0,
+            "filled_a": 10,
+            "cost_a": 820,
+            "fees_a": 0,
+            "filled_b": 10,
+            "cost_b": 205,
+            "fees_b": 0,
         }
         ledger = PositionLedger(
-            "EVT-X", unit_size=5,
-            ticker_a="TK-X", ticker_b="TK-X",
+            "EVT-X",
+            unit_size=5,
+            ticker_a="TK-X",
+            ticker_b="TK-X",
             is_same_ticker=True,
         )
         ledger.seed_from_saved(old_save)

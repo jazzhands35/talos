@@ -473,9 +473,7 @@ class TestPolling:
         engine, rest = _engine_with_pair()
         rest.get_all_orders.return_value = []
         rest.get_queue_positions.return_value = {}
-        rest.get_all_positions.side_effect = KalshiAPIError(
-            status_code=500, body="server error"
-        )
+        rest.get_all_positions.side_effect = KalshiAPIError(status_code=500, body="server error")
 
         # Should not raise — positions failure is logged, not fatal
         await engine.refresh_account()
@@ -1664,6 +1662,7 @@ class TestOnFill:
         )
         engine._on_fill(msg)  # Should not raise
 
+
 class TestDripPersistence:
     """DRIP toggle + DripConfig must survive restart via games_full.json."""
 
@@ -1747,10 +1746,8 @@ class TestDripPersistence:
         """Restore is quiet — operator already knew DRIP was on pre-restart."""
         engine, _ = _engine_with_pair()
         toasts: list[str] = []
-        engine.on_notification = (
-            lambda msg, sev="information", toast=False: toasts.append(msg)
-            if toast
-            else None
+        engine.on_notification = lambda msg, sev="information", toast=False: (
+            toasts.append(msg) if toast else None
         )
         engine.restore_drip_from_saved(
             "EVT-1",
@@ -1825,9 +1822,7 @@ class TestExecuteBlip:
         ledger = engine._adjuster.get_ledger("EVT-1")
         # Arm the ledger with a resting order on side A so _execute_blip has
         # a price and count to work with.
-        ledger.record_placement_bps(
-            Side.A, order_id="ord-old", count_fp100=100, price_bps=4500
-        )
+        ledger.record_placement_bps(Side.A, order_id="ord-old", count_fp100=100, price_bps=4500)
 
         cancel_calls: list[str] = []
 
@@ -1861,9 +1856,7 @@ class TestExecuteBlip:
 
         pair = engine._scanner.pairs[0]
         ledger = engine._adjuster.get_ledger("EVT-1")
-        ledger.record_placement_bps(
-            Side.A, order_id="ord-old", count_fp100=100, price_bps=4500
-        )
+        ledger.record_placement_bps(Side.A, order_id="ord-old", count_fp100=100, price_bps=4500)
 
         cancel_calls: list[str] = []
 
@@ -1911,9 +1904,7 @@ class TestExecuteBlip:
 
         pair = engine._scanner.pairs[0]
         ledger = engine._adjuster.get_ledger("EVT-1")
-        ledger.record_placement_bps(
-            Side.A, order_id="ord-old", count_fp100=100, price_bps=4500
-        )
+        ledger.record_placement_bps(Side.A, order_id="ord-old", count_fp100=100, price_bps=4500)
 
         async def fake_cancel(order_id: str, pair: object) -> None:
             pass
@@ -2472,8 +2463,7 @@ class TestAutoRebalance:
         await engine.check_imbalances()
 
         assert "EVT-1" in called_for, (
-            "check_imbalances should evaluate DRIP events; "
-            f"only saw: {called_for}"
+            f"check_imbalances should evaluate DRIP events; only saw: {called_for}"
         )
 
 
@@ -2562,9 +2552,7 @@ class TestStalePositionCleanup:
         from talos.errors import KalshiAPIError
 
         engine, rest = self._setup()
-        rest.get_all_positions.side_effect = KalshiAPIError(
-            status_code=500, body="rate limited"
-        )
+        rest.get_all_positions.side_effect = KalshiAPIError(status_code=500, body="rate limited")
 
         await engine.refresh_account()
 
@@ -2919,9 +2907,7 @@ class TestClaimMutualExclusionIntegration:
 
         # WS should have executed; poll should have been blocked by claim
         assert "ws" in executed_by
-        assert len(executed_by) == 1, (
-            f"Expected only WS to execute, got: {executed_by}"
-        )
+        assert len(executed_by) == 1, f"Expected only WS to execute, got: {executed_by}"
         # All claims should be released after both paths complete
         assert not engine._event_claims
 
@@ -2974,9 +2960,7 @@ class TestFillDriftDetection:
         engine._orders_cache = [
             _make_order("TK-A", order_id="ord-a", fill_count=5, remaining_count=0),
         ]
-        ledger.sync_from_orders(
-            engine._orders_cache, ticker_a="TK-A", ticker_b="TK-B"
-        )
+        ledger.sync_from_orders(engine._orders_cache, ticker_a="TK-A", ticker_b="TK-B")
 
         # WS fill of 3 → ledger becomes 5+3=8. Kalshi reports
         # post_position=-10 → mismatch (Kalshi says 10, we now see 8).
@@ -3000,9 +2984,7 @@ class TestFillDriftDetection:
         engine._orders_cache = [
             _make_order("TK-A", order_id="ord-a", fill_count=5, remaining_count=0),
         ]
-        ledger.sync_from_orders(
-            engine._orders_cache, ticker_a="TK-A", ticker_b="TK-B"
-        )
+        ledger.sync_from_orders(engine._orders_cache, ticker_a="TK-A", ticker_b="TK-B")
 
         # WS fill of 1 → ledger becomes 5+1=6. Kalshi reports
         # post_position=-6 → matches; no drift expected.

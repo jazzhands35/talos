@@ -131,9 +131,7 @@ async def test_add_pairs_rolls_back_on_resolve_batch_failure():
     effect (game_manager restore, adjuster wiring) must be reverted before
     the exception propagates. Without rollback, retries would double-add."""
     e = _engine_with_collaborators()
-    e._game_status_resolver.resolve_batch = AsyncMock(
-        side_effect=RuntimeError("kalshi 5xx")
-    )
+    e._game_status_resolver.resolve_batch = AsyncMock(side_effect=RuntimeError("kalshi 5xx"))
     r = ArbPairRecord(
         event_ticker="KX-1",
         ticker_a="KX-1",
@@ -195,9 +193,7 @@ async def test_add_pairs_rollback_includes_game_status_resolver():
     must call GSR.remove for each seeded ticker so the resolver doesn't
     keep stale entries pointing at non-existent pairs."""
     e = _engine_with_collaborators()
-    e._game_status_resolver.resolve_batch = AsyncMock(
-        side_effect=RuntimeError("boom")
-    )
+    e._game_status_resolver.resolve_batch = AsyncMock(side_effect=RuntimeError("boom"))
     r = ArbPairRecord(
         event_ticker="KX-A",
         ticker_a="KX-A",
@@ -261,9 +257,7 @@ async def test_add_pairs_rolls_back_on_persistence_failure():
     from talos.persistence_errors import PersistenceError
 
     e = _engine_with_collaborators()
-    e._persist_active_games = MagicMock(
-        side_effect=PersistenceError("disk full")
-    )
+    e._persist_active_games = MagicMock(side_effect=PersistenceError("disk full"))
     r = ArbPairRecord(
         event_ticker="KX-PERSIST",
         ticker_a="KX-PERSIST",
@@ -403,14 +397,10 @@ async def test_add_pairs_retry_is_idempotent_for_already_present_pairs():
     assert len(pairs2.admitted) == 1
     assert e._adjuster.add_event.call_count == add_event_after_first
     assert e._feed.subscribe.await_count == subscribe_after_first
-    assert e._game_status_resolver.set_expiration.call_count == (
-        set_expiration_after_first
-    )
+    assert e._game_status_resolver.set_expiration.call_count == (set_expiration_after_first)
     # resolve_batch is gated on `if ... and new_pairs`, so a second call
     # with no new_pairs must not invoke it.
-    assert e._game_status_resolver.resolve_batch.await_count == (
-        resolve_batch_after_first
-    )
+    assert e._game_status_resolver.resolve_batch.await_count == (resolve_batch_after_first)
 
 
 @pytest.mark.asyncio
@@ -523,9 +513,7 @@ async def test_add_pairs_retry_persist_failure_does_not_remove_existing_pair():
 
     # Second call (retry) — make persist fail at the final step. The
     # rollback that follows must not remove the pre-existing pair.
-    e._persist_active_games = MagicMock(
-        side_effect=PersistenceError("disk full")
-    )
+    e._persist_active_games = MagicMock(side_effect=PersistenceError("disk full"))
 
     with pytest.raises(PersistenceError):
         await e.add_pairs_from_selection([r])

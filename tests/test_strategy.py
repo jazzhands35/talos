@@ -27,9 +27,7 @@ def test_returns_unit_room_when_drip_config_is_none() -> None:
 
 def test_subtracts_filled_in_unit_for_standard_strategy() -> None:
     ledger = _ledger(unit_size=5)
-    ledger.record_fill_from_ws(
-        Side.A, trade_id="t1", count_fp100=300, price_bps=5000, fees_bps=0
-    )
+    ledger.record_fill_from_ws(Side.A, trade_id="t1", count_fp100=300, price_bps=5000, fees_bps=0)
 
     # 3 filled in current unit, 2 ahead-room remaining
     assert per_side_max_ahead(ledger, Side.A, None) == 2
@@ -37,9 +35,7 @@ def test_subtracts_filled_in_unit_for_standard_strategy() -> None:
 
 def test_full_unit_opens_next_unit_room() -> None:
     ledger = _ledger(unit_size=5)
-    ledger.record_fill_from_ws(
-        Side.A, trade_id="t1", count_fp100=500, price_bps=5000, fees_bps=0
-    )
+    ledger.record_fill_from_ws(Side.A, trade_id="t1", count_fp100=500, price_bps=5000, fees_bps=0)
 
     # Unit is exactly complete (5 fills, unit_size=5) → next unit's worth
     # of resting room opens immediately.
@@ -59,7 +55,5 @@ def test_drip_cap_ignores_unit_size() -> None:
     config = DripConfig(drip_size=1, max_drips=1)  # cap = 1
 
     # Fill 3 contracts on side A; helper still returns drip cap, not unit room.
-    ledger.record_fill_from_ws(
-        Side.A, trade_id="t1", count_fp100=300, price_bps=5000, fees_bps=0
-    )
+    ledger.record_fill_from_ws(Side.A, trade_id="t1", count_fp100=300, price_bps=5000, fees_bps=0)
     assert per_side_max_ahead(ledger, Side.A, config) == 1

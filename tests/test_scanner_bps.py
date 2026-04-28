@@ -46,15 +46,11 @@ def _setup_whole_cent_books(
     """
     manager.apply_snapshot(
         ticker_a,
-        OrderBookSnapshot(
-            market_ticker=ticker_a, market_id="u1", yes=[], no=[[no_a, qty_a]]
-        ),
+        OrderBookSnapshot(market_ticker=ticker_a, market_id="u1", yes=[], no=[[no_a, qty_a]]),
     )
     manager.apply_snapshot(
         ticker_b,
-        OrderBookSnapshot(
-            market_ticker=ticker_b, market_id="u2", yes=[], no=[[no_b, qty_b]]
-        ),
+        OrderBookSnapshot(market_ticker=ticker_b, market_id="u2", yes=[], no=[[no_b, qty_b]]),
     )
 
 
@@ -74,9 +70,7 @@ def _install_subcent_book(
     """
     manager.apply_snapshot(
         ticker,
-        OrderBookSnapshot(
-            market_ticker=ticker, market_id="u", yes=[], no=[[price, quantity]]
-        ),
+        OrderBookSnapshot(market_ticker=ticker, market_id="u", yes=[], no=[[price, quantity]]),
     )
     book = manager.get_book(ticker)
     assert book is not None
@@ -96,9 +90,7 @@ class TestWholeCentParity:
         "no_a,no_b",
         [(38, 55), (45, 50), (10, 85), (1, 98), (49, 49)],
     )
-    def test_parity_across_representative_prices(
-        self, no_a: int, no_b: int
-    ) -> None:
+    def test_parity_across_representative_prices(self, no_a: int, no_b: int) -> None:
         manager = OrderBookManager()
         scanner = ArbitrageScanner(manager)
         scanner.add_pair("EVT", "GAME-STAN", "GAME-MIA")

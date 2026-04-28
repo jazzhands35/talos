@@ -76,6 +76,4 @@ def test_no_raw_rest_cancel_order_calls() -> None:
                 f"{enclosing!r} — use engine.cancel_order_with_verify() "
                 f"instead (F36)"
             )
-    assert not offenders, "F36 cancel-discipline violation(s):\n" + "\n".join(
-        offenders
-    )
+    assert not offenders, "F36 cancel-discipline violation(s):\n" + "\n".join(offenders)

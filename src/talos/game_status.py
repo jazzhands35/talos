@@ -48,9 +48,7 @@ class ExternalGame(BaseModel):
 class GameStatusProvider(Protocol):
     """Interface for external game data providers."""
 
-    async def fetch_games(
-        self, sport: str, league: str, game_date: str
-    ) -> list[ExternalGame]: ...
+    async def fetch_games(self, sport: str, league: str, game_date: str) -> list[ExternalGame]: ...
 
 
 # ── ESPN Provider ──────────────────────────────────────────────────
@@ -98,9 +96,7 @@ class EspnProvider:
                         away_team = team["displayName"]
                         away_abbr = team.get("abbreviation")
 
-                scheduled_start = datetime.fromisoformat(
-                    event["date"].replace("Z", "+00:00")
-                )
+                scheduled_start = datetime.fromisoformat(event["date"].replace("Z", "+00:00"))
 
                 games.append(
                     ExternalGame(
@@ -117,9 +113,7 @@ class EspnProvider:
                 logger.warning("espn_parse_event_failed", event=event)
         return games
 
-    async def fetch_games(
-        self, sport: str, league: str, game_date: str
-    ) -> list[ExternalGame]:
+    async def fetch_games(self, sport: str, league: str, game_date: str) -> list[ExternalGame]:
         url = f"{self.BASE_URL}/{sport}/{league}/scoreboard"
         try:
             async with httpx.AsyncClient(timeout=httpx.Timeout(10.0)) as client:
@@ -151,6 +145,7 @@ class OddsApiProvider:
         Cached for 1 hour to avoid excessive calls.
         """
         import time
+
         if cls._tennis_keys and (time.monotonic() - cls._tennis_keys_ts) < 3600:
             return cls._tennis_keys
 
@@ -166,8 +161,7 @@ class OddsApiProvider:
                 resp.raise_for_status()
                 sports = resp.json()
                 cls._tennis_keys = [
-                    s["key"] for s in sports
-                    if "tennis" in s.get("key", "") and s.get("active")
+                    s["key"] for s in sports if "tennis" in s.get("key", "") and s.get("active")
                 ]
                 cls._tennis_keys_ts = time.monotonic()
                 logger.info("odds_api_tennis_keys", keys=cls._tennis_keys)
@@ -181,9 +175,7 @@ class OddsApiProvider:
         games: list[ExternalGame] = []
         for item in data:
             try:
-                commence = datetime.fromisoformat(
-                    item["commence_time"].replace("Z", "+00:00")
-                )
+                commence = datetime.fromisoformat(item["commence_time"].replace("Z", "+00:00"))
                 completed = item.get("completed", False)
                 scores = item.get("scores")
 
@@ -219,9 +211,7 @@ class OddsApiProvider:
         games: list[ExternalGame] = []
         for item in data:
             try:
-                commence = datetime.fromisoformat(
-                    item["commence_time"].replace("Z", "+00:00")
-                )
+                commence = datetime.fromisoformat(item["commence_time"].replace("Z", "+00:00"))
                 now = datetime.now(UTC)
                 state = "pre" if commence > now else "live"
                 games.append(
@@ -237,7 +227,10 @@ class OddsApiProvider:
         return games
 
     async def fetch_games(
-        self, sport: str, league: str, game_date: str  # noqa: ARG002
+        self,
+        sport: str,
+        league: str,
+        game_date: str,  # noqa: ARG002
     ) -> list[ExternalGame]:
         # sport and game_date unused — Odds API uses league directly, daysFrom=1
         api_key = os.environ.get("ODDS_API_KEY", "")
@@ -260,9 +253,7 @@ class OddsApiProvider:
         url = f"{self.BASE_URL}/{league}/scores/"
         try:
             async with httpx.AsyncClient(timeout=httpx.Timeout(10.0)) as client:
-                resp = await client.get(
-                    url, params={"apiKey": api_key, "daysFrom": "1"}
-                )
+                resp = await client.get(url, params={"apiKey": api_key, "daysFrom": "1"})
                 resp.raise_for_status()
                 return self._parse_response(resp.json())
         except httpx.HTTPError:
@@ -296,9 +287,7 @@ class PandaScoreProvider:
 
                 # Prefer begin_at over scheduled_at
                 time_str = item.get("begin_at") or item.get("scheduled_at", "")
-                scheduled_start = datetime.fromisoformat(
-                    time_str.replace("Z", "+00:00")
-                )
+                scheduled_start = datetime.fromisoformat(time_str.replace("Z", "+00:00"))
 
                 # Team info from opponents array
                 opponents = item.get("opponents", [])
@@ -336,7 +325,10 @@ class PandaScoreProvider:
         return games
 
     async def fetch_games(
-        self, sport: str, league: str, game_date: str  # noqa: ARG002
+        self,
+        sport: str,
+        league: str,
+        game_date: str,  # noqa: ARG002
     ) -> list[ExternalGame]:
         # league unused — PandaScore uses sport slug for URL path
         token = os.environ.get("PANDASCORE_TOKEN", "")
@@ -418,7 +410,10 @@ class ApiTennisProvider:
         return games
 
     async def fetch_games(
-        self, sport: str, league: str, game_date: str  # noqa: ARG002
+        self,
+        sport: str,
+        league: str,
+        game_date: str,  # noqa: ARG002
     ) -> list[ExternalGame]:
         api_key = os.environ.get("API_TENNIS_KEY", "")
         if not api_key:
@@ -551,9 +546,7 @@ _START_DELAYS: dict[str, timedelta] = {
 }
 
 
-def _apply_start_delay(
-    scheduled_start: datetime | None, series_prefix: str
-) -> datetime | None:
+def _apply_start_delay(scheduled_start: datetime | None, series_prefix: str) -> datetime | None:
     """Shift a listed start time by a league-specific delay to get actual start."""
     if scheduled_start is None:
         return None
@@ -563,9 +556,7 @@ def _apply_start_delay(
     return scheduled_start + delay
 
 
-def estimate_start_time(
-    expected_expiration: str | None, series_prefix: str
-) -> datetime | None:
+def estimate_start_time(expected_expiration: str | None, series_prefix: str) -> datetime | None:
     """Derive estimated game start from Kalshi's expected_expiration_time.
 
     Returns None if the input is missing or a known placeholder (midnight UTC).
@@ -623,9 +614,7 @@ class GameStatusResolver:
         return None
 
     @staticmethod
-    def match_game(
-        team_codes: tuple[str, str], games: list[ExternalGame]
-    ) -> ExternalGame | None:
+    def match_game(team_codes: tuple[str, str], games: list[ExternalGame]) -> ExternalGame | None:
         """Match team codes to an ExternalGame, first by abbreviation then by substring."""
         code_set = {team_codes[0].upper(), team_codes[1].upper()}
 
@@ -647,9 +636,7 @@ class GameStatusResolver:
 
         return None
 
-    def set_expiration(
-        self, event_ticker: str, expected_expiration_time: str | None
-    ) -> None:
+    def set_expiration(self, event_ticker: str, expected_expiration_time: str | None) -> None:
         """Store expected_expiration_time for expiration-based start fallback."""
         if expected_expiration_time:
             prefix = event_ticker.split("-")[0]
@@ -661,9 +648,7 @@ class GameStatusResolver:
         if exp_data is not None:
             estimated = estimate_start_time(exp_data[0], exp_data[1])
             if estimated is not None:
-                return GameStatus(
-                    state="pre", scheduled_start=estimated, detail=ESTIMATED_DETAIL
-                )
+                return GameStatus(state="pre", scheduled_start=estimated, detail=ESTIMATED_DETAIL)
         return GameStatus(state="unknown")
 
     def _resolve_match(
@@ -673,10 +658,7 @@ class GameStatusResolver:
         games: list[ExternalGame],
     ) -> GameStatus:
         """Match team codes against games; fall back to expiration estimate."""
-        matched = (
-            self.match_game(team_codes, games)
-            if games and team_codes else None
-        )
+        matched = self.match_game(team_codes, games) if games and team_codes else None
         if matched is not None:
             prefix = event_ticker.split("-")[0]
             return GameStatus(
@@ -698,9 +680,7 @@ class GameStatusResolver:
         if source is None and prefix not in TENNIS_SERIES:
             status = self._expiration_fallback(event_ticker)
             if status.state == "unknown":
-                logger.warning(
-                    "unmapped_series_ticker", prefix=prefix, ticker=event_ticker
-                )
+                logger.warning("unmapped_series_ticker", prefix=prefix, ticker=event_ticker)
             self._cache[event_ticker] = (status, None, "")
             return None
 
@@ -720,16 +700,12 @@ class GameStatusResolver:
 
         return (prefix, sport, league, team_codes, game_date)
 
-    async def resolve(
-        self, event_ticker: str, sub_title: str = ""
-    ) -> GameStatus:
+    async def resolve(self, event_ticker: str, sub_title: str = "") -> GameStatus:
         """Resolve a single Kalshi event ticker to a GameStatus."""
         result = await self.resolve_batch([(event_ticker, sub_title)])
         return result.get(event_ticker, GameStatus(state="unknown"))
 
-    async def resolve_batch(
-        self, items: list[tuple[str, str]]
-    ) -> dict[str, GameStatus]:
+    async def resolve_batch(self, items: list[tuple[str, str]]) -> dict[str, GameStatus]:
         """Resolve multiple event tickers, batching API calls by source.
 
         Each unique (provider, sport, league, date) combination makes
@@ -842,9 +818,7 @@ class GameStatusResolver:
                 if matched is not None:
                     new_status = GameStatus(
                         state=matched.state,
-                        scheduled_start=_apply_start_delay(
-                            matched.scheduled_start, prefix
-                        ),
+                        scheduled_start=_apply_start_delay(matched.scheduled_start, prefix),
                         detail=matched.detail,
                     )
                     self._cache[event_ticker] = (new_status, team_codes, prefix)

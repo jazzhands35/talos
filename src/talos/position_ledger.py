@@ -518,9 +518,7 @@ class PositionLedger:
             side_state.closed_total_cost_bps += round(
                 open_cost_bps * contracts_fp100 / open_count_fp100
             )
-            side_state.closed_fees_bps += round(
-                open_fees_bps * contracts_fp100 / open_count_fp100
-            )
+            side_state.closed_fees_bps += round(open_fees_bps * contracts_fp100 / open_count_fp100)
         logger.info(
             "ledger_reconciled_closed",
             event_ticker=self.event_ticker,
@@ -609,9 +607,7 @@ class PositionLedger:
             return False
         if trade_id in self._consumed_trade_ids:
             return False
-        self.record_fill_bps(
-            side, count_fp100=count_fp100, price_bps=price_bps, fees_bps=fees_bps
-        )
+        self.record_fill_bps(side, count_fp100=count_fp100, price_bps=price_bps, fees_bps=fees_bps)
         self._consumed_trade_ids.add(trade_id)
         # Bounded trim. CPython 3.7+ preserves insertion order on dict; we
         # use a set here, which doesn't guarantee order. Trim by sampling — a
@@ -619,9 +615,7 @@ class PositionLedger:
         # trade_id reappears, which never happens in practice on a single
         # session).
         if len(self._consumed_trade_ids) > self._consumed_trade_ids_max:
-            excess = len(self._consumed_trade_ids) - (
-                self._consumed_trade_ids_max * 3 // 4
-            )
+            excess = len(self._consumed_trade_ids) - (self._consumed_trade_ids_max * 3 // 4)
             for old in list(self._consumed_trade_ids)[:excess]:
                 self._consumed_trade_ids.discard(old)
         return True
@@ -843,9 +837,7 @@ class PositionLedger:
                 return
             # Legacy-migration metadata travels on the v2 envelope; the
             # embedded v1 snapshot (if any) survives for the next save.
-            self.legacy_migration_pending = bool(
-                data.get("legacy_migration_pending", False)
-            )
+            self.legacy_migration_pending = bool(data.get("legacy_migration_pending", False))
             embedded_v1 = data.get("legacy_v1_snapshot")
             if self.legacy_migration_pending and isinstance(embedded_v1, dict):
                 self._legacy_v1_snapshot = dict(embedded_v1)
@@ -871,12 +863,8 @@ class PositionLedger:
                     ledger_payload.get(f"closed_fees_bps_{prefix}", 0) or 0
                 )
                 saved_id = ledger_payload.get(f"resting_id_{prefix}")
-                saved_count_fp100 = int(
-                    ledger_payload.get(f"resting_count_fp100_{prefix}", 0) or 0
-                )
-                saved_price_bps = int(
-                    ledger_payload.get(f"resting_price_bps_{prefix}", 0) or 0
-                )
+                saved_count_fp100 = int(ledger_payload.get(f"resting_count_fp100_{prefix}", 0) or 0)
+                saved_price_bps = int(ledger_payload.get(f"resting_price_bps_{prefix}", 0) or 0)
                 if saved_id and saved_count_fp100 > 0:
                     side_state.resting_order_id = str(saved_id)
                     side_state.resting_count_fp100 = saved_count_fp100
@@ -954,8 +942,12 @@ class PositionLedger:
 
         # Atomic-group restore of the closed_* bucket with strict validation.
         required_closed_keys = (
-            "closed_count_a", "closed_total_cost_a", "closed_fees_a",
-            "closed_count_b", "closed_total_cost_b", "closed_fees_b",
+            "closed_count_a",
+            "closed_total_cost_a",
+            "closed_fees_a",
+            "closed_count_b",
+            "closed_total_cost_b",
+            "closed_fees_b",
         )
 
         def _valid_closed_value(v: object) -> bool:
@@ -1016,7 +1008,14 @@ class PositionLedger:
             self._legacy_v1_snapshot = {str(k): data[k] for k in data}
         self._mutation_generation += 1
 
-    def sync_from_orders(self, orders: list, ticker_a: str, ticker_b: str) -> None:
+    def sync_from_orders(
+        self,
+        orders: list,
+        ticker_a: str,
+        ticker_b: str,
+        *,
+        with_fills: bool = True,
+    ) -> None:
         """Reconcile ledger against polled order state from Kalshi.
 
         Fill counts: monotonically increasing — the orders API archives old
@@ -1028,6 +1027,15 @@ class PositionLedger:
 
         Called every polling cycle. See also sync_from_positions() which
         patches fill gaps from the positions API.
+
+        ``with_fills`` (keyword-only, default ``True``): when ``False``,
+        skip the fill-count update block — only resting state is reconciled.
+        Use this from the WS user_orders handler to avoid double-counting:
+        the WS fill channel (``record_fill_from_ws``) is the unique writer
+        for live-session fills, and the periodic REST poll
+        (``refresh_account``) keeps using ``with_fills=True`` as the
+        dropped-WS-fill recovery backstop. See [[brain/decisions]]
+        2026-04-27 KXGOLDCARDS double-write diagnosis.
 
         Wire-shape note: the orders API still delivers whole-cent prices and
         whole-contract counts in the current deployment. We scale ×100 at
@@ -1072,9 +1080,7 @@ class PositionLedger:
             # regardless of whether the order was later cancelled or amended
             if order.fill_count_fp100 > 0:
                 kalshi_filled_fp100[side] += order.fill_count_fp100
-                kalshi_fill_cost_bps[side] += (
-                    order.maker_fill_cost_bps + order.taker_fill_cost_bps
-                )
+                kalshi_fill_cost_bps[side] += order.maker_fill_cost_bps + order.taker_fill_cost_bps
                 kalshi_fees_bps[side] += order.maker_fees_bps
             # Only track resting from active orders — skip recently cancelled
             # IDs that Kalshi's GET may still return due to eventual consistency
@@ -1100,8 +1106,15 @@ class PositionLedger:
             # kalshi_filled may be lower than positions-augmented fills.
             # When orders reports >= current, use its data (more detailed
             # cost/fee breakdown). When less, keep existing.
+            #
+            # Skip when called from a WS user_orders handler — the WS fill
+            # channel is the unique writer for live fills, and writing here
+            # too would double-count (the WS user_orders update reports the
+            # cumulative fill_count, and the WS fill event then ADDS the
+            # same contracts on top).
             if (
-                kalshi_filled_fp100[side] >= s.filled_count_fp100
+                with_fills
+                and kalshi_filled_fp100[side] >= s.filled_count_fp100
                 and kalshi_filled_fp100[side] > 0
             ):
                 s.filled_count_fp100 = kalshi_filled_fp100[side]
@@ -1395,9 +1408,7 @@ class PositionLedger:
                 if side is None:
                     continue
                 sums_count[side] += fill.count_fp100
-                sums_cost[side] += (
-                    fill.count_fp100 * _price_bps_for(fill) // ONE_CONTRACT_FP100
-                )
+                sums_cost[side] += fill.count_fp100 * _price_bps_for(fill) // ONE_CONTRACT_FP100
                 sums_fees[side] += fill.fee_cost_bps
         else:
             for side, fills in ((Side.A, fills_a), (Side.B, fills_b)):
@@ -1405,9 +1416,7 @@ class PositionLedger:
                     if fill.action and fill.action != "buy":
                         continue
                     sums_count[side] += fill.count_fp100
-                    sums_cost[side] += (
-                        fill.count_fp100 * _price_bps_for(fill) // ONE_CONTRACT_FP100
-                    )
+                    sums_cost[side] += fill.count_fp100 * _price_bps_for(fill) // ONE_CONTRACT_FP100
                     sums_fees[side] += fill.fee_cost_bps
 
         a = self._sides[Side.A]
@@ -1479,9 +1488,7 @@ class PositionLedger:
         # set by _apply_snapshot when it runs.
         _ = clear_fills_stale
         _ = clear_resting_stale
-        new_legacy_pending = (
-            False if clear_legacy_pending else self.legacy_migration_pending
-        )
+        new_legacy_pending = False if clear_legacy_pending else self.legacy_migration_pending
         return LedgerSnapshot(
             filled_count_fp100_a=rebuilt.filled_count_fp100_a,
             filled_total_cost_bps_a=rebuilt.filled_total_cost_bps_a,
@@ -1574,9 +1581,7 @@ class PositionLedger:
         try:
             fills_a = await rest.get_all_fills(ticker=self._ticker_a)
             fills_b = (
-                []
-                if self._is_same_ticker
-                else await rest.get_all_fills(ticker=self._ticker_b)
+                [] if self._is_same_ticker else await rest.get_all_fills(ticker=self._ticker_b)
             )
         except Exception as exc:
             logger.warning(
@@ -1624,9 +1629,7 @@ class PositionLedger:
         try:
             persist_cb(proposed, self.event_ticker)
         except Exception as exc:
-            logger.exception(
-                "reconcile_persist_failed", event_ticker=self.event_ticker
-            )
+            logger.exception("reconcile_persist_failed", event_ticker=self.event_ticker)
             return ReconcileResult(outcome=ReconcileOutcome.ERROR, error=str(exc))
 
         # Sync apply. Still no await. _mutation_generation bumped inside.
@@ -1740,10 +1743,12 @@ def compute_display_positions(
         # CPM enrichment
         cpm_a = cpm_tracker.cpm(pair.ticker_a)
         cpm_a_partial = cpm_tracker.is_partial(pair.ticker_a)
+        flow_a = cpm_tracker.flow_metrics(pair.ticker_a)
         eta_a = cpm_tracker.eta_minutes(pair.ticker_a, qp_a) if qp_a is not None else None
 
         cpm_b = cpm_tracker.cpm(pair.ticker_b)
         cpm_b_partial = cpm_tracker.is_partial(pair.ticker_b)
+        flow_b = cpm_tracker.flow_metrics(pair.ticker_b)
         eta_b = cpm_tracker.eta_minutes(pair.ticker_b, qp_b) if qp_b is not None else None
 
         summaries.append(
@@ -1760,6 +1765,8 @@ def compute_display_positions(
                     cpm=cpm_a,
                     cpm_partial=cpm_a_partial,
                     eta_minutes=eta_a,
+                    frequency=flow_a.trades_per_hour if flow_a is not None else None,
+                    flow_burst_ratio=(flow_a.burst_ratio if flow_a is not None else None),
                     resting_no_price_bps=(
                         ledger.resting_price_bps(Side.A) if resting_a > 0 else None
                     ),
@@ -1775,6 +1782,8 @@ def compute_display_positions(
                     cpm=cpm_b,
                     cpm_partial=cpm_b_partial,
                     eta_minutes=eta_b,
+                    frequency=flow_b.trades_per_hour if flow_b is not None else None,
+                    flow_burst_ratio=(flow_b.burst_ratio if flow_b is not None else None),
                     resting_no_price_bps=(
                         ledger.resting_price_bps(Side.B) if resting_b > 0 else None
                     ),

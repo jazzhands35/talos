@@ -349,11 +349,16 @@ class TestWSFieldInvariants:
         [("0.01", 100), ("0.53", 5300), ("0.99", 9900)],
     )
     def test_orderbook_delta(self, wire_dollars: str, bps: int) -> None:
-        d = OrderBookDelta.model_validate({
-            "market_ticker": "x", "market_id": "y",
-            "price_dollars": wire_dollars, "delta_fp": "1.00",
-            "side": "yes", "ts": "0",
-        })
+        d = OrderBookDelta.model_validate(
+            {
+                "market_ticker": "x",
+                "market_id": "y",
+                "price_dollars": wire_dollars,
+                "delta_fp": "1.00",
+                "side": "yes",
+                "ts": "0",
+            }
+        )
         assert d.price_bps == bps
 
     @pytest.mark.parametrize(
@@ -361,10 +366,12 @@ class TestWSFieldInvariants:
         [("0.01", 100), ("0.53", 5300), ("0.99", 9900)],
     )
     def test_ticker(self, wire_dollars: str, bps: int) -> None:
-        t = TickerMessage.model_validate({
-            "market_ticker": "x",
-            "yes_bid_dollars": wire_dollars,
-        })
+        t = TickerMessage.model_validate(
+            {
+                "market_ticker": "x",
+                "yes_bid_dollars": wire_dollars,
+            }
+        )
         assert t.yes_bid_bps == bps
 
     @pytest.mark.parametrize(
@@ -372,12 +379,16 @@ class TestWSFieldInvariants:
         [("0.01", 100), ("0.53", 5300), ("0.99", 9900)],
     )
     def test_trade(self, wire_dollars: str, bps: int) -> None:
-        tr = TradeMessage.model_validate({
-            "market_ticker": "x",
-            "yes_price_dollars": wire_dollars,
-            "count_fp": "1",
-            "side": "yes", "ts": "0", "trade_id": "t",
-        })
+        tr = TradeMessage.model_validate(
+            {
+                "market_ticker": "x",
+                "yes_price_dollars": wire_dollars,
+                "count_fp": "1",
+                "side": "yes",
+                "ts": "0",
+                "trade_id": "t",
+            }
+        )
         assert tr.price_bps == bps
 
     @pytest.mark.parametrize(
@@ -385,10 +396,13 @@ class TestWSFieldInvariants:
         [("0.01", 100), ("0.53", 5300), ("0.99", 9900)],
     )
     def test_user_order(self, wire_dollars: str, bps: int) -> None:
-        u = UserOrderMessage.model_validate({
-            "order_id": "o", "ticker": "x",
-            "yes_price_dollars": wire_dollars,
-        })
+        u = UserOrderMessage.model_validate(
+            {
+                "order_id": "o",
+                "ticker": "x",
+                "yes_price_dollars": wire_dollars,
+            }
+        )
         assert u.yes_price_bps == bps
 
     @pytest.mark.parametrize(
@@ -396,10 +410,14 @@ class TestWSFieldInvariants:
         [("0.01", 100), ("0.53", 5300), ("0.99", 9900)],
     )
     def test_fill(self, wire_dollars: str, bps: int) -> None:
-        f = FillMessage.model_validate({
-            "trade_id": "t", "order_id": "o", "market_ticker": "x",
-            "yes_price_dollars": wire_dollars,
-        })
+        f = FillMessage.model_validate(
+            {
+                "trade_id": "t",
+                "order_id": "o",
+                "market_ticker": "x",
+                "yes_price_dollars": wire_dollars,
+            }
+        )
         assert f.yes_price_bps == bps
 
     @pytest.mark.parametrize(
@@ -407,10 +425,12 @@ class TestWSFieldInvariants:
         [("0.01", 100), ("0.53", 5300), ("0.99", 9900)],
     )
     def test_market_position(self, wire_dollars: str, bps: int) -> None:
-        mp = MarketPositionMessage.model_validate({
-            "market_ticker": "x",
-            "position_cost_dollars": wire_dollars,
-        })
+        mp = MarketPositionMessage.model_validate(
+            {
+                "market_ticker": "x",
+                "position_cost_dollars": wire_dollars,
+            }
+        )
         assert mp.position_cost_bps == bps
 
     @pytest.mark.parametrize(
@@ -418,12 +438,14 @@ class TestWSFieldInvariants:
         [("0.01", 100), ("0.53", 5300), ("0.99", 9900)],
     )
     def test_market_lifecycle(self, wire_dollars: str, bps: int) -> None:
-        ml = MarketLifecycleMessage.model_validate({
-            "event_type": "determined",
-            "market_ticker": "x",
-            "result": "yes",
-            "settlement_value": wire_dollars,
-        })
+        ml = MarketLifecycleMessage.model_validate(
+            {
+                "event_type": "determined",
+                "market_ticker": "x",
+                "result": "yes",
+                "settlement_value": wire_dollars,
+            }
+        )
         assert ml.settlement_value_bps == bps
 
     @pytest.mark.parametrize(
@@ -431,9 +453,11 @@ class TestWSFieldInvariants:
         [("0.01", 100), ("0.53", 5300), ("0.99", 9900)],
     )
     def test_orderbook_snapshot(self, wire_dollars: str, bps: int) -> None:
-        s = OrderBookSnapshot.model_validate({
-            "market_ticker": "x",
-            "market_id": "y",
-            "yes_dollars_fp": [[wire_dollars, "10.00"]],
-        })
+        s = OrderBookSnapshot.model_validate(
+            {
+                "market_ticker": "x",
+                "market_id": "y",
+                "yes_dollars_fp": [[wire_dollars, "10.00"]],
+            }
+        )
         assert s.yes_bps_fp100[0][0] == bps

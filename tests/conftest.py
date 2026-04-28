@@ -4,6 +4,7 @@ This conftest overrides pytest's built-in caplog fixture to also configure
 structlog to emit via stdlib logging. Tests that do not request caplog are
 unaffected — structlog keeps its default (WriteLoggerFactory) configuration.
 """
+
 import logging
 from contextlib import contextmanager
 from typing import Any, cast
@@ -106,19 +107,21 @@ def engine_fixture():
                 fractional_trading_enabled=True,
             )
         if ticker.startswith("KXS-"):
-            return Market.model_validate({
-                "ticker": ticker,
-                "event_ticker": ticker.rsplit("-", 1)[0],
-                "title": f"Sub-cent {ticker}",
-                "status": "open",
-                "price_ranges": [
-                    {
-                        "min_price_dollars": "0.01",
-                        "max_price_dollars": "0.99",
-                        "tick_dollars": "0.001",
-                    }
-                ],
-            })
+            return Market.model_validate(
+                {
+                    "ticker": ticker,
+                    "event_ticker": ticker.rsplit("-", 1)[0],
+                    "title": f"Sub-cent {ticker}",
+                    "status": "open",
+                    "price_ranges": [
+                        {
+                            "min_price_dollars": "0.01",
+                            "max_price_dollars": "0.99",
+                            "tick_dollars": "0.001",
+                        }
+                    ],
+                }
+            )
         return Market(
             ticker=ticker,
             event_ticker=ticker.rsplit("-", 1)[0] if "-" in ticker else ticker,

@@ -70,6 +70,18 @@ async def test_panel_clears_rows_when_empty():
 
 
 @pytest.mark.asyncio
+async def test_panel_hint_points_to_action_menu():
+    queue = ProposalQueue()
+    async with PanelTestApp(queue).run_test() as pilot:
+        panel = pilot.app.query_one(ProposalPanel)
+        hint = panel.query_one(".proposal-hint")
+
+        assert "[M] menu approve/reject" in hint.content  # type: ignore[attr-defined]
+        assert "[Y]" not in hint.content  # type: ignore[attr-defined]
+        assert "[N]" not in hint.content  # type: ignore[attr-defined]
+
+
+@pytest.mark.asyncio
 async def test_panel_visible_with_proposals():
     queue = ProposalQueue()
     queue.add(_make_proposal())

@@ -90,6 +90,7 @@ def _atomic_write_text(path: Path, content: str) -> None:
             tmp_path.unlink(missing_ok=True)
         raise
 
+
 # ---------------------------------------------------------------------------
 # Configurable data directory
 # ---------------------------------------------------------------------------
@@ -221,9 +222,7 @@ def snapshot_to_save_dict(
     return envelope
 
 
-def save_games_full(
-    games: Sequence[Mapping[str, object]], path: Path | None = None
-) -> bool:
+def save_games_full(games: Sequence[Mapping[str, object]], path: Path | None = None) -> bool:
     """Save full game data so startup can skip REST calls.
 
     Wraps the games list in a versioned envelope so future schema
@@ -294,18 +293,14 @@ def load_saved_games_full(
         version = raw.get("schema_version")
         games = raw.get("games")
         if not isinstance(version, int) or not isinstance(games, list):
-            raise GamesFullCorrupt(
-                f"games_full.json at {games_file} has invalid envelope shape"
-            )
+            raise GamesFullCorrupt(f"games_full.json at {games_file} has invalid envelope shape")
         if version > GAMES_FULL_SCHEMA_VERSION:
             raise GamesFullCorrupt(
                 f"games_full.json schema_version={version} is newer than "
                 f"this build supports (max {GAMES_FULL_SCHEMA_VERSION})"
             )
         if not all(isinstance(g, dict) for g in games):
-            raise GamesFullCorrupt(
-                f"games_full.json at {games_file} has non-dict game entries"
-            )
+            raise GamesFullCorrupt(f"games_full.json at {games_file} has non-dict game entries")
         # Safety-critical field validation. engine_state became load-bearing
         # in v1 — a v1 save without it (or with a value outside the enum)
         # is corrupt, not a silent-default candidate. _apply_persisted_engine_state
@@ -339,9 +334,7 @@ def load_saved_games_full(
         if not raw:
             return None
         if not isinstance(raw[0], dict):
-            raise GamesFullCorrupt(
-                f"games_full.json at {games_file} has non-dict first entry"
-            )
+            raise GamesFullCorrupt(f"games_full.json at {games_file} has non-dict first entry")
         logger.info("load_saved_games_full_legacy_migrated", path=str(games_file))
         # Stamp engine_state on v0 entries so the v1 invariant holds after
         # auto-migration — restore_game then sees the field explicitly.
@@ -351,8 +344,7 @@ def load_saved_games_full(
         return raw  # type: ignore[return-value]
 
     raise GamesFullCorrupt(
-        f"games_full.json at {games_file} has unrecognized top-level type "
-        f"({type(raw).__name__})"
+        f"games_full.json at {games_file} has unrecognized top-level type ({type(raw).__name__})"
     )
 
 

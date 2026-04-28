@@ -96,11 +96,13 @@ class TestSettlementCache:
     def test_latest_settled_time(self, tmp_path: Path) -> None:
         """latest_settled_time returns the most recent time."""
         cache = SettlementCache(tmp_path / "test.db")
-        for i, ts in enumerate([
-            "2026-03-18T12:00:00Z",
-            "2026-03-20T12:00:00Z",
-            "2026-03-19T12:00:00Z",
-        ]):
+        for i, ts in enumerate(
+            [
+                "2026-03-18T12:00:00Z",
+                "2026-03-20T12:00:00Z",
+                "2026-03-19T12:00:00Z",
+            ]
+        ):
             s = Settlement(ticker=f"MKT-{i}", event_ticker=f"EVT-{i}", settled_time=ts)
             cache.upsert(s)
         assert cache.latest_settled_time() == "2026-03-20T12:00:00Z"

@@ -160,9 +160,7 @@ def test_mismatch_auto_adopts_kalshi_fills() -> None:
     def persist_cb(snap: LedgerSnapshot, ticker: str) -> None:
         persisted.append(snap)
 
-    result = asyncio.run(
-        ledger.reconcile_from_fills(cast(KalshiRESTClient, rest), persist_cb)
-    )
+    result = asyncio.run(ledger.reconcile_from_fills(cast(KalshiRESTClient, rest), persist_cb))
     # No MISMATCH variant exists anymore — auto-adopt returns OK.
     assert result.outcome == ReconcileOutcome.OK
     # Kalshi's view is now live.
@@ -228,9 +226,7 @@ def test_auto_adopt_persist_failure_leaves_ledger_unchanged() -> None:
     def persist_cb(snap: LedgerSnapshot, ticker: str) -> None:
         raise RuntimeError("disk full")
 
-    result = asyncio.run(
-        ledger.reconcile_from_fills(cast(KalshiRESTClient, rest), persist_cb)
-    )
+    result = asyncio.run(ledger.reconcile_from_fills(cast(KalshiRESTClient, rest), persist_cb))
     assert result.outcome == ReconcileOutcome.ERROR
     assert "disk full" in (result.error or "")
     # Live state untouched — Kalshi's view not applied because persist failed.

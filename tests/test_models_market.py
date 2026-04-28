@@ -445,16 +445,16 @@ class TestMarketFieldInvariants:
             ("1.00", 10_000),
         ],
     )
-    def test_market_yes_bid_bps_from_wire(
-        self, wire_dollars: str, bps: int
-    ) -> None:
-        m = Market.model_validate({
-            "ticker": "x",
-            "event_ticker": "y",
-            "title": "t",
-            "status": "open",
-            "yes_bid_dollars": wire_dollars,
-        })
+    def test_market_yes_bid_bps_from_wire(self, wire_dollars: str, bps: int) -> None:
+        m = Market.model_validate(
+            {
+                "ticker": "x",
+                "event_ticker": "y",
+                "title": "t",
+                "status": "open",
+                "yes_bid_dollars": wire_dollars,
+            }
+        )
         assert m.yes_bid_bps == bps
 
     @pytest.mark.parametrize(
@@ -465,14 +465,14 @@ class TestMarketFieldInvariants:
             ("15000.00", 1_500_000),
         ],
     )
-    def test_market_volume_fp100_from_wire(
-        self, wire_fp: str, fp100: int
-    ) -> None:
-        m = Market.model_validate({
-            "ticker": "x",
-            "event_ticker": "y",
-            "title": "t",
-            "status": "open",
-            "volume_fp": wire_fp,
-        })
+    def test_market_volume_fp100_from_wire(self, wire_fp: str, fp100: int) -> None:
+        m = Market.model_validate(
+            {
+                "ticker": "x",
+                "event_ticker": "y",
+                "title": "t",
+                "status": "open",
+                "volume_fp": wire_fp,
+            }
+        )
         assert m.volume_fp100 == fp100

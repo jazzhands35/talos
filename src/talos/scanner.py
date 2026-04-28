@@ -152,9 +152,7 @@ class ArbitrageScanner:
             )
         return None
 
-    def _derive_price_bps(
-        self, ticker: str, side: str
-    ) -> tuple[int, int] | None:
+    def _derive_price_bps(self, ticker: str, side: str) -> tuple[int, int] | None:
         """Bps/fp100 sibling of :meth:`_derive_price`.
 
         Implied NO-ask in bps is ``ONE_DOLLAR_BPS - best_yes_bid_bps``.
@@ -204,34 +202,22 @@ class ArbitrageScanner:
                     else (None, 0)
                 )
                 # Parallel bps / fp100 extraction — see _level_price_bps.
-                pa_bps: int | None = (
-                    _level_price_bps(no_a) if no_a else None
-                )
-                qa_fp100: int = (
-                    _level_quantity_fp100(no_a) if no_a else 0
-                )
-                pb_bps: int | None = (
-                    _level_price_bps(no_b) if no_b else None
-                )
-                qb_fp100: int = (
-                    _level_quantity_fp100(no_b) if no_b else 0
-                )
+                pa_bps: int | None = _level_price_bps(no_a) if no_a else None
+                qa_fp100: int = _level_quantity_fp100(no_a) if no_a else 0
+                pb_bps: int | None = _level_price_bps(no_b) if no_b else None
+                qb_fp100: int = _level_quantity_fp100(no_b) if no_b else 0
                 if pa is None:
                     derived = self._derive_price(pair.ticker_a, pair.side_a)
                     if derived:
                         pa, qa = derived
-                    derived_bps = self._derive_price_bps(
-                        pair.ticker_a, pair.side_a
-                    )
+                    derived_bps = self._derive_price_bps(pair.ticker_a, pair.side_a)
                     if derived_bps:
                         pa_bps, qa_fp100 = derived_bps
                 if pb is None:
                     derived = self._derive_price(pair.ticker_b, pair.side_b)
                     if derived:
                         pb, qb = derived
-                    derived_bps = self._derive_price_bps(
-                        pair.ticker_b, pair.side_b
-                    )
+                    derived_bps = self._derive_price_bps(pair.ticker_b, pair.side_b)
                     if derived_bps:
                         pb_bps, qb_fp100 = derived_bps
                 if pa is not None:
@@ -249,21 +235,20 @@ class ArbitrageScanner:
                 if pa is not None and pb is not None:
                     update["raw_edge"] = 100 - pa - pb
                     # fee_edge historically returns float cents; derive from bps.
-                    update["fee_edge"] = fee_adjusted_edge_bps(
-                        pa * ONE_CENT_BPS, pb * ONE_CENT_BPS, rate=pair.fee_rate
-                    ) / ONE_CENT_BPS
+                    update["fee_edge"] = (
+                        fee_adjusted_edge_bps(
+                            pa * ONE_CENT_BPS, pb * ONE_CENT_BPS, rate=pair.fee_rate
+                        )
+                        / ONE_CENT_BPS
+                    )
                     update["tradeable_qty"] = min(qa, qb)
                 if pa_bps is not None and pb_bps is not None:
-                    update["raw_edge_bps"] = (
-                        ONE_DOLLAR_BPS - pa_bps - pb_bps
-                    )
+                    update["raw_edge_bps"] = ONE_DOLLAR_BPS - pa_bps - pb_bps
                     update["fee_edge_bps"] = fee_adjusted_edge_bps(
                         pa_bps, pb_bps, rate=pair.fee_rate
                     )
                     update["tradeable_qty_fp100"] = min(qa_fp100, qb_fp100)
-                self._all_snapshots[pair.event_ticker] = existing.model_copy(
-                    update=update
-                )
+                self._all_snapshots[pair.event_ticker] = existing.model_copy(update=update)
             return
 
         book_a = self._books.get_book(pair.ticker_a)

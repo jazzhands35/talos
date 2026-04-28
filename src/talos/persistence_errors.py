@@ -5,6 +5,7 @@ _persist_games callback raises this, engine.add_pairs_from_selection
 catches it to trigger rollback, and TreeScreen.commit catches it again
 to surface a clear toast and preserve staged_changes for retry.
 """
+
 from __future__ import annotations
 
 

@@ -55,9 +55,7 @@ class SettlementCache:
 
     def latest_settled_time(self) -> str | None:
         """Return the most recent settled_time in cache, or None if empty."""
-        row = self._db.execute(
-            "SELECT MAX(settled_time) FROM settlement_cache"
-        ).fetchone()
+        row = self._db.execute("SELECT MAX(settled_time) FROM settlement_cache").fetchone()
         return row[0] if row and row[0] else None
 
     def upsert(
@@ -120,9 +118,7 @@ class SettlementCache:
 
     def all_settlements(self) -> list[dict[str, Any]]:
         """Return all cached settlements as dicts."""
-        cur = self._db.execute(
-            "SELECT * FROM settlement_cache ORDER BY settled_time DESC"
-        )
+        cur = self._db.execute("SELECT * FROM settlement_cache ORDER BY settled_time DESC")
         cols = [desc[0] for desc in cur.description]
         return [dict(zip(cols, row, strict=True)) for row in cur.fetchall()]
 

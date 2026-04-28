@@ -223,9 +223,7 @@ class TestBannerRendering:
             # Fake out the elapsed timer: stamp a point >30s in the past.
             import time as _time
 
-            banner._stale_observed_at = _time.monotonic() - (
-                STALE_WARNING_TIMEOUT_SECONDS + 1
-            )
+            banner._stale_observed_at = _time.monotonic() - (STALE_WARNING_TIMEOUT_SECONDS + 1)
             # Re-render without re-stamping (stale flag still True).
             # refresh_state will see stale=True and keep the existing timestamp.
             banner.refresh_state()
@@ -267,9 +265,7 @@ class TestBannerActions:
         pair = _make_pair()
         engine = _make_engine_mock()
 
-        reconcile_mock = AsyncMock(
-            return_value=ReconcileResult(outcome=ReconcileOutcome.OK)
-        )
+        reconcile_mock = AsyncMock(return_value=ReconcileResult(outcome=ReconcileOutcome.OK))
         # Patch the bound method on this ledger instance only.
         ledger.reconcile_from_fills = reconcile_mock  # type: ignore[method-assign]
 
@@ -294,9 +290,7 @@ class TestBannerActions:
         pair = _make_pair()
         engine = _make_engine_mock()
 
-        reconcile_mock = AsyncMock(
-            return_value=ReconcileResult(outcome=ReconcileOutcome.OK)
-        )
+        reconcile_mock = AsyncMock(return_value=ReconcileResult(outcome=ReconcileOutcome.OK))
         ledger.reconcile_from_fills = reconcile_mock  # type: ignore[method-assign]
 
         async with _BannerHost(pair, ledger, engine).run_test() as pilot:
@@ -304,9 +298,7 @@ class TestBannerActions:
             # Force the timeout branch.
             import time as _time
 
-            banner._stale_observed_at = _time.monotonic() - (
-                STALE_WARNING_TIMEOUT_SECONDS + 1
-            )
+            banner._stale_observed_at = _time.monotonic() - (STALE_WARNING_TIMEOUT_SECONDS + 1)
             banner.refresh_state()
             await pilot.pause()
             assert banner.current_mode == "stale_warning"

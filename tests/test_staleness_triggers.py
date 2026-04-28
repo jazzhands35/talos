@@ -8,6 +8,7 @@ persisted state leaves both False.
 Also exercises F22 zero-state v1 migration — loading a v1 envelope with
 every numeric field at zero must NOT set ``legacy_migration_pending``.
 """
+
 from __future__ import annotations
 
 import pytest
@@ -15,6 +16,7 @@ import pytest
 from talos.position_ledger import PositionLedger
 
 # ── v2 envelope helper ───────────────────────────────────────────────
+
 
 def _v2_envelope(**overrides: object) -> dict[str, object]:
     """Build a zero-state v2 envelope with optional field overrides."""
@@ -166,6 +168,7 @@ class TestOnlyRestingClearedByOrdersSync:
 
 
 # ── F22 zero-state v1 migration ─────────────────────────────────────
+
 
 class TestF22ZeroStateV1Migration:
     def test_all_zero_v1_does_not_set_legacy_pending(self) -> None:

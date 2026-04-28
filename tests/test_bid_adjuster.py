@@ -232,7 +232,6 @@ class TestAsyncExecution:
         assert ledger.resting_order_id(Side.B) == "ord-b"
         assert ledger.resting_price(Side.B) == 47
 
-
     @pytest.mark.asyncio
     async def test_amend_preserves_ws_recorded_fills(self):
         """Post-2026-04-26 (CLE-TOR fix): the amend path no longer reads fills
@@ -277,7 +276,7 @@ class TestAsyncExecution:
             fees_bps=300,
         )
         assert ledger.filled_count(Side.B) == 17  # 15 historical + 2 WS
-        assert ledger.resting_count(Side.B) == 3   # 5 - 2 filled-from-resting
+        assert ledger.resting_count(Side.B) == 3  # 5 - 2 filled-from-resting
 
         # Amend response: old_order has 17 fills (pre-amend snapshot), new
         # order has 17 fills + 3 remaining at new price 48. The amend path
@@ -305,8 +304,11 @@ class TestYesNoPairAdjuster:
     def test_add_event_same_ticker_no_collision(self):
         books = FakeBookManager({})
         pair = ArbPair(
-            event_ticker="MKT-1", ticker_a="MKT-1", ticker_b="MKT-1",
-            side_a="yes", side_b="no",
+            event_ticker="MKT-1",
+            ticker_a="MKT-1",
+            ticker_b="MKT-1",
+            side_a="yes",
+            side_b="no",
         )
         adj = BidAdjuster(books, [pair])
         result_a = adj.resolve_pair("MKT-1", order_side="yes")
@@ -339,8 +341,11 @@ class TestYesNoPairAdjuster:
         """resolve_event works for same-ticker pairs."""
         books = FakeBookManager({})
         pair = ArbPair(
-            event_ticker="MKT-1", ticker_a="MKT-1", ticker_b="MKT-1",
-            side_a="yes", side_b="no",
+            event_ticker="MKT-1",
+            ticker_a="MKT-1",
+            ticker_b="MKT-1",
+            side_a="yes",
+            side_b="no",
         )
         adj = BidAdjuster(books, [pair])
         assert adj.resolve_event("MKT-1") == "MKT-1"
@@ -349,8 +354,11 @@ class TestYesNoPairAdjuster:
         """remove_event cleans up all entries for same-ticker pairs."""
         books = FakeBookManager({})
         pair = ArbPair(
-            event_ticker="MKT-1", ticker_a="MKT-1", ticker_b="MKT-1",
-            side_a="yes", side_b="no",
+            event_ticker="MKT-1",
+            ticker_a="MKT-1",
+            ticker_b="MKT-1",
+            side_a="yes",
+            side_b="no",
         )
         adj = BidAdjuster(books, [pair])
         adj.remove_event("MKT-1")
@@ -429,9 +437,7 @@ class TestPostCancelSafetyDripCap:
         ledger = PositionLedger(event_ticker="EVT", unit_size=5)
 
         # 2 contracts > drip cap of 1 → blocked even though within unit_size of 5.
-        ok, reason = adjuster._check_post_cancel_safety(
-            ledger, Side.A, new_count=2, new_price=50
-        )
+        ok, reason = adjuster._check_post_cancel_safety(ledger, Side.A, new_count=2, new_price=50)
         assert ok is False
         assert "drip cap" in reason
 
@@ -443,8 +449,6 @@ class TestPostCancelSafetyDripCap:
 
         # 2 contracts is within unit cap of 5 → first check passes.
         # Either ok=True or ok=False with a profitability reason (NOT a unit/cap reason).
-        ok, reason = adjuster._check_post_cancel_safety(
-            ledger, Side.A, new_count=2, new_price=50
-        )
+        ok, reason = adjuster._check_post_cancel_safety(ledger, Side.A, new_count=2, new_price=50)
         if not ok:
             assert "unit" not in reason and "cap" not in reason

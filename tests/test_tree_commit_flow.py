@@ -548,10 +548,7 @@ async def test_commit_set_deliberately_unticked_failure_preserves_staging(
     assert not screen.staged_changes.is_empty()
     assert screen.staged_changes.to_set_unticked == ["K"]
     # User must see a retry-instructive toast.
-    assert any(
-        "press 'c' again" in m or "re-commit" in m
-        for m, _ in app_stub.notifications
-    )
+    assert any("press 'c' again" in m or "re-commit" in m for m, _ in app_stub.notifications)
 
 
 @pytest.mark.asyncio
@@ -595,10 +592,7 @@ async def test_commit_clear_deliberately_unticked_failure_preserves_staging(
     assert completed is False
     assert not screen.staged_changes.is_empty()
     assert screen.staged_changes.to_clear_unticked == ["K"]
-    assert any(
-        "press 'c' again" in m or "re-commit" in m
-        for m, _ in app_stub.notifications
-    )
+    assert any("press 'c' again" in m or "re-commit" in m for m, _ in app_stub.notifications)
 
 
 @pytest.mark.asyncio
@@ -781,6 +775,7 @@ async def test_commit_triggers_refresh_volumes_on_added_pairs():
 
     # Yield control so the create_task() scheduled refresh runs.
     import asyncio as _asyncio
+
     await _asyncio.sleep(0)
 
     engine.refresh_volumes.assert_awaited()
@@ -793,14 +788,16 @@ async def test_commit_does_not_trigger_refresh_when_no_adds():
     extra refresh just burns rate-limit budget."""
     engine = _FakeEngine()
     engine.refresh_volumes = AsyncMock(return_value=None)
-    engine.remove_pairs_from_selection = AsyncMock(return_value=[
-        RemoveOutcome(
-            pair_ticker="K-1",
-            kalshi_event_ticker="K",
-            status="removed",
-            reason="clean",
-        ),
-    ])
+    engine.remove_pairs_from_selection = AsyncMock(
+        return_value=[
+            RemoveOutcome(
+                pair_ticker="K-1",
+                kalshi_event_ticker="K",
+                status="removed",
+                reason="clean",
+            ),
+        ]
+    )
     md = _FakeMetadata()
     screen = _make_screen(engine, md)
     screen.staged_changes = StagedChanges(
@@ -811,6 +808,7 @@ async def test_commit_does_not_trigger_refresh_when_no_adds():
     completed = await screen.commit()
     assert completed is True
     import asyncio as _asyncio
+
     await _asyncio.sleep(0)
 
     engine.refresh_volumes.assert_not_awaited()

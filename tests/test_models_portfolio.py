@@ -378,10 +378,12 @@ class TestPortfolioFieldInvariants:
         ],
     )
     def test_balance_bps_from_wire(self, wire_dollars: str, bps: int) -> None:
-        b = Balance.model_validate({
-            "balance_dollars": wire_dollars,
-            "portfolio_value_dollars": wire_dollars,
-        })
+        b = Balance.model_validate(
+            {
+                "balance_dollars": wire_dollars,
+                "portfolio_value_dollars": wire_dollars,
+            }
+        )
         assert b.balance_bps == bps
 
     @pytest.mark.parametrize(
@@ -392,13 +394,13 @@ class TestPortfolioFieldInvariants:
             ("100.00", 1_000_000),
         ],
     )
-    def test_position_total_traded_bps_from_wire(
-        self, wire_dollars: str, bps: int
-    ) -> None:
-        p = Position.model_validate({
-            "ticker": "MKT-1",
-            "total_traded_dollars": wire_dollars,
-        })
+    def test_position_total_traded_bps_from_wire(self, wire_dollars: str, bps: int) -> None:
+        p = Position.model_validate(
+            {
+                "ticker": "MKT-1",
+                "total_traded_dollars": wire_dollars,
+            }
+        )
         assert p.total_traded_bps == bps
 
     @pytest.mark.parametrize(
@@ -409,22 +411,20 @@ class TestPortfolioFieldInvariants:
             ("100.00", 1_000_000),
         ],
     )
-    def test_event_position_total_cost_bps_from_wire(
-        self, wire_dollars: str, bps: int
-    ) -> None:
-        ep = EventPosition.model_validate({
-            "event_ticker": "EVT-1",
-            "total_cost_dollars": wire_dollars,
-        })
+    def test_event_position_total_cost_bps_from_wire(self, wire_dollars: str, bps: int) -> None:
+        ep = EventPosition.model_validate(
+            {
+                "event_ticker": "EVT-1",
+                "total_cost_dollars": wire_dollars,
+            }
+        )
         assert ep.total_cost_bps == bps
 
     @pytest.mark.parametrize(
         "revenue_cents",
         [1, 53, 500, 10_000],
     )
-    def test_settlement_revenue_bps_equals_cents_times_100(
-        self, revenue_cents: int
-    ) -> None:
+    def test_settlement_revenue_bps_equals_cents_times_100(self, revenue_cents: int) -> None:
         """revenue is already cents on the wire — revenue_bps is cents * 100."""
         s = Settlement.model_validate({"ticker": "MKT-1", "revenue": revenue_cents})
         assert s.revenue_bps == revenue_cents * 100
@@ -436,14 +436,16 @@ class TestPortfolioAggregateSubBpsPrecision:
     """
 
     def test_event_position_accepts_sub_bps_aggregate_payload(self) -> None:
-        ep = EventPosition.model_validate({
-            "event_ticker": "KXTRUMPSAY-26APR27",
-            "event_exposure_dollars": "20.168040",
-            "fees_paid_dollars": "0.058000",
-            "realized_pnl_dollars": "2.636040",
-            "total_cost_dollars": "97.532000",
-            "total_cost_shares_fp": "191.59",
-        })
+        ep = EventPosition.model_validate(
+            {
+                "event_ticker": "KXTRUMPSAY-26APR27",
+                "event_exposure_dollars": "20.168040",
+                "fees_paid_dollars": "0.058000",
+                "realized_pnl_dollars": "2.636040",
+                "total_cost_dollars": "97.532000",
+                "total_cost_shares_fp": "191.59",
+            }
+        )
         # Half-even rounds: 201680.4 → 201680 ; 26360.4 → 26360.
         assert ep.event_exposure_bps == 201_680
         assert ep.realized_pnl_bps == 26_360
@@ -451,23 +453,27 @@ class TestPortfolioAggregateSubBpsPrecision:
         assert ep.total_cost_bps == 975_320
 
     def test_position_accepts_sub_bps_aggregate_payload(self) -> None:
-        p = Position.model_validate({
-            "ticker": "KXTRUMPSAY-26APR27-YES",
-            "position_fp": "100.00",
-            "total_traded_dollars": "15.432140",
-            "market_exposure_dollars": "0.500050",
-            "realized_pnl_dollars": "1.234560",
-            "fees_paid_dollars": "0.012340",
-        })
+        p = Position.model_validate(
+            {
+                "ticker": "KXTRUMPSAY-26APR27-YES",
+                "position_fp": "100.00",
+                "total_traded_dollars": "15.432140",
+                "market_exposure_dollars": "0.500050",
+                "realized_pnl_dollars": "1.234560",
+                "fees_paid_dollars": "0.012340",
+            }
+        )
         assert p.total_traded_bps == 154_321
         assert p.market_exposure_bps == 5_000  # half-even
         assert p.realized_pnl_bps == 12_346
         assert p.fees_paid_bps == 123
 
     def test_balance_accepts_sub_bps_payload(self) -> None:
-        b = Balance.model_validate({
-            "balance_dollars": "1234.567890",
-            "portfolio_value_dollars": "250.000050",
-        })
+        b = Balance.model_validate(
+            {
+                "balance_dollars": "1234.567890",
+                "portfolio_value_dollars": "250.000050",
+            }
+        )
         assert b.balance_bps == 12_345_679
         assert b.portfolio_value_bps == 2_500_000

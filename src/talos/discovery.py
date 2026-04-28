@@ -121,9 +121,7 @@ class DiscoveryService:
         # tree polling cap (~60s) used to expire silently when Kalshi rate-
         # limited the bulk fetch into a retry. With auto-retry + this
         # callback, a recovery 5 minutes later still re-renders the tree.
-        self._counts_populated_listeners: list[
-            Callable[[], None]
-        ] = []
+        self._counts_populated_listeners: list[Callable[[], None]] = []
 
     # ── Bootstrap ────────────────────────────────────────────────────
 
@@ -252,9 +250,7 @@ class DiscoveryService:
             attempts=len(attempts),
         )
 
-    def add_counts_populated_listener(
-        self, listener: Callable[[], None]
-    ) -> None:
+    def add_counts_populated_listener(self, listener: Callable[[], None]) -> None:
         """Register a callback to fire after the bulk count fetch
         successfully populates event_count on every series. Safe to call
         before bootstrap. If the fetch already succeeded by the time the
@@ -495,9 +491,7 @@ class DiscoveryService:
         # active market when the event-level value is missing, so downstream
         # consumers (SchedulePopup, safety gates) see a coherent timing for
         # the event as a whole.
-        close_dt = _parse_iso(raw.get("close_time")) or _first_market_time(
-            markets, "close_time"
-        )
+        close_dt = _parse_iso(raw.get("close_time")) or _first_market_time(markets, "close_time")
         exp_dt = _parse_iso(raw.get("expected_expiration_time")) or _first_market_time(
             markets, "expected_expiration_time"
         )

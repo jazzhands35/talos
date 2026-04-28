@@ -240,11 +240,17 @@ class TestSettlementScreenRender:
 
         settlements = [
             _make_settlement(
-                "MKT-A", "EVT-TEST", 1000, 380,
+                "MKT-A",
+                "EVT-TEST",
+                1000,
+                380,
                 settled_time=_today_str(),
             ),
             _make_settlement(
-                "MKT-B", "EVT-TEST", 0, 550,
+                "MKT-B",
+                "EVT-TEST",
+                0,
+                550,
                 market_result="yes",
                 settled_time=_today_str(),
             ),
