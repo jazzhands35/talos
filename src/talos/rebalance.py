@@ -12,10 +12,12 @@ from typing import TYPE_CHECKING
 
 import structlog
 
+from talos.drip import DripConfig
 from talos.errors import KalshiAPIError, KalshiRateLimitError
 from talos.fees import max_profitable_price_bps
 from talos.models.proposal import Proposal, ProposalKey, ProposedRebalance
 from talos.position_ledger import PositionLedger, Side
+from talos.strategy import per_side_max_ahead
 from talos.units import ONE_CENT_BPS, ONE_CONTRACT_FP100, bps_to_cents_round
 
 if TYPE_CHECKING:
@@ -239,17 +241,22 @@ def compute_overcommit_reduction(
     pair: ArbPair,
     display_name: str,
     reconciled_targets: dict[str, int] | None = None,
+    *,
+    drip_config: DripConfig | None = None,
 ) -> ProposedRebalance | None:
     """Compute resting reduction for a single-side overcommit with no cross-side imbalance.
 
     This handles the case where committed counts are balanced (delta = 0)
-    but one side violates unit capacity (filled_in_unit + resting > unit_size).
-    Example: Side A has 20 filled + 3 resting = 23, Side B has 3 filled + 20
-    resting = 23. Balanced, but B is overcommitted.
+    but one side violates the strategy's per-side cap (filled_in_unit + resting > cap).
+
+    drip_config: when provided, the per-side cap comes from the DRIP cap
+    (drip_size × max_drips) instead of the standard unit_size derivation.
+    The catch-up exception (max(cap, fill_gap)) still applies — DRIP does
+    not weaken the cross-side gap-closing behavior.
 
     reconciled_targets: optional {side_value → allowed_resting} from the
     reconciliation check. When provided, uses these authoritative targets
-    instead of re-deriving from ledger (which may have a stale fill_gap).
+    instead of re-deriving from ledger.
 
     Returns a reduce-only ProposedRebalance (no catch-up) for the first
     overcommitted side found. After reduction, the resulting cross-side
@@ -260,28 +267,24 @@ def compute_overcommit_reduction(
         resting = ledger.resting_count(side)
         filled_in_unit = filled % ledger.unit_size
 
-        # Use reconciliation-derived target if available (authoritative —
-        # computed from auth_fills which is max of all data sources).
-        # Falls back to ledger-based fill_gap when no reconciled target.
         if reconciled_targets and side.value in reconciled_targets:
             allowed_resting = reconciled_targets[side.value]
         else:
-            # Allow extra resting when it's closing a cross-side fill gap.
-            # Without this, overcommit reduction cancels catch-up resting,
-            # rebalance re-places it, overcommit re-cancels — infinite loop.
             other = Side.B if side == Side.A else Side.A
             fill_gap = max(0, ledger.filled_count(other) - filled)
-            allowed_resting = max(ledger.unit_size - filled_in_unit, fill_gap)
+            allowed_resting = max(
+                per_side_max_ahead(ledger, side, drip_config), fill_gap
+            )
 
         if resting <= allowed_resting:
-            continue  # Not overcommitted (within unit cap or needed for fill gap)
+            continue
 
         target_resting = allowed_resting
         order_id = ledger.resting_order_id(side)
         ticker = pair.ticker_a if side == Side.A else pair.ticker_b
 
         if order_id is None:
-            continue  # No known order to reduce
+            continue
 
         logger.warning(
             "overcommit_reduction",
@@ -293,9 +296,9 @@ def compute_overcommit_reduction(
             from_reconciliation=bool(
                 reconciled_targets and side.value in reconciled_targets
             ),
+            from_drip=drip_config is not None,
         )
 
-        # Resolve the Kalshi order side for the duplicate sweep
         kalshi_side = pair.side_a if side == Side.A else pair.side_b
 
         return ProposedRebalance(

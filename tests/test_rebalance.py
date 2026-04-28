@@ -1265,6 +1265,65 @@ class TestOvercommitReduction:
         result = compute_overcommit_reduction("EVT-1", ledger, pair, "Test")
         assert result is None
 
+    def test_overcommit_reduction_uses_drip_cap_when_config_provided(self) -> None:
+        """DRIP cap (drip_size × max_drips) replaces unit_size-based allowed_resting."""
+        from talos.drip import DripConfig
+
+        pair = _make_pair()
+        ledger = PositionLedger(event_ticker="EVT-1", unit_size=5)
+        # 5 resting on side A, no fills, no cross-side fill gap.
+        ledger.record_resting(Side.A, "ord-a", 5, 50)
+
+        drip_config = DripConfig(drip_size=1, max_drips=1)  # cap = 1
+        proposal = compute_overcommit_reduction(
+            "EVT-1",
+            ledger,
+            pair,
+            "Test",
+            drip_config=drip_config,
+        )
+
+        assert proposal is not None
+        assert proposal.target_resting == 1  # DRIP cap, not unit_size=5
+        assert proposal.current_resting == 5
+
+    def test_overcommit_reduction_falls_back_to_unit_when_no_drip_config(self) -> None:
+        """Without drip_config, unit_size-based cap applies (5 resting = exactly at cap)."""
+        pair = _make_pair()
+        ledger = PositionLedger(event_ticker="EVT-1", unit_size=5)
+        # 5 resting on A with no fills → filled_in_unit=0, allowed=unit_size-0=5.
+        # resting(5) <= allowed(5) → not overcommitted.
+        ledger.record_resting(Side.A, "ord-a", 5, 50)
+
+        proposal = compute_overcommit_reduction("EVT-1", ledger, pair, "Test")
+        assert proposal is None  # within unit cap
+
+    def test_overcommit_reduction_drip_preserves_catchup_exception(self) -> None:
+        """Behind side keeps fill_gap-many resting even when DRIP cap is tighter."""
+        from talos.drip import DripConfig
+
+        pair = _make_pair()
+        ledger = PositionLedger(event_ticker="EVT-1", unit_size=5)
+        # Side A has 3 fills; Side B has 0 fills + 5 resting (catching up).
+        ledger.record_fill(Side.A, 3, 50)
+        ledger.record_resting(Side.B, "ord-b", 5, 50)
+
+        drip_config = DripConfig(drip_size=1, max_drips=1)  # cap = 1
+        proposal = compute_overcommit_reduction(
+            "EVT-1",
+            ledger,
+            pair,
+            "Test",
+            drip_config=drip_config,
+        )
+
+        # fill_gap = max(0, filled_A=3 - filled_B=0) = 3
+        # allowed_resting = max(drip_cap=1, fill_gap=3) = 3
+        # resting_B=5 > 3 → overcommit fires, but target=3 (not 1)
+        assert proposal is not None
+        assert proposal.side == "B"
+        assert proposal.target_resting == 3  # max(drip_cap=1, fill_gap=3)
+
 
 # ── YES/NO side-awareness tests ──────────────────────────────────────
 

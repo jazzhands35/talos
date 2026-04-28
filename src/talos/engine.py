@@ -2751,6 +2751,7 @@ class TradingEngine:
             ledger,
             pair,
             self._display_name(event_ticker),
+            drip_config=self._drip_events.get(event_ticker),
         )
         if overcommit is not None:
             self._log_imbalance_outcome(
@@ -2908,6 +2909,7 @@ class TradingEngine:
                         pair,
                         self._display_name(pair.event_ticker),
                         reconciled_targets=overcommit_targets.get(pair.event_ticker),
+                        drip_config=self._drip_events.get(pair.event_ticker),
                     )
                     if overcommit is not None:
                         self._log_imbalance_outcome(
