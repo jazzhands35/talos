@@ -2586,8 +2586,6 @@ class TradingEngine:
         ``trigger`` labels the origin for the replay timeline.
         """
         evt_ticker = self._adjuster.resolve_event(ticker)
-        if evt_ticker and self.is_drip(evt_ticker):
-            return
         exit_only = self.is_exit_only(evt_ticker) if evt_ticker else False
         proposal = self._adjuster.evaluate_jump(
             ticker, at_top, exit_only=exit_only, side=side, trigger=trigger
@@ -2674,8 +2672,6 @@ class TradingEngine:
         Extracts the per-pair logic from reevaluate_jumps() — same behavior,
         single event scope.
         """
-        if self.is_drip(event_ticker):
-            return
         pending_keys = {p.key for p in self._proposal_queue.pending()}
         has_withdraw = any(
             k.event_ticker == event_ticker and k.kind == "withdraw" for k in pending_keys
@@ -2728,8 +2724,6 @@ class TradingEngine:
         refresh_account every 30s). This scope limitation is intentional —
         the WS path covers safety-critical reactions only.
         """
-        if self.is_drip(event_ticker):
-            return
         try:
             ledger = self._adjuster.get_ledger(event_ticker)
         except KeyError:
@@ -2802,8 +2796,6 @@ class TradingEngine:
         """
         pending_keys = {p.key for p in self._proposal_queue.pending()}
         for pair in self._scanner.pairs:
-            if self.is_drip(pair.event_ticker):
-                continue
             # Skip if a withdraw proposal already covers this event
             has_withdraw = any(
                 k.event_ticker == pair.event_ticker and k.kind == "withdraw" for k in pending_keys
@@ -2886,8 +2878,6 @@ class TradingEngine:
 
         executed_this_cycle: set[str] = set()
         for pair in pairs_ordered:
-            if self.is_drip(pair.event_ticker):
-                continue
             if pair.event_ticker in executed_this_cycle:
                 continue
             if not full_sweep and pair.event_ticker not in dirty:
@@ -3331,7 +3321,7 @@ class TradingEngine:
             event_ticker = pair.event_ticker
 
             # Skip exit-only events
-            if event_ticker in self._exit_only_events or self.is_drip(event_ticker):
+            if event_ticker in self._exit_only_events:
                 continue
 
             # Skip if a proposal already exists for this event
@@ -3540,14 +3530,6 @@ class TradingEngine:
             )
             logger.error("bid_blocked_exit_only", event_ticker=evt_for_bid)
             return
-        if evt_for_bid and self.is_drip(evt_for_bid):
-            label = self._display_name(evt_for_bid)
-            self._notify(
-                f"Bid BLOCKED {label}: DRIP owns this event", "error", toast=True
-            )
-            logger.error("bid_blocked_drip", event_ticker=evt_for_bid)
-            return
-
         # Block on paused markets
         for ticker in (bid.ticker_a, bid.ticker_b):
             if ticker in self._paused_markets:

@@ -2369,6 +2369,34 @@ class TestAutoRebalance:
 
         assert rest.create_order.call_count == 2
 
+    @pytest.mark.asyncio
+    async def test_check_imbalances_runs_on_drip_events(self, monkeypatch) -> None:
+        """Regression: under the insertion-strategy redesign, DRIP events must
+        flow through check_imbalances exactly like non-DRIP events."""
+        import talos.engine as engine_mod
+
+        engine, _rest = _engine_with_pair()
+        engine.enable_drip("EVT-1", DripConfig(drip_size=1, max_drips=1))
+        engine._dirty_events.clear()
+        engine._dirty_events.add("EVT-1")
+
+        # Patch compute_rebalance_proposal at the engine module level
+        # (engine.py imports it directly, so we patch the binding there).
+        called_for: list[str] = []
+        original = engine_mod.compute_rebalance_proposal
+
+        def spy(event_ticker, *args, **kwargs):  # type: ignore[no-untyped-def]
+            called_for.append(event_ticker)
+            return original(event_ticker, *args, **kwargs)
+
+        monkeypatch.setattr(engine_mod, "compute_rebalance_proposal", spy)
+        await engine.check_imbalances()
+
+        assert "EVT-1" in called_for, (
+            "check_imbalances should evaluate DRIP events; "
+            f"only saw: {called_for}"
+        )
+
 
 class TestStalePositionCleanup:
     """Two-strike reconciliation: pairs with zero Kalshi positions but
