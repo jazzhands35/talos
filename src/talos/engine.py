@@ -2440,7 +2440,12 @@ class TradingEngine:
                 filled_in_unit = auth_fills[side] % ledger.unit_size
                 other_side = Side.B if side == Side.A else Side.A
                 fill_gap = max(0, auth_fills[other_side] - auth_fills[side])
-                allowed = max(ledger.unit_size - filled_in_unit, fill_gap)
+                drip_config = self._drip_events.get(pair.event_ticker)
+                if drip_config is not None:
+                    base_allowed = drip_config.max_ahead_per_side
+                else:
+                    base_allowed = ledger.unit_size - filled_in_unit
+                allowed = max(base_allowed, fill_gap)
                 if kalshi_resting[side] > allowed:
                     msg = (
                         f"OVERCOMMIT {name} {sl}: "
