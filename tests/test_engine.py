@@ -1810,6 +1810,56 @@ class TestDripPersistence:
         assert not any("DRIP ON" in t for t in toasts)
 
 
+class TestDripToggleDirty:
+    """enable_drip / disable_drip must mark the event dirty so the standard
+    rebalancer can snap resting orders to the new cap on the next cycle."""
+
+    def test_enable_drip_marks_event_dirty(self) -> None:
+        """enable_drip should add the event to _dirty_events so the next
+        check_imbalances cycle evaluates and snaps to the new cap."""
+        engine, _ = _engine_with_pair()
+        assert "EVT-1" not in engine._dirty_events
+
+        enabled = engine.enable_drip("EVT-1", DripConfig(drip_size=1, max_drips=1))
+        assert enabled is True
+        assert "EVT-1" in engine._dirty_events
+
+    @pytest.mark.asyncio
+    async def test_disable_drip_marks_event_dirty(self) -> None:
+        """disable_drip should add the event to _dirty_events so the next
+        cycle reconciles against the standard cap."""
+        engine, _ = _engine_with_pair()
+        engine.enable_drip("EVT-1", DripConfig(drip_size=1, max_drips=1))
+        engine._dirty_events.discard("EVT-1")  # simulate cycle consumed it
+
+        disabled = await engine.disable_drip("EVT-1")
+        assert disabled is True
+        assert "EVT-1" in engine._dirty_events
+
+    @pytest.mark.asyncio
+    async def test_disable_drip_does_not_cancel_resting_orders(self) -> None:
+        """Under the redesign, disable_drip MUST NOT cancel resting orders.
+        They belong to the standard pipeline, which will reconcile against
+        the (typically larger) standard cap on the next cycle."""
+        engine, _ = _engine_with_pair()
+        engine.enable_drip("EVT-1", DripConfig(drip_size=1, max_drips=1))
+
+        cancel_calls: list[str] = []
+        original = engine.cancel_order_with_verify
+
+        async def spy(order_id: str, pair: object) -> object:
+            cancel_calls.append(order_id)
+            return await original(order_id, pair)  # type: ignore[arg-type]
+
+        engine.cancel_order_with_verify = spy  # type: ignore[method-assign]
+
+        await engine.disable_drip("EVT-1")
+
+        assert cancel_calls == [], (
+            f"disable_drip should not cancel orders, but called: {cancel_calls}"
+        )
+
+
 class TestLifecycleFiltering:
     """Lifecycle notifications should only fire for tracked markets."""
 

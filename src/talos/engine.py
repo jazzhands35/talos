@@ -564,6 +564,9 @@ class TradingEngine:
 
         self._drip_events[event_ticker] = config
         self._drip_controllers.setdefault(event_ticker, DripController(config))
+        # Force the next check_imbalances cycle to evaluate this event so
+        # the standard rebalancer can snap surplus resting down to the new cap.
+        self._dirty_events.add(event_ticker)
         self._enforce_drip_sync(event_ticker)
         logger.info(
             "drip_enabled",
@@ -648,7 +651,7 @@ class TradingEngine:
         return True
 
     async def disable_drip(self, event_ticker: str) -> bool:
-        """Disable DRIP and cancel resting DRIP orders for the event."""
+        """Disable DRIP for the event and mark it dirty for rebalancer reconciliation."""
         if event_ticker not in self._drip_events:
             return False
         self._drip_events.pop(event_ticker, None)
@@ -657,16 +660,11 @@ class TradingEngine:
         self._drip_blip_last_at = {
             key: value for key, value in self._drip_blip_last_at.items() if key[0] != event_ticker
         }
-
-        pair = self.find_pair(event_ticker)
-        if pair is not None:
-            with contextlib.suppress(KeyError):
-                ledger = self._adjuster.get_ledger(event_ticker)
-                for side in (Side.A, Side.B):
-                    order_id = ledger.resting_order_id(side)
-                    if order_id is not None:
-                        await self.cancel_order_with_verify(order_id, pair)
-
+        # Force next cycle to re-evaluate against the standard cap. Do NOT
+        # cancel resting orders — they belong to the standard pipeline now,
+        # which will reconcile via compute_overcommit_reduction (typically a
+        # no-op since unit_size >= drip_cap).
+        self._dirty_events.add(event_ticker)
         logger.info("drip_disabled", event_ticker=event_ticker)
         self._notify(f"DRIP OFF: {self._display_name(event_ticker)}", toast=True)
         return True
