@@ -2933,7 +2933,12 @@ class TradingEngine:
                     # No overcommit — check for mid-unit top-up
                     if not self.is_exit_only(pair.event_ticker):
                         dn = self._display_name(pair.event_ticker)
-                        topup_needs = compute_topup_needs(ledger, pair, snapshot)
+                        topup_needs = compute_topup_needs(
+                            ledger,
+                            pair,
+                            snapshot,
+                            drip_config=self._drip_events.get(pair.event_ticker),
+                        )
                         if not topup_needs:
                             self._log_imbalance_outcome(
                                 pair.event_ticker,

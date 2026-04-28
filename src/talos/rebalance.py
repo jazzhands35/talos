@@ -323,12 +323,16 @@ def compute_topup_needs(
     ledger: PositionLedger,
     pair: ArbPair,
     snapshot: Opportunity | None,
+    *,
+    drip_config: DripConfig | None = None,
 ) -> dict[Side, tuple[int, int]]:
     """Compute top-up needs for mid-unit sides with no resting bids.
 
     Returns dict mapping Side → (qty, price) for each side needing top-up.
     Only fires when committed counts are equal (catch-up handles imbalances).
-    Pure function — no I/O.
+
+    drip_config: when provided, the per-side target comes from the DRIP cap
+    (drip_size × max_drips). Pure function — no I/O.
     """
     if snapshot is None:
         return {}
@@ -357,11 +361,17 @@ def compute_topup_needs(
         if resting > 0:
             continue
 
-        filled_in_unit = filled % ledger.unit_size
-        if filled_in_unit == 0:
+        if drip_config is not None:
+            qty = drip_config.max_ahead_per_side
+        else:
+            filled_in_unit = filled % ledger.unit_size
+            if filled_in_unit == 0:
+                continue
+            qty = ledger.unit_size - filled_in_unit
+
+        if qty <= 0:
             continue
 
-        qty = ledger.unit_size - filled_in_unit
         price = snapshot.no_a if side == Side.A else snapshot.no_b
         if price <= 0:
             continue

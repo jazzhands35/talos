@@ -1472,3 +1472,50 @@ class TestRebalanceCatchupOpenScope:
         # With open-scope: max_profitable_price(18, rate=0) = 81.
         # Without: max_profitable_price(12.5 blended avg, rate=0) = 87 (allowing 86).
         assert proposal.rebalance.catchup_price <= 81
+
+
+# ── DRIP-cap top-up tests ────────────────────────────────────────────
+
+
+def test_topup_needs_uses_drip_cap_when_config_provided() -> None:
+    from talos.drip import DripConfig
+
+    ledger = PositionLedger(event_ticker="EVT", unit_size=5)
+    # 1 fill on each side at 40¢, no resting.
+    # 40+40 = 80¢ combined; fee-adjusted ~83¢ < $1.00 → is_placement_safe passes.
+    ledger.record_fill_from_ws(
+        Side.A, trade_id="ta", count_fp100=100, price_bps=4000, fees_bps=0
+    )
+    ledger.record_fill_from_ws(
+        Side.B, trade_id="tb", count_fp100=100, price_bps=4000, fees_bps=0
+    )
+    pair = ArbPair(
+        event_ticker="EVT",
+        ticker_a="EVT-A",
+        ticker_b="EVT-B",
+        side_a="no",
+        side_b="no",
+        fee_rate=0.07,
+    )
+    opp = Opportunity(
+        event_ticker="EVT",
+        ticker_a="EVT-A",
+        ticker_b="EVT-B",
+        no_a=40,
+        no_b=40,
+        qty_a=100,
+        qty_b=100,
+        raw_edge=20,
+        fee_edge=1.0,
+        tradeable_qty=100,
+        timestamp="2026-04-28T00:00:00Z",
+    )
+
+    drip_config = DripConfig(drip_size=1, max_drips=1)  # cap = 1
+    needs = compute_topup_needs(ledger, pair, opp, drip_config=drip_config)
+
+    # With DRIP cap=1 and 1 already filled per side, top-up qty = 1
+    # (cap is absolute, not "remaining").
+    for side in (Side.A, Side.B):
+        assert side in needs, f"missing top-up for {side}"
+        assert needs[side][0] == 1, f"expected qty=1 for {side}, got {needs[side][0]}"
