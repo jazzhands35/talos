@@ -29,6 +29,12 @@ def _engine_with_scanner(pairs):
     e._log_once = MagicMock()
     e._notify = MagicMock()
     e._display_name = MagicMock(return_value="fake-name")
+    # _flip_exit_only_for_key now also marks engine_state and best-effort
+    # persists; stub the touchpoints so tests using the real method don't
+    # depend on a fully-wired engine.
+    e._game_manager = MagicMock()
+    e._game_manager.get_game.return_value = None
+    e._game_manager.on_change = None
     return e
 
 

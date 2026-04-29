@@ -1306,6 +1306,30 @@ class TestComputeEventStatus:
         status = engine._compute_event_status("EVT-1")
         assert not status.startswith("Jumped")
 
+    def test_exit_only_outranks_drip_in_status(self):
+        """When DRIP and exit-only are both set, status reflects EXIT.
+
+        Regression: `_compute_event_status` previously checked `is_drip` first
+        and returned "DRIP*" even when `_exit_only_events` contained the event,
+        making the exit-only hotkey look like a no-op on DRIP-enabled events.
+        Exit-only is the higher-priority safety state and must win the label.
+        """
+        books = OrderBookManager()
+        scanner = ArbitrageScanner(books)
+        scanner.add_pair("EVT-1", "TK-A", "TK-B")
+        pair = ArbPair(event_ticker="EVT-1", ticker_a="TK-A", ticker_b="TK-B")
+        adjuster = BidAdjuster(books, [pair], unit_size=10)
+        engine = _make_engine(scanner=scanner, adjuster=adjuster)
+
+        # Balanced fills, no resting — would normally be "DRIP seed"
+        engine.adjuster.get_ledger("EVT-1")
+        assert engine.enable_drip("EVT-1", DripConfig()) is True
+        assert engine._compute_event_status("EVT-1") == "DRIP seed"
+
+        # Toggle exit-only on; status must flip to EXIT, not stay on DRIP
+        assert engine.toggle_exit_only("EVT-1") is True
+        assert engine._compute_event_status("EVT-1") == "EXIT"
+
 
 # ── Stale book recovery ────────────────────────────────────────────
 
@@ -1661,6 +1685,109 @@ class TestOnFill:
             post_position=-3,
         )
         engine._on_fill(msg)  # Should not raise
+
+
+class TestExitOnlyPersistence:
+    """Exit-only must survive restart via engine_state on the persisted pair.
+
+    Each path that flips an event into exit-only (manual hotkey, Shift-E,
+    auto-trigger from sibling cascade or legacy GSR check, market_closed
+    error responses, settlement-determined event) must mark engine_state
+    so _apply_persisted_engine_state restores the flag on next launch.
+    """
+
+    def _wire_persistence(
+        self, engine: TradingEngine, event_ticker: str
+    ) -> tuple[ArbPair, MagicMock]:
+        """Replace the GameManager mock so engine_state mutations and persist
+        callbacks are observable.
+
+        Returns (pair, on_change_mock). The pair carries the live engine_state
+        field; the mock records each persist call.
+        """
+        pair = ArbPair(event_ticker=event_ticker, ticker_a="TK-A", ticker_b="TK-B")
+        on_change = MagicMock()
+        gm = cast(Any, engine._game_manager)
+        gm.get_game.return_value = pair
+        gm.on_change = on_change
+        return pair, on_change
+
+    def test_toggle_on_persists_engine_state(self):
+        engine, _ = _engine_with_pair()
+        pair, on_change = self._wire_persistence(engine, "EVT-1")
+
+        assert engine.toggle_exit_only("EVT-1") is True
+        assert pair.engine_state == "exit_only"
+        on_change.assert_called_once()
+
+    def test_toggle_off_persists_engine_state(self):
+        engine, _ = _engine_with_pair()
+        pair, on_change = self._wire_persistence(engine, "EVT-1")
+
+        engine.toggle_exit_only("EVT-1")  # ON
+        on_change.reset_mock()
+
+        assert engine.toggle_exit_only("EVT-1") is False
+        assert pair.engine_state == "active"
+        on_change.assert_called_once()
+
+    def test_toggle_off_preserves_winding_down_state(self):
+        """A pair mid-wind-down owns its engine_state; toggle off must not
+        regress it to "active" and erase the wind-down marker on disk.
+        """
+        engine, _ = _engine_with_pair()
+        pair, _on_change = self._wire_persistence(engine, "EVT-1")
+
+        # Simulate the wind-down recipe: in _exit_only_events AND _winding_down
+        engine._exit_only_events.add("EVT-1")
+        engine._winding_down.add("EVT-1")
+        pair.engine_state = "winding_down"
+
+        engine.toggle_exit_only("EVT-1")  # OFF — but pair is winding-down
+        assert pair.engine_state == "winding_down"
+
+    @pytest.mark.asyncio
+    async def test_exit_all_persists_each_pair(self):
+        """exit_all marks every flipped pair and triggers a single persist."""
+        engine, _ = _engine_with_pair()
+        pair, on_change = self._wire_persistence(engine, "EVT-1")
+
+        await engine.exit_all()
+        assert pair.engine_state == "exit_only"
+        # Single batch persist at end of loop
+        on_change.assert_called_once()
+
+    def test_apply_persisted_engine_state_restores_exit_only(self):
+        """After restart, a pair with engine_state="exit_only" re-enters
+        _exit_only_events on _apply_persisted_engine_state — the read side
+        of the persistence contract.
+        """
+        engine, _ = _engine_with_pair()
+        pair = ArbPair(
+            event_ticker="EVT-1",
+            ticker_a="TK-A",
+            ticker_b="TK-B",
+            engine_state="exit_only",
+        )
+        engine._apply_persisted_engine_state(pair)
+        assert "EVT-1" in engine._exit_only_events
+
+    def test_persist_failure_keeps_in_memory_flag(self):
+        """A PersistenceError during exit-only ON must NOT clear the flag.
+
+        Exit-only is a safety state. Logging a durability gap and keeping the
+        flag set is strictly safer than rolling back because we couldn't write
+        JSON.
+        """
+        from talos.persistence_errors import PersistenceError
+
+        engine, _ = _engine_with_pair()
+        pair, on_change = self._wire_persistence(engine, "EVT-1")
+        on_change.side_effect = PersistenceError("disk full")
+
+        engine.toggle_exit_only("EVT-1")  # ON — persist will raise inside
+        assert "EVT-1" in engine._exit_only_events
+        assert pair.engine_state == "exit_only"
 
 
 class TestDripPersistence:

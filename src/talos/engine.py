@@ -670,12 +670,14 @@ class TradingEngine:
         """Toggle exit-only mode for an event. Returns new state."""
         if event_ticker in self._exit_only_events:
             self._exit_only_events.discard(event_ticker)
+            self._persist_exit_only_transition(event_ticker, on=False)
             name = self._display_name(event_ticker)
             self._notify(f"Exit-only OFF: {name}")
             logger.info("exit_only_off", event_ticker=event_ticker)
             return False
         else:
             self._exit_only_events.add(event_ticker)
+            self._persist_exit_only_transition(event_ticker, on=True)
             name = self._display_name(event_ticker)
             self._notify(f"Exit-only ON: {name}", "warning")
             logger.info("exit_only_on", event_ticker=event_ticker)
@@ -689,10 +691,12 @@ class TradingEngine:
             if pair.event_ticker not in self._exit_only_events:
                 # Set directly instead of toggle_exit_only to avoid per-game toasts
                 self._exit_only_events.add(pair.event_ticker)
+                self._mark_engine_state(pair.event_ticker, "exit_only")
                 self._enforce_exit_only_sync(pair.event_ticker)
                 await self._enforce_exit_only(pair.event_ticker)
                 count += 1
         if count > 0:
+            self._best_effort_persist(log_context=f"exit_all:{count}")
             logger.info("exit_all", count=count)
             self._notify(f"Exit-only ON for {count} game(s)", "warning", toast=True)
         else:
@@ -975,12 +979,14 @@ class TradingEngine:
             if pair.event_ticker in self._exit_only_events:
                 continue
             self._exit_only_events.add(pair.event_ticker)
+            self._mark_engine_state(pair.event_ticker, "exit_only")
             self._game_started_events.add(pair.event_ticker)
             flipped.append(pair.event_ticker)
 
         if not flipped:
             return
 
+        self._best_effort_persist(log_context=f"flip_exit_only:{reason}")
         name = self._display_name(kalshi_event_ticker)
         self._notify(
             f"EXIT-ONLY: {name} — {reason}",
@@ -1014,6 +1020,7 @@ class TradingEngine:
 
         exit_minutes = self._auto_config.exit_only_minutes
         now = datetime.now(UTC)
+        flipped_any = False
 
         for pair in self._scanner.pairs:
             event_ticker = pair.event_ticker
@@ -1026,8 +1033,10 @@ class TradingEngine:
 
                 if gs.state == "live":
                     self._exit_only_events.add(event_ticker)
+                    self._mark_engine_state(event_ticker, "exit_only")
                     self._game_started_events.add(event_ticker)
                     self._enforce_exit_only_sync(event_ticker)
+                    flipped_any = True
                     name = self._display_name(event_ticker)
                     self._notify(
                         f"GAME LIVE: {name} — cancelling all resting",
@@ -1042,8 +1051,10 @@ class TradingEngine:
                     )
                 elif gs.state == "post":
                     self._exit_only_events.add(event_ticker)
+                    self._mark_engine_state(event_ticker, "exit_only")
                     self._game_started_events.add(event_ticker)
                     self._enforce_exit_only_sync(event_ticker)
+                    flipped_any = True
                     name = self._display_name(event_ticker)
                     self._notify(
                         f"GAME FINAL: {name} — cancelling all resting",
@@ -1062,7 +1073,9 @@ class TradingEngine:
                     and (gs.scheduled_start - now).total_seconds() < exit_minutes * 60
                 ):
                     self._exit_only_events.add(event_ticker)
+                    self._mark_engine_state(event_ticker, "exit_only")
                     self._enforce_exit_only_sync(event_ticker)
+                    flipped_any = True
                     name = self._display_name(event_ticker)
                     mins = (gs.scheduled_start - now).total_seconds() / 60
                     self._notify(
@@ -1075,6 +1088,9 @@ class TradingEngine:
                         reason="approaching_start",
                         minutes_to_start=mins,
                     )
+
+        if flipped_any:
+            self._best_effort_persist(log_context="exit_only_legacy_auto")
 
     async def _enforce_all_exit_only(self) -> None:
         """Enforce exit-only rules on all flagged events. Called from refresh cycle."""
@@ -2068,6 +2084,7 @@ class TradingEngine:
             # Set exit-only immediately — market is no longer tradeable
             if event_ticker and event_ticker not in self._exit_only_events:
                 self._exit_only_events.add(event_ticker)
+                self._persist_exit_only_transition(event_ticker, on=True)
                 self._enforce_exit_only_sync(event_ticker)
 
             # Track which markets have been determined for event_outcome
@@ -3613,6 +3630,7 @@ class TradingEngine:
             )
             if is_market_closed and event_ticker and event_ticker not in self._exit_only_events:
                 self._exit_only_events.add(event_ticker)
+                self._persist_exit_only_transition(event_ticker, on=True)
                 self._enforce_exit_only_sync(event_ticker)
                 name = self._display_name(event_ticker)
                 self._notify(
@@ -4375,6 +4393,40 @@ class TradingEngine:
         if pair is not None:
             pair.engine_state = state
 
+    def _best_effort_persist(self, *, log_context: str) -> None:
+        """Flush engine_state changes to disk, swallowing PersistenceError.
+
+        Differs from the wind-down path's force_during_suppress + rollback
+        recipe: this is a normal-cycle transition (manual toggle, auto-trigger,
+        market_closed). On persist failure we keep the in-memory flag and log
+        — undoing the flag because we couldn't write JSON would be worse than
+        the durability gap, since exit-only is the safer state.
+        """
+        from talos.persistence_errors import PersistenceError
+
+        try:
+            self._persist_active_games()
+        except PersistenceError as exc:
+            logger.warning(
+                "engine_state_persist_failed",
+                context=log_context,
+                error=str(exc),
+            )
+
+    def _persist_exit_only_transition(self, event_ticker: str, *, on: bool) -> None:
+        """Mark a single event's engine_state and flush to disk.
+
+        Skips the "active" transition when the pair is mid-wind-down; that
+        path owns its own engine_state via the wind-down recipe.
+        """
+        if on:
+            self._mark_engine_state(event_ticker, "exit_only")
+        elif event_ticker not in self._winding_down:
+            self._mark_engine_state(event_ticker, "active")
+        self._best_effort_persist(
+            log_context=f"exit_only_{'on' if on else 'off'}:{event_ticker}",
+        )
+
     def _apply_persisted_engine_state(self, pair: ArbPair) -> None:
         """Apply a pair's persisted engine_state after restore.
 
@@ -4556,6 +4608,7 @@ class TradingEngine:
                     evt = envelope.adjustment.event_ticker
                     if evt not in self._exit_only_events:
                         self._exit_only_events.add(evt)
+                        self._persist_exit_only_transition(evt, on=True)
                         self._enforce_exit_only_sync(evt)
                         name = self._display_name(evt)
                         self._notify(
@@ -4788,6 +4841,7 @@ class TradingEngine:
                 evt = qi.event_ticker
                 if evt not in self._exit_only_events:
                     self._exit_only_events.add(evt)
+                    self._persist_exit_only_transition(evt, on=True)
                     self._enforce_exit_only_sync(evt)
                     self._notify(f"Exit-only ON: {name} (market closed)", "warning")
             else:
@@ -5125,6 +5179,23 @@ class TradingEngine:
         total_a = filled_a + resting_a
         total_b = filled_b + resting_b
 
+        # Exit-only status takes priority — once toggled, DRIP is functionally
+        # inert (orders cancelled, BLIP/top-up gated), so the status must
+        # reflect EXIT even when the DRIP config is still attached.
+        if self.is_exit_only(event_ticker):
+            if filled_a == filled_b and resting_a == 0 and resting_b == 0:
+                return "EXIT"
+            if resting_a > 0 or resting_b > 0:
+                if filled_a != filled_b:
+                    diff = abs(filled_a - filled_b)
+                    behind = "B" if filled_a > filled_b else "A"
+                    return f"EXIT -{diff} {behind}"
+                return "EXITING"
+            # Imbalanced, no resting — waiting for behind side to fill
+            diff = abs(filled_a - filled_b)
+            behind = "B" if filled_a > filled_b else "A"
+            return f"EXIT -{diff} {behind}"
+
         if self.is_drip(event_ticker):
             pair = self.find_pair(event_ticker)
             if pair is None:
@@ -5142,21 +5213,6 @@ class TradingEngine:
             if resting_a > 0 or resting_b > 0:
                 return "DRIP"
             return "DRIP seed"
-
-        # Exit-only status takes priority
-        if self.is_exit_only(event_ticker):
-            if filled_a == filled_b and resting_a == 0 and resting_b == 0:
-                return "EXIT"
-            if resting_a > 0 or resting_b > 0:
-                if filled_a != filled_b:
-                    diff = abs(filled_a - filled_b)
-                    behind = "B" if filled_a > filled_b else "A"
-                    return f"EXIT -{diff} {behind}"
-                return "EXITING"
-            # Imbalanced, no resting — waiting for behind side to fill
-            diff = abs(filled_a - filled_b)
-            behind = "B" if filled_a > filled_b else "A"
-            return f"EXIT -{diff} {behind}"
 
         if total_a == 0 and total_b == 0:
             # No position — show why proposer isn't suggesting (fall through)
