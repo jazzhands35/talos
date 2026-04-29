@@ -110,18 +110,33 @@ def peek_seq(conn: sqlite3.Connection, *, year: int, month: int) -> int:
 def bump_seq(conn: sqlite3.Connection, *, year: int, month: int) -> int:
     """Atomically increment and return the next seq for the given month.
 
-    Raises ``InvalidTalosIdError`` if the seq would exceed 999.
+    Raises ``InvalidTalosIdError`` if the resulting seq would exceed 999.
     """
     key = _year_month_key(year, month)
-    cur = peek_seq(conn, year=year, month=month)
-    nxt = cur + 1
+    # Single-statement upsert: insert last_seq=1 for new month, otherwise
+    # increment. SQLite serializes writes per database, so this is atomic
+    # against any other writer on the same connection or db file.
+    conn.execute(
+        """
+        INSERT INTO talos_id_counter(year_month, last_seq) VALUES (?, 1)
+        ON CONFLICT(year_month) DO UPDATE SET last_seq = last_seq + 1
+        """,
+        (key,),
+    )
+    row = conn.execute(
+        "SELECT last_seq FROM talos_id_counter WHERE year_month = ?",
+        (key,),
+    ).fetchone()
+    nxt = int(row[0])
     if nxt > 999:
+        # Roll back the increment so retries see the pre-overflow state.
+        conn.execute(
+            "UPDATE talos_id_counter SET last_seq = ? WHERE year_month = ?",
+            (nxt - 1, key),
+        )
+        conn.commit()
         raise InvalidTalosIdError(
             f"seq exhausted for {year:04d}-{month:02d} (>999 adds)"
         )
-    conn.execute(
-        "INSERT OR REPLACE INTO talos_id_counter(year_month, last_seq) VALUES (?, ?)",
-        (key, nxt),
-    )
     conn.commit()
     return nxt
