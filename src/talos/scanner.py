@@ -64,10 +64,11 @@ class ArbitrageScanner:
         talos_id: int = 0,
         fractional_trading_enabled: bool = False,
         tick_bps: int = 100,
-    ) -> None:
-        """Register a pair of markets to monitor."""
-        if any(p.event_ticker == event_ticker for p in self._pairs):
-            return
+    ) -> int:
+        """Register a pair of markets to monitor. Returns the assigned talos_id."""
+        existing = next((p for p in self._pairs if p.event_ticker == event_ticker), None)
+        if existing is not None:
+            return existing.talos_id
         assigned_id = talos_id if talos_id > 0 else self._next_id
         self._next_id = max(self._next_id, assigned_id + 1)
         pair = ArbPair(
@@ -108,6 +109,7 @@ class ArbitrageScanner:
             ),
         )
         logger.info("scanner_pair_added", event_ticker=event_ticker, a=ticker_a, b=ticker_b)
+        return assigned_id
 
     def remove_pair(self, event_ticker: str) -> None:
         """Remove a pair by event ticker."""

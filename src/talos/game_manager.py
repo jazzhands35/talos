@@ -469,7 +469,7 @@ class GameManager:
             fractional_trading_enabled=pair_fractional,
             tick_bps=pair_tick_bps,
         )
-        self._scanner.add_pair(
+        assigned_id = self._scanner.add_pair(
             event.event_ticker,
             ticker_a,
             ticker_b,
@@ -480,6 +480,10 @@ class GameManager:
             fractional_trading_enabled=pair_fractional,
             tick_bps=pair_tick_bps,
         )
+        # Re-stamp so self._games carries the actually-assigned id (the
+        # persist-zero bug: scanner had the id, game_manager's parallel
+        # ArbPair kept talos_id=0).
+        pair = pair.model_copy(update={"talos_id": assigned_id})
         if subscribe:
             await self._feed.subscribe(ticker_a)
             await self._feed.subscribe(ticker_b)
@@ -562,7 +566,7 @@ class GameManager:
             fractional_trading_enabled=market.fractional_trading_enabled,
             tick_bps=market.tick_bps(),
         )
-        self._scanner.add_pair(
+        assigned_id = self._scanner.add_pair(
             market.ticker,
             market.ticker,
             market.ticker,
@@ -576,6 +580,10 @@ class GameManager:
             fractional_trading_enabled=market.fractional_trading_enabled,
             tick_bps=market.tick_bps(),
         )
+        # Re-stamp so self._games carries the actually-assigned id (the
+        # persist-zero bug: scanner had the id, game_manager's parallel
+        # ArbPair kept talos_id=0).
+        pair = pair.model_copy(update={"talos_id": assigned_id})
         if subscribe:
             await self._feed.subscribe(market.ticker)
         self._games[market.ticker] = pair
@@ -662,7 +670,7 @@ class GameManager:
         # Shape defaults kept — Market objects are not in scope during
         # restore (we only have the cached dict). The bigger restore-path
         # admission story is handled by Task 8 (quarantined startup restore).
-        self._scanner.add_pair(
+        assigned_id = self._scanner.add_pair(
             event_ticker,
             ticker_a,
             ticker_b,
@@ -675,6 +683,11 @@ class GameManager:
             expected_expiration_time=pair.expected_expiration_time,
             talos_id=talos_id,
         )
+        # Re-stamp so self._games carries the actually-assigned id (the
+        # persist-zero bug: scanner had the id, game_manager's parallel
+        # ArbPair kept talos_id=0 because it was constructed before add_pair
+        # assigned the id).
+        pair = pair.model_copy(update={"talos_id": assigned_id})
         self._games[event_ticker] = pair
         if "sub_title" in data:
             self._subtitles[event_ticker] = str(data["sub_title"])

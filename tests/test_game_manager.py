@@ -71,6 +71,7 @@ class TestGameManager:
     @pytest.fixture()
     def mock_scanner(self) -> ArbitrageScanner:
         scanner = MagicMock(spec=ArbitrageScanner)
+        scanner.add_pair.return_value = 1  # type: ignore[union-attr]
         return scanner
 
     @pytest.fixture()
@@ -324,6 +325,7 @@ class TestSportsBlock:
         feed.subscribe_bulk = AsyncMock()
         feed.unsubscribe = AsyncMock()
         scanner = MagicMock(spec=ArbitrageScanner)
+        scanner.add_pair.return_value = 1  # type: ignore[union-attr]
         return rest, feed, scanner
 
     def test_scan_series_alias_matches_sports_series(self) -> None:
@@ -541,6 +543,7 @@ class TestSeriesTicker:
         feed.subscribe_bulk = AsyncMock()
         feed.unsubscribe = AsyncMock()
         scanner = MagicMock(spec=ArbitrageScanner)
+        scanner.add_pair.return_value = 1  # type: ignore[union-attr]
         return rest, feed, scanner
 
     def test_arb_pair_has_series_ticker_field_with_default(self) -> None:
@@ -851,6 +854,7 @@ class TestNonSportsScan:
         feed.subscribe = AsyncMock()
         feed.subscribe_bulk = AsyncMock()
         scanner = MagicMock(spec=ArbitrageScanner)
+        scanner.add_pair.return_value = 1  # type: ignore[union-attr]
         return GameManager(
             rest=mock_rest,
             feed=feed,
@@ -964,6 +968,7 @@ class TestTickerBlacklist:
         feed.subscribe_bulk = AsyncMock()
         feed.unsubscribe = AsyncMock()
         scanner = MagicMock(spec=ArbitrageScanner)
+        scanner.add_pair.return_value = 1  # type: ignore[union-attr]
         return GameManager(
             rest=mock_rest,
             feed=feed,
