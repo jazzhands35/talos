@@ -51,7 +51,7 @@ class ArbitrageScanner:
         self._opportunities: dict[str, Opportunity] = {}
         self._all_snapshots: dict[str, Opportunity] = {}
         self._sorted_cache: list[Opportunity] | None = None
-        self._next_id: int = 1
+        self._next_id: int = 1_001  # minimum valid encoded talos_id (00.01.001)
         self._id_assigner = id_assigner
 
     def add_pair(

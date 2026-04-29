@@ -76,7 +76,7 @@ def _make_pair(
     event_ticker: str = "EVT-1",
     ticker_a: str = "TK-A",
     ticker_b: str = "TK-B",
-    talos_id: int = 35,
+    talos_id: int = 2604035,
     close_time: str | None = None,
 ) -> ArbPair:
     return ArbPair(

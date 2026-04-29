@@ -57,6 +57,7 @@ from talos.rebalance import (
 from talos.rebalance import execute_rebalance as _execute_rebalance
 from talos.rest_client import KalshiRESTClient
 from talos.scanner import ArbitrageScanner
+from talos.talos_id import format_talos_id
 from talos.ticker_feed import TickerFeed
 from talos.top_of_market import TopOfMarketTracker
 from talos.units import (
@@ -361,7 +362,7 @@ class TradingEngine:
         """Resolve event ticker to short human-readable label with Talos ID prefix."""
         tid = self._scanner.get_talos_id(event_ticker)
         label = self._game_manager.labels.get(event_ticker, event_ticker)
-        return f"#{tid} {label}" if tid else label
+        return f"#{format_talos_id(tid)} {label}" if tid else label
 
     @property
     def event_positions(self) -> dict[str, EventPosition]:
@@ -3332,7 +3333,7 @@ class TradingEngine:
             queue_k = f"{queue_pos / 1000:.0f}k" if queue_pos >= 1000 else str(queue_pos)
 
             summary = (
-                f"QUEUE: #{pair.talos_id} {name} "
+                f"QUEUE: #{format_talos_id(pair.talos_id)} {name} "
                 f"{resting_price}c → {improved_price}c "
                 f"(queue {queue_k}, ETA {eta_str}, game in {tr_str})"
             )

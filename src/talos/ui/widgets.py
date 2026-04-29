@@ -17,9 +17,15 @@ from talos.fees import fee_adjusted_cost_bps
 from talos.game_status import ESTIMATED_DETAIL, GameStatus
 from talos.models.position import EventPositionSummary
 from talos.scanner import ArbitrageScanner
+from talos.talos_id import format_talos_id
 from talos.top_of_market import TopOfMarketTracker
 from talos.ui.theme import BLUE, GREEN, PEACH, RED, SUBTEXT0, SURFACE0, SURFACE2, YELLOW
 from talos.units import ONE_CENT_BPS, bps_to_cents_round
+
+
+def _format_id_cell(value: int) -> str:
+    """Render a talos_id int as YY.MM.NNN, or '—' for unassigned."""
+    return format_talos_id(value)
 
 
 def _fmt_cents(value: int) -> RichText:
@@ -289,7 +295,7 @@ class _ColSpec(NamedTuple):
 # Full table layout — compact mode hides columns with compact=False.
 # Widths are tightened vs. the original to save ~14 chars total.
 _COL_SPECS: tuple[_ColSpec, ...] = (
-    _ColSpec("id", "#", 3, "right", False, "talos_id"),
+    _ColSpec("id", "#", 9, "right", False, "talos_id"),
     _ColSpec("dot", "", 2, "center", False),
     _ColSpec("team", "Team", 14, "left", True, "label"),
     _ColSpec("sport", "Sport", 5, "left", False, "sport"),
@@ -728,7 +734,7 @@ class OpportunitiesTable(DataTable):
         """Build two row tuples (row1=team_a, row2=team_b) for one event."""
         # Talos ID
         tid = self._talos_ids.get(opp.event_ticker, 0)
-        id_cell = RichText(str(tid), justify="right") if tid else ""
+        id_cell = RichText(_format_id_cell(tid), justify="right") if tid else ""
 
         # Team names
         team_a, team_b = self._leg_labels.get(opp.event_ticker, (opp.ticker_a, opp.ticker_b))
