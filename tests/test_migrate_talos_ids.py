@@ -110,3 +110,51 @@ def test_migrate_spans_multiple_months(tmp_path: Path) -> None:
     assert by_ticker["MAR-EVT"] == 2603001
     assert by_ticker["APR-EVT-1"] == 2604001
     assert by_ticker["APR-EVT-2"] == 2604002
+
+
+def test_migrate_dry_run_does_not_modify_json(tmp_path: Path) -> None:
+    db = sqlite3.connect(":memory:")
+    ensure_counter_schema(db)
+    _seed_game_adds(db, [("2026-04-10T12:00:00+00:00", "EVT-A")])
+    games_json = tmp_path / "games_full.json"
+    initial = {
+        "schema_version": 1,
+        "games": [
+            {"event_ticker": "EVT-A", "talos_id": 0, "ticker_a": "x", "ticker_b": "y"},
+        ],
+    }
+    games_json.write_text(json.dumps(initial))
+    migrate(db=db, games_path=games_json, dry_run=True)
+    after = json.loads(games_json.read_text())
+    # JSON unchanged
+    assert after == initial
+    # Counter unchanged
+    assert peek_seq(db, year=2026, month=4) == 0
+
+
+def test_migrate_dry_run_then_real_run_yields_same_assignments(tmp_path: Path) -> None:
+    """Dry run + real run should produce the same talos_ids."""
+    db = sqlite3.connect(":memory:")
+    ensure_counter_schema(db)
+    _seed_game_adds(db, [
+        ("2026-04-10T12:00:00+00:00", "EVT-A"),
+        ("2026-04-15T12:00:00+00:00", "EVT-B"),
+    ])
+    games_json = tmp_path / "games_full.json"
+    games_json.write_text(json.dumps({
+        "schema_version": 1,
+        "games": [
+            {"event_ticker": "EVT-A", "talos_id": 0, "ticker_a": "x", "ticker_b": "y"},
+            {"event_ticker": "EVT-B", "talos_id": 0, "ticker_a": "x", "ticker_b": "y"},
+        ],
+    }))
+
+    migrate(db=db, games_path=games_json, dry_run=True)
+    # JSON not yet modified
+    assert all(g["talos_id"] == 0 for g in json.loads(games_json.read_text())["games"])
+
+    migrate(db=db, games_path=games_json, dry_run=False)
+    after = {g["event_ticker"]: g["talos_id"] for g in json.loads(games_json.read_text())["games"]}
+    # Real run produced the IDs the dry run would have shown
+    assert after["EVT-A"] == 2604001
+    assert after["EVT-B"] == 2604002

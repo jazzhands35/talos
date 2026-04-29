@@ -42,59 +42,88 @@ def _first_seen_for_tickers(
     ).fetchall()
     out: dict[str, datetime] = {}
     for ticker, ts in rows:
-        if ts is None:
-            continue
         out[ticker] = datetime.fromisoformat(ts)
     return out
 
 
-def migrate(*, db: sqlite3.Connection, games_path: Path) -> None:
+def migrate(*, db: sqlite3.Connection, games_path: Path, dry_run: bool = False) -> None:
     """Run the migration. Idempotent — pairs with talos_id != 0 are left alone."""
     ensure_counter_schema(db)
-    payload = json.loads(games_path.read_text())
-    games = payload["games"]
 
-    needs_migration = [g for g in games if int(g.get("talos_id", 0)) == 0]
-    if not needs_migration:
-        print("All pairs already have talos_id assigned. No migration needed.")
-        return
+    # Dry-run snapshot: capture current counter state to restore after.
+    counter_snapshot: list[tuple[int, int]] = []
+    if dry_run:
+        counter_snapshot = list(
+            db.execute("SELECT year_month, last_seq FROM talos_id_counter").fetchall()
+        )
 
-    tickers = [g["event_ticker"] for g in needs_migration]
-    first_seen = _first_seen_for_tickers(db, tickers)
+    try:
+        payload = json.loads(games_path.read_text())
+        games = payload["games"]
 
-    now_local = datetime.now(_LOCAL_TZ)
-    fallback_dt = now_local
+        needs_migration = [g for g in games if int(g.get("talos_id", 0)) == 0]
+        if not needs_migration:
+            print("All pairs already have talos_id assigned. No migration needed.")
+            return
 
-    def _sort_key(g: dict) -> tuple[int, datetime]:
-        ts = first_seen.get(g["event_ticker"])
-        return (0, ts) if ts is not None else (1, fallback_dt)
+        tickers = [g["event_ticker"] for g in needs_migration]
+        first_seen = _first_seen_for_tickers(db, tickers)
 
-    needs_migration.sort(key=_sort_key)
+        now_local = datetime.now(_LOCAL_TZ)
+        fallback_dt = now_local
 
-    assignments: dict[str, int] = {}
-    for g in needs_migration:
-        ticker = g["event_ticker"]
-        ts = first_seen.get(ticker, fallback_dt).astimezone(_LOCAL_TZ)
-        seq = bump_seq(db, year=ts.year, month=ts.month)
-        assignments[ticker] = encode_talos_id(year=ts.year, month=ts.month, seq=seq)
+        def _sort_key(g: dict) -> tuple[int, datetime]:
+            ts = first_seen.get(g["event_ticker"])
+            return (0, ts) if ts is not None else (1, fallback_dt)
 
-    for g in games:
-        if int(g.get("talos_id", 0)) == 0 and g["event_ticker"] in assignments:
-            g["talos_id"] = assignments[g["event_ticker"]]
+        needs_migration.sort(key=_sort_key)
 
-    games_path.write_text(json.dumps(payload, indent=2))
-    print(f"Migrated {len(assignments)} pairs.")
-    for ticker, tid in sorted(assignments.items(), key=lambda x: x[1]):
-        print(f"  {format_talos_id(tid)}  {ticker}")
+        assignments: dict[str, int] = {}
+        for g in needs_migration:
+            ticker = g["event_ticker"]
+            ts = first_seen.get(ticker, fallback_dt).astimezone(_LOCAL_TZ)
+            seq = bump_seq(db, year=ts.year, month=ts.month)
+            assignments[ticker] = encode_talos_id(year=ts.year, month=ts.month, seq=seq)
+
+        if dry_run:
+            print(f"[DRY RUN] Would migrate {len(assignments)} pairs:")
+            for ticker, tid in sorted(assignments.items(), key=lambda x: x[1]):
+                print(f"  {format_talos_id(tid)}  {ticker}")
+            print("[DRY RUN] No changes written. Re-run without --dry-run to apply.")
+            return
+
+        for g in games:
+            if int(g.get("talos_id", 0)) == 0 and g["event_ticker"] in assignments:
+                g["talos_id"] = assignments[g["event_ticker"]]
+
+        games_path.write_text(json.dumps(payload, indent=2))
+        print(f"Migrated {len(assignments)} pairs.")
+        for ticker, tid in sorted(assignments.items(), key=lambda x: x[1]):
+            print(f"  {format_talos_id(tid)}  {ticker}")
+    finally:
+        if dry_run:
+            # Restore counter to pre-migration state.
+            db.execute("DELETE FROM talos_id_counter")
+            for year_month, last_seq in counter_snapshot:
+                db.execute(
+                    "INSERT INTO talos_id_counter(year_month, last_seq) VALUES (?, ?)",
+                    (year_month, last_seq),
+                )
+            db.commit()
 
 
 def _main() -> None:
     p = argparse.ArgumentParser()
     p.add_argument("--db", default="talos_data.db")
     p.add_argument("--games", default="games_full.json")
+    p.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Print what would be assigned without modifying anything.",
+    )
     args = p.parse_args()
     db = sqlite3.connect(args.db)
-    migrate(db=db, games_path=Path(args.games))
+    migrate(db=db, games_path=Path(args.games), dry_run=args.dry_run)
 
 
 if __name__ == "__main__":
