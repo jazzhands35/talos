@@ -79,6 +79,12 @@ tree_metadata.json
 talos_startup_dump.txt
 tools/_series_cache.json
 
+# Backups from migration / drift-correction scripts
+# (`scripts/migrate_talos_ids.py` writes `.bak.before-...-<timestamp>`,
+# `scripts/drift_report.py --apply` writes `.bak.<unix-ts>`)
+games_full.json.bak.*
+talos_data.db.bak.*
+
 # Agent runtime artifacts
 .brainstorm-codex-loop/
 .claude/brainstorm-codex-loop/
