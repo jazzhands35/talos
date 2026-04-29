@@ -71,6 +71,43 @@ def _close_logging() -> None:
         _LOG_FILE_HANDLE = None
 
 
+def _install_global_excepthook() -> None:
+    """Capture any unhandled exception that escapes ``main()``.
+
+    The try/except around ``app.run()`` is the primary crash logger, but if
+    anything escapes ``main`` itself — early-import failures, exceptions in
+    setup code that runs before ``app.run()``, or BaseException subclasses
+    like ``SystemExit`` raised from deep in startup — Python's default
+    excepthook prints to stderr and the terminal closes before the trace can
+    be read. This hook writes the same ``talos_crash.log`` format so the
+    trace is recoverable.
+    """
+    import traceback
+    from datetime import UTC, datetime
+
+    from talos.persistence import get_data_dir
+
+    crash_log_path = get_data_dir() / "talos_crash.log"
+
+    def _hook(exc_type: type[BaseException], exc_value: BaseException, exc_tb: object) -> None:
+        if issubclass(exc_type, KeyboardInterrupt):
+            sys.__excepthook__(exc_type, exc_value, exc_tb)  # type: ignore[arg-type]
+            return
+        try:
+            with open(crash_log_path, "a", encoding="utf-8") as f:
+                f.write(f"\n{'=' * 60}\n")
+                f.write(f"UNCAUGHT at {datetime.now(UTC).isoformat()}\n")
+                f.write(f"  type: {exc_type.__name__}\n")
+                f.write(f"  msg:  {exc_value}\n")
+                f.write(f"{'=' * 60}\n")
+                traceback.print_exception(exc_type, exc_value, exc_tb, file=f)  # type: ignore[arg-type]
+        except Exception:
+            pass  # last-ditch: don't let crash-log failure mask the original
+        sys.__excepthook__(exc_type, exc_value, exc_tb)  # type: ignore[arg-type]
+
+    sys.excepthook = _hook
+
+
 def _load_dotenv() -> None:
     """Load .env file from data directory if it exists."""
     from talos.persistence import get_data_dir
@@ -214,6 +251,7 @@ async def _run_diagnostics() -> None:
 def main() -> None:
     """Launch the Talos dashboard."""
     _configure_logging()
+    _install_global_excepthook()
 
     # Frozen mode (PyInstaller): set data dir to exe's directory
     if getattr(sys, "frozen", False):
@@ -541,17 +579,25 @@ def main() -> None:
     _app_ref.append(app)
     try:
         app.run()
-    except Exception:
-        # Capture crash traceback so it's not lost when the window closes
+    except BaseException as exc:
+        # Capture crash traceback so it's not lost when the window closes.
+        # Caught at BaseException (not Exception) so we also capture
+        # asyncio.CancelledError and SystemExit, which previously slipped
+        # through silently — the 2026-04-29 crash that produced no
+        # talos_crash.log was traced to exactly this gap.
+        if isinstance(exc, KeyboardInterrupt):
+            raise  # Ctrl+C exits cleanly without a crash-log entry
         import traceback
         from datetime import UTC, datetime
 
         from talos.persistence import get_data_dir
 
         crash_log = get_data_dir() / "talos_crash.log"
-        with open(crash_log, "a") as f:
+        with open(crash_log, "a", encoding="utf-8") as f:
             f.write(f"\n{'=' * 60}\n")
             f.write(f"CRASH at {datetime.now(UTC).isoformat()}\n")
+            f.write(f"  type: {type(exc).__name__}\n")
+            f.write(f"  msg:  {exc}\n")
             f.write(f"{'=' * 60}\n")
             traceback.print_exc(file=f)
         raise
