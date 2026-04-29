@@ -34,6 +34,7 @@ packages = ["src/talos"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+pythonpath = ["."]
 asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
 cache_dir = ".pytest_cache_local"
