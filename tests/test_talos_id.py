@@ -134,6 +134,8 @@ def test_bump_seq_overflow_raises() -> None:
     conn.commit()
     with pytest.raises(InvalidTalosIdError):
         bump_seq(conn, year=2026, month=4)
+    post = peek_seq(conn, year=2026, month=4)
+    assert post == 999, f"rollback failed: persisted {post} instead of 999"
 
 
 def test_bump_seq_rejects_invalid_month() -> None:
