@@ -79,6 +79,11 @@ class ArbitrageScanner:
             assigned_id = talos_id
         elif self._id_assigner is not None:
             assigned_id = self._id_assigner()
+            if assigned_id <= 0:
+                raise ValueError(
+                    f"id_assigner returned non-positive talos_id ({assigned_id}); "
+                    f"expected a value > 0"
+                )
         else:
             assigned_id = self._next_id
         self._next_id = max(self._next_id, assigned_id + 1)

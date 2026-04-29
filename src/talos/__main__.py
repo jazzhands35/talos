@@ -293,12 +293,11 @@ def main() -> None:
     settings = load_settings()
     unit_size = int(settings.get("unit_size", DEFAULT_UNIT_SIZE))  # type: ignore[arg-type]
     from talos.persistence import get_data_dir
-    from talos.talos_id import ensure_counter_schema, next_id
+    from talos.talos_id import next_id
 
     _db_dir = get_data_dir()
     data_collector = DataCollector(_db_dir / "talos_data.db")
-    ensure_counter_schema(data_collector._db)
-    scanner = ArbitrageScanner(books, id_assigner=lambda: next_id(data_collector._db))
+    scanner = ArbitrageScanner(books, id_assigner=lambda: next_id(data_collector.db))
     tracker = TopOfMarketTracker(books)
     # Tree mode is always on in production — see AutomationConfig.tree_mode.
     # The launch-path env var was removed so double-clicking Talos.exe gets

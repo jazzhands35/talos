@@ -498,3 +498,13 @@ class TestIdAssigner:
         assigned = scanner.add_pair("E1", "E1-A", "E1-B", talos_id=42)
         assert assigned == 42
         assert calls == []  # assigner was never called
+
+    def test_scanner_rejects_nonpositive_id_from_assigner(self) -> None:
+        """If id_assigner returns 0 or negative, scanner must raise rather than
+        register an ArbPair with talos_id=0 (the persist-zero corruption state)."""
+        from talos.orderbook import OrderBookManager
+        from talos.scanner import ArbitrageScanner
+
+        scanner = ArbitrageScanner(OrderBookManager(), id_assigner=lambda: 0)
+        with pytest.raises(ValueError, match="non-positive"):
+            scanner.add_pair("E1", "E1-A", "E1-B")

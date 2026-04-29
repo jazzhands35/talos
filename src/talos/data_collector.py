@@ -196,6 +196,11 @@ class DataCollector:
         self._db.commit()
         logger.info("data_collector_initialized", path=str(db_path))
 
+    @property
+    def db(self) -> sqlite3.Connection:
+        """SQLite connection for callers that need to share the DB with this collector."""
+        return self._db
+
     def close(self) -> None:
         self._db.close()
 
