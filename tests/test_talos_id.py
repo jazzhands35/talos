@@ -2,13 +2,18 @@
 
 from __future__ import annotations
 
+import sqlite3
+
 import pytest
 
 from talos.talos_id import (
     InvalidTalosIdError,
+    bump_seq,
     encode_talos_id,
+    ensure_counter_schema,
     format_talos_id,
     parse_talos_id,
+    peek_seq,
 )
 
 
@@ -81,3 +86,60 @@ def test_format_rejects_out_of_band_month() -> None:
     # 2613001 looks like 26.13.001 which encode would reject.
     with pytest.raises(InvalidTalosIdError):
         format_talos_id(2_613_001)
+
+
+def test_counter_starts_empty() -> None:
+    conn = sqlite3.connect(":memory:")
+    ensure_counter_schema(conn)
+    assert peek_seq(conn, year=2026, month=4) == 0
+
+
+def test_bump_seq_returns_next_value() -> None:
+    conn = sqlite3.connect(":memory:")
+    ensure_counter_schema(conn)
+    assert bump_seq(conn, year=2026, month=4) == 1
+    assert bump_seq(conn, year=2026, month=4) == 2
+    assert bump_seq(conn, year=2026, month=4) == 3
+
+
+def test_bump_seq_resets_per_month() -> None:
+    conn = sqlite3.connect(":memory:")
+    ensure_counter_schema(conn)
+    assert bump_seq(conn, year=2026, month=4) == 1
+    assert bump_seq(conn, year=2026, month=4) == 2
+    assert bump_seq(conn, year=2026, month=5) == 1
+    assert bump_seq(conn, year=2026, month=4) == 3  # April resumes
+
+
+def test_bump_seq_persists_across_connections(tmp_path) -> None:
+    path = tmp_path / "test.db"
+    c1 = sqlite3.connect(path)
+    ensure_counter_schema(c1)
+    assert bump_seq(c1, year=2026, month=4) == 1
+    assert bump_seq(c1, year=2026, month=4) == 2
+    c1.close()
+    c2 = sqlite3.connect(path)
+    ensure_counter_schema(c2)
+    assert bump_seq(c2, year=2026, month=4) == 3
+
+
+def test_bump_seq_overflow_raises() -> None:
+    conn = sqlite3.connect(":memory:")
+    ensure_counter_schema(conn)
+    # Fast-forward to 999 then bump once more
+    conn.execute(
+        "INSERT OR REPLACE INTO talos_id_counter(year_month, last_seq) VALUES (?, ?)",
+        (2026 * 100 + 4, 999),
+    )
+    conn.commit()
+    with pytest.raises(InvalidTalosIdError):
+        bump_seq(conn, year=2026, month=4)
+
+
+def test_bump_seq_rejects_invalid_month() -> None:
+    conn = sqlite3.connect(":memory:")
+    ensure_counter_schema(conn)
+    with pytest.raises(InvalidTalosIdError):
+        bump_seq(conn, year=2026, month=13)
+    with pytest.raises(InvalidTalosIdError):
+        bump_seq(conn, year=2026, month=0)

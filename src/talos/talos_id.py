@@ -18,6 +18,8 @@ The integer form sorts chronologically by add-time.
 
 from __future__ import annotations
 
+import sqlite3
+
 UNASSIGNED_DISPLAY = "—"
 
 
@@ -72,3 +74,54 @@ def parse_talos_id(text: str) -> int:
         raise InvalidTalosIdError(f"part widths must be 2/2/3: {text!r}")
     yy, mm, nnn = (int(p) for p in parts)
     return encode_talos_id(year=yy, month=mm, seq=nnn)
+
+
+# ── Persistent monthly counter ─────────────────────────────────────────────
+
+_COUNTER_SCHEMA = """
+CREATE TABLE IF NOT EXISTS talos_id_counter (
+    year_month INTEGER PRIMARY KEY,
+    last_seq INTEGER NOT NULL
+);
+"""
+
+
+def ensure_counter_schema(conn: sqlite3.Connection) -> None:
+    """Create the counter table if it doesn't exist. Idempotent."""
+    conn.execute(_COUNTER_SCHEMA)
+    conn.commit()
+
+
+def _year_month_key(year: int, month: int) -> int:
+    if not 1 <= month <= 12:
+        raise InvalidTalosIdError(f"month must be 1-12, got {month}")
+    return year * 100 + month
+
+
+def peek_seq(conn: sqlite3.Connection, *, year: int, month: int) -> int:
+    """Return the current ``last_seq`` for the given month, or 0 if none."""
+    row = conn.execute(
+        "SELECT last_seq FROM talos_id_counter WHERE year_month = ?",
+        (_year_month_key(year, month),),
+    ).fetchone()
+    return int(row[0]) if row is not None else 0
+
+
+def bump_seq(conn: sqlite3.Connection, *, year: int, month: int) -> int:
+    """Atomically increment and return the next seq for the given month.
+
+    Raises ``InvalidTalosIdError`` if the seq would exceed 999.
+    """
+    key = _year_month_key(year, month)
+    cur = peek_seq(conn, year=year, month=month)
+    nxt = cur + 1
+    if nxt > 999:
+        raise InvalidTalosIdError(
+            f"seq exhausted for {year:04d}-{month:02d} (>999 adds)"
+        )
+    conn.execute(
+        "INSERT OR REPLACE INTO talos_id_counter(year_month, last_seq) VALUES (?, ?)",
+        (key, nxt),
+    )
+    conn.commit()
+    return nxt

@@ -178,6 +178,11 @@ CREATE TABLE IF NOT EXISTS event_outcomes (
     time_to_start REAL,
     fill_duration REAL
 );
+
+CREATE TABLE IF NOT EXISTS talos_id_counter (
+    year_month INTEGER PRIMARY KEY,
+    last_seq INTEGER NOT NULL
+);
 """
 
 
