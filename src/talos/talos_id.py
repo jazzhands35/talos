@@ -146,7 +146,10 @@ def bump_seq(conn: sqlite3.Connection, *, year: int, month: int) -> int:
 
 # ── Local-time next ID ─────────────────────────────────────────────────────
 
-_LOCAL_TZ = ZoneInfo("America/Los_Angeles")  # User's local timezone (Pacific).
+# Business timezone for month-boundary assignment. Fixed to Pacific
+# regardless of host system timezone — month boundaries are determined
+# by the operator's working day, not the server's clock.
+_LOCAL_TZ = ZoneInfo("America/Los_Angeles")
 
 
 def next_id(conn: sqlite3.Connection, *, now: datetime | None = None) -> int:

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import sqlite3
-from datetime import datetime
+from datetime import UTC, datetime
 from zoneinfo import ZoneInfo
 
 import pytest
@@ -166,6 +166,15 @@ def test_next_id_uses_local_time_for_month_boundary() -> None:
         2026, 4, 30, 23, 30, tzinfo=ZoneInfo("America/Los_Angeles")
     )
     assert next_id(conn, now=late_april_local) == 2604001
+
+
+def test_next_id_converts_utc_input_to_local() -> None:
+    """A UTC datetime that's still April in Pacific must yield 26.04.NNN."""
+    conn = sqlite3.connect(":memory:")
+    ensure_counter_schema(conn)
+    # 06:30 UTC on May 1, 2026 = 23:30 PT on April 30 — still April locally.
+    utc_moment = datetime(2026, 5, 1, 6, 30, tzinfo=UTC)
+    assert next_id(conn, now=utc_moment) == 2604001
 
 
 def test_next_id_rejects_naive_datetime() -> None:
