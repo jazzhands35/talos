@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import sqlite3
+from datetime import datetime
+from zoneinfo import ZoneInfo
 
 import pytest
 
@@ -12,6 +14,7 @@ from talos.talos_id import (
     encode_talos_id,
     ensure_counter_schema,
     format_talos_id,
+    next_id,
     parse_talos_id,
     peek_seq,
 )
@@ -145,3 +148,28 @@ def test_bump_seq_rejects_invalid_month() -> None:
         bump_seq(conn, year=2026, month=13)
     with pytest.raises(InvalidTalosIdError):
         bump_seq(conn, year=2026, month=0)
+
+
+def test_next_id_assigns_for_current_local_month() -> None:
+    conn = sqlite3.connect(":memory:")
+    ensure_counter_schema(conn)
+    now = datetime(2026, 4, 28, 12, 0, tzinfo=ZoneInfo("America/Los_Angeles"))
+    assert next_id(conn, now=now) == 2604001
+    assert next_id(conn, now=now) == 2604002
+
+
+def test_next_id_uses_local_time_for_month_boundary() -> None:
+    conn = sqlite3.connect(":memory:")
+    ensure_counter_schema(conn)
+    # 23:30 local on April 30 — local month is still April, even though UTC is May.
+    late_april_local = datetime(
+        2026, 4, 30, 23, 30, tzinfo=ZoneInfo("America/Los_Angeles")
+    )
+    assert next_id(conn, now=late_april_local) == 2604001
+
+
+def test_next_id_rejects_naive_datetime() -> None:
+    conn = sqlite3.connect(":memory:")
+    ensure_counter_schema(conn)
+    with pytest.raises(InvalidTalosIdError):
+        next_id(conn, now=datetime(2026, 4, 28, 12, 0))  # no tzinfo

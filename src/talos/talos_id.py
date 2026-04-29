@@ -19,6 +19,8 @@ The integer form sorts chronologically by add-time.
 from __future__ import annotations
 
 import sqlite3
+from datetime import datetime
+from zoneinfo import ZoneInfo
 
 UNASSIGNED_DISPLAY = "—"
 
@@ -140,3 +142,26 @@ def bump_seq(conn: sqlite3.Connection, *, year: int, month: int) -> int:
         )
     conn.commit()
     return nxt
+
+
+# ── Local-time next ID ─────────────────────────────────────────────────────
+
+_LOCAL_TZ = ZoneInfo("America/Los_Angeles")  # User's local timezone (Pacific).
+
+
+def next_id(conn: sqlite3.Connection, *, now: datetime | None = None) -> int:
+    """Assign the next ``talos_id`` for the current local month.
+
+    ``now`` defaults to the current local time; pass an aware datetime to
+    test month-boundary behavior. Local time (not UTC) determines the
+    month so that a game added at 23:30 PT on April 30 is ``26.04.NNN``,
+    not ``26.05.NNN``.
+
+    Raises ``InvalidTalosIdError`` if ``now`` is naive (no ``tzinfo``).
+    """
+    moment = now if now is not None else datetime.now(_LOCAL_TZ)
+    if moment.tzinfo is None:
+        raise InvalidTalosIdError("now must be timezone-aware")
+    local = moment.astimezone(_LOCAL_TZ)
+    seq = bump_seq(conn, year=local.year, month=local.month)
+    return encode_talos_id(year=local.year, month=local.month, seq=seq)
