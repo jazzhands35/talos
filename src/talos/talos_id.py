@@ -41,12 +41,25 @@ def encode_talos_id(*, year: int, month: int, seq: int) -> int:
 
 
 def format_talos_id(value: int) -> str:
-    """Render ``value`` as ``"YY.MM.NNN"``; ``0`` renders as ``"—"``."""
+    """Render ``value`` as ``"YY.MM.NNN"``; ``0`` renders as ``"—"``.
+
+    Raises ``InvalidTalosIdError`` for any ``int`` not produced by
+    ``encode_talos_id`` (i.e. outside the inclusive range
+    ``1_001 .. 9_912_999`` and not the zero sentinel).
+    """
     if value == 0:
         return UNASSIGNED_DISPLAY
+    if not 1_001 <= value <= 9_912_999:
+        raise InvalidTalosIdError(
+            f"not a valid encoded talos_id: {value}"
+        )
     yy = value // 100_000
     mm = (value // 1_000) % 100
     nnn = value % 1_000
+    if not 1 <= mm <= 12 or not 1 <= nnn <= 999:
+        raise InvalidTalosIdError(
+            f"not a valid encoded talos_id: {value}"
+        )
     return f"{yy:02d}.{mm:02d}.{nnn:03d}"
 
 

@@ -47,7 +47,37 @@ def test_encode_rejects_out_of_range() -> None:
         encode_talos_id(year=2026, month=4, seq=1000)
     with pytest.raises(InvalidTalosIdError):
         encode_talos_id(year=2026, month=4, seq=0)
+    # Year out-of-range: gap between YY (0-99) and YYYY (1900-2099)
+    with pytest.raises(InvalidTalosIdError):
+        encode_talos_id(year=100, month=1, seq=1)
+    with pytest.raises(InvalidTalosIdError):
+        encode_talos_id(year=1899, month=1, seq=1)
+    with pytest.raises(InvalidTalosIdError):
+        encode_talos_id(year=2100, month=1, seq=1)
 
 
 def test_int_form_sorts_chronologically() -> None:
-    assert 2604001 < 2604999 < 2605001 < 2701001
+    ids = [
+        encode_talos_id(year=26, month=4, seq=1),
+        encode_talos_id(year=26, month=4, seq=999),
+        encode_talos_id(year=26, month=5, seq=1),
+        encode_talos_id(year=27, month=1, seq=1),
+    ]
+    assert ids == sorted(ids)
+
+
+def test_format_rejects_negative() -> None:
+    with pytest.raises(InvalidTalosIdError):
+        format_talos_id(-1)
+
+
+def test_format_rejects_unencoded_int() -> None:
+    # 99001 has month=99 in the YYMMNNN slot — never producible.
+    with pytest.raises(InvalidTalosIdError):
+        format_talos_id(99_001)
+
+
+def test_format_rejects_out_of_band_month() -> None:
+    # 2613001 looks like 26.13.001 which encode would reject.
+    with pytest.raises(InvalidTalosIdError):
+        format_talos_id(2_613_001)
