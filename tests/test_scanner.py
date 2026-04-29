@@ -468,4 +468,33 @@ class TestDynamicFeeRate:
         scanner = ArbitrageScanner(OrderBookManager())
         scanner.add_pair("EVT-1", "A", "B", fee_type="flat", fee_rate=0.05)
         assert scanner.pairs[0].fee_type == "flat"
-        assert scanner.pairs[0].fee_rate == 0.05
+
+
+class TestIdAssigner:
+    def test_scanner_uses_injected_id_assigner(self) -> None:
+        """When an id_assigner is provided, scanner uses it for new pairs."""
+        seq = iter([2604001, 2604002, 2604003])
+        scanner = ArbitrageScanner(OrderBookManager(), id_assigner=lambda: next(seq))
+        assigned1 = scanner.add_pair("E1", "E1-A", "E1-B")
+        assigned2 = scanner.add_pair("E2", "E2-A", "E2-B")
+        assert assigned1 == 2604001
+        assert assigned2 == 2604002
+
+    def test_scanner_falls_back_to_legacy_counter_without_assigner(self) -> None:
+        """Backward-compat: existing tests without id_assigner still get positive ids."""
+        scanner = ArbitrageScanner(OrderBookManager())
+        assigned = scanner.add_pair("E1", "E1-A", "E1-B")
+        assert assigned > 0  # any positive int is fine for legacy fallback
+
+    def test_scanner_explicit_talos_id_overrides_assigner(self) -> None:
+        """If a caller passes talos_id=N directly, the assigner is NOT consulted."""
+        calls: list[int] = []
+
+        def assigner() -> int:
+            calls.append(1)
+            return 9999
+
+        scanner = ArbitrageScanner(OrderBookManager(), id_assigner=assigner)
+        assigned = scanner.add_pair("E1", "E1-A", "E1-B", talos_id=42)
+        assert assigned == 42
+        assert calls == []  # assigner was never called

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from datetime import UTC, datetime
 
 import structlog
@@ -39,7 +40,11 @@ class ArbitrageScanner:
     a list of current opportunities.
     """
 
-    def __init__(self, book_manager: OrderBookManager) -> None:
+    def __init__(
+        self,
+        book_manager: OrderBookManager,
+        id_assigner: Callable[[], int] | None = None,
+    ) -> None:
         self._books = book_manager
         self._pairs: list[ArbPair] = []
         self._pairs_by_ticker: dict[str, list[ArbPair]] = {}
@@ -47,6 +52,7 @@ class ArbitrageScanner:
         self._all_snapshots: dict[str, Opportunity] = {}
         self._sorted_cache: list[Opportunity] | None = None
         self._next_id: int = 1
+        self._id_assigner = id_assigner
 
     def add_pair(
         self,
@@ -69,7 +75,12 @@ class ArbitrageScanner:
         existing = next((p for p in self._pairs if p.event_ticker == event_ticker), None)
         if existing is not None:
             return existing.talos_id
-        assigned_id = talos_id if talos_id > 0 else self._next_id
+        if talos_id > 0:
+            assigned_id = talos_id
+        elif self._id_assigner is not None:
+            assigned_id = self._id_assigner()
+        else:
+            assigned_id = self._next_id
         self._next_id = max(self._next_id, assigned_id + 1)
         pair = ArbPair(
             talos_id=assigned_id,
