@@ -71,6 +71,23 @@ These skills MUST be invoked proactively — do not wait for the user to ask.
 | New feature or behavior change | `superpowers:brainstorming` | BEFORE coding |
 | Implementing from a plan | `superpowers:subagent-driven-development` | During implementation |
 
+## Betting math knowledge (via mimir)
+
+Before claiming anything about betting math or prediction-market mechanics — odds-format conversions, implied probability, vig and devigging, expected value, two-way arbitrage, blended-position composition across spread or total strikes, or Kalshi yes/no semantics — consult the local `mimir` MCP server (registered at user scope — available in every Claude Code session on this machine).
+
+Mimir is the curated wisdom layer for *concepts*, not API shapes. It owns the meanings of "implied probability", "devigged fair line", "MBA consensus", "blended position", etc. It does NOT proxy API knowledge — when a Mimir entry's `cross_refs` points at another MCP (e.g. `kalshi-mcp__lookup_field(yes_price)`), follow the pointer rather than reasoning from memory.
+
+Mandatory consultation pattern:
+
+- Discover what's documented → `mimir__list_concepts`
+- Full plain-English entry for a concept → `mimir__describe_concept(name)`
+- Vocabulary lookup across all entries → `mimir__lookup_term(term)`
+- Full-text search → `mimir__search(query)`
+- Pitfalls only (gotchas section across entries) → `mimir__search_gotchas(query)`
+- Internal + external pointers for an entry → `mimir__cross_refs(name)`
+
+**When you find a betting-math concept that should be documented but isn't**, add a draft entry to `C:/Users/Sean/Documents/Python/Mimir/data/concepts/<slug>.md` (frontmatter shape and conventions in `Mimir/README.md`).
+
 ## Key Conventions
 
 - **Async-first:** Use `async`/`await` for all I/O (HTTP, WebSocket, file). No blocking calls in the event loop.

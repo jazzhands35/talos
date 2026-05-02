@@ -67,6 +67,7 @@ These workflows MUST be invoked proactively — do not wait for the user to ask.
 | Trigger | What to do | When |
 |---------|-----------|------|
 | Any Kalshi API work (REST or WS) | Consult the `kalshi-mcp` MCP server (see below) for endpoint shape, field meanings, and gotchas. | BEFORE writing code |
+| Any Skuld HTTP/SSE consumption work | Consult the `skuld` MCP server (see below) for endpoint shape, SSE event payloads, and gotchas. | BEFORE writing code |
 | Order placement, position tracking, fees | Walk a written safety audit: list each invariant in `brain/principles.md` and explain how the change preserves it. | AFTER changes |
 | `position_ledger.py` / `bid_adjuster.py` changes | Walk a written position-scenario review: enumerate the leg-delta states (cold start, yes ahead by N, no ahead by N, WS-drop window, mid-session restart, dedup overlap) and confirm the change behaves correctly in each. | AFTER changes |
 | Any bug or unexpected behavior | `superpowers:systematic-debugging` | BEFORE proposing fixes |
@@ -89,6 +90,58 @@ Mandatory consultation pattern:
 If the MCP has no entry for the question, consult Kalshi primary docs directly (docs.kalshi.com, kalshi.com/fee-schedule, the fee PDF). Do NOT guess, and do NOT rely on training-data knowledge of Kalshi — the API changes frequently.
 
 **When you find a new Kalshi gotcha**, add it to `C:/Users/Sean/Documents/Python/kalshi-mcp/data/annotations.yaml` so the next agent inherits the lesson. Every entry must carry `source_type` (`kalshi-docs` / `third-party` / `project-empirical`) and `source_urls`; non-`kalshi-docs` entries must also carry `verify_against_kalshi: true`. Tests enforce this.
+
+## Polymarket API Knowledge (via polymarket-mcp)
+
+Before claiming anything about Polymarket CLOB API shape, fields, or behavior, consult the local `polymarket-mcp` MCP server (configured in `.mcp.json`). Same wisdom-layer pattern as `kalshi-mcp`, scoped to Polymarket's CLOB API (markets, book, prices, trades, orders, balance/allowance).
+
+Mandatory consultation pattern:
+
+- Endpoint shape / fields / behavior → `polymarket-mcp__describe_endpoint`
+- A single field's meaning or gotcha → `polymarket-mcp__lookup_field`
+- Concept without knowing the endpoint → `polymarket-mcp__search_gotchas`
+- Plain-English term definition (`condition_id`, `neg_risk`, `proxy wallet`, `tick_size`, `L1`/`L2` auth, `EIP-712`, `ERC1155`, `EOA`, `NegRiskAdapter`, …) → `polymarket-mcp__define_term`
+- Cross-cutting consumer guidance → `polymarket-mcp__list_tips`
+- Actual response shape → `polymarket-mcp__get_example_response`
+
+If the MCP has no entry for the question, consult Polymarket primary docs directly (docs.polymarket.com, github.com/Polymarket/py-clob-client-v2). Do NOT guess, and do NOT rely on training-data knowledge of Polymarket — the API has neg_risk-specific traps and 256-bit token-id precision pitfalls that training data does not reliably encode.
+
+**When you find a new Polymarket gotcha**, add it to `C:/Users/Sean/Documents/Python/polymarket-mcp/data/annotations.yaml` so the next agent inherits the lesson. Every entry must carry `source_type` (`polymarket-docs` / `third-party` / `project-empirical`) and `source_urls`; non-`polymarket-docs` entries must also carry `verify_against_polymarket: true`. Tests enforce this.
+
+## Skuld HTTP/SSE Knowledge (via skuld-mcp)
+
+Before claiming anything about Skuld endpoint shape, fields, or SSE event behavior, consult the local `skuld` MCP server (registered at user scope — available in every Claude Code session on this machine). Skuld is the upstream odds feed (HTTP frontend on `localhost:49002`, three SSE granularity modes, JVM-agent reflection diagnostics). The wisdom layer is built from `Skuld/docs/skuld-http-protocol.md` and the SKULD-NNNN decision records.
+
+Mandatory consultation pattern:
+
+- Endpoint shape / fields / SSE event payload → `skuld__describe_endpoint`
+- A single field's meaning or gotcha → `skuld__lookup_field`
+- Concept without knowing the endpoint → `skuld__search_gotchas`
+- Plain-English term definition (`period`, `LineMap`, `granularity`, `entry_id`, `catalog_version`, `circled`, `ingame`, `delta_mechanism`, `is_live`, …) → `skuld__define_term`
+- Cross-cutting consumer guidance → `skuld__list_tips`
+- Actual captured response shape → `skuld__get_example_response`
+- Live introspection of a running Skuld instance → `skuld__skuld_health`, `skuld__skuld_bookies`, `skuld__skuld_leagues`, `skuld__skuld_snapshot_summary` (hit `localhost:49002` directly; return `{"agent_running": false}` when Skuld is down)
+
+If the MCP has no entry for the question, consult Skuld primary docs at `C:/Users/Sean/Documents/Python/Skuld/docs/skuld-http-protocol.md` and the SKULD-NNNN decision records in `C:/Users/Sean/Documents/Python/Skuld/decisions/`. Skuld is Sean-owned, so its docs are authoritative — the wisdom layer is a re-packaging, not a separate source. Do NOT guess from training data; the wire protocol changes via decision records, not organically.
+
+**When you find a new Skuld gotcha**, add it to `C:/Users/Sean/Documents/Python/skuld-mcp/data/annotations.yaml` so the next agent inherits the lesson. If the gotcha reflects a Skuld-side bug or design choice (not a Talos-side mis-integration), also flag it in a Skuld decision record.
+
+## Betting math knowledge (via mimir)
+
+Before claiming anything about betting math or prediction-market mechanics — odds-format conversions, implied probability, vig and devigging, expected value, two-way arbitrage, blended-position composition across spread or total strikes, or Kalshi yes/no semantics — consult the local `mimir` MCP server (registered at user scope — available in every Claude Code session on this machine).
+
+Mimir is the curated wisdom layer for *concepts*, not API shapes. It owns the meanings of "implied probability", "devigged fair line", "MBA consensus", "blended position", etc. It does NOT proxy API knowledge — when a Mimir entry's `cross_refs` points at another MCP (e.g. `kalshi-mcp__lookup_field(yes_price)`), follow the pointer rather than reasoning from memory.
+
+Mandatory consultation pattern:
+
+- Discover what's documented → `mimir__list_concepts`
+- Full plain-English entry for a concept → `mimir__describe_concept(name)`
+- Vocabulary lookup across all entries → `mimir__lookup_term(term)`
+- Full-text search → `mimir__search(query)`
+- Pitfalls only (gotchas section across entries) → `mimir__search_gotchas(query)`
+- Internal + external pointers for an entry → `mimir__cross_refs(name)`
+
+**When you find a betting-math concept that should be documented but isn't**, add a draft entry to `C:/Users/Sean/Documents/Python/Mimir/data/concepts/<slug>.md` (frontmatter shape and conventions in `Mimir/README.md`). New entries land as `status: draft` and get promoted to `reviewed` / `authoritative` after content review.
 
 ## Key Conventions
 
